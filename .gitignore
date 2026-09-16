@@ -1,0 +1,28 @@
+node_modules
+.md
+
+# 构建产物（本地 vite build / electron-builder 生成，不进仓库）
+dist
+dist-electron
+release
+*.tsbuildinfo
+
+# 备份文件
+*.bak
+*.bak-*
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+*.local
+
+# 日志
+*.log
+npm-debug.log*
+
+# Electron 打包中间文件
+*.dmg
+*.exe
+*.AppImage

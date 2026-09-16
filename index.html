@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self' data: blob: http://localhost:5173 https://esm.sh https://generativelanguage.googleapis.com https://*.googleapis.com https:; script-src 'self' 'unsafe-inline' http://localhost:5173 https://esm.sh; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; connect-src 'self' data: blob: ws://localhost:5173 http://localhost:5173 https://esm.sh https://generativelanguage.googleapis.com https://*.googleapis.com https:; font-src 'self' data: https:; frame-src 'self' https:; worker-src 'self' blob:;" />
+    <title>高级播放器</title>
+    <style>
+        .scrollbar-thin::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .scrollbar-thin::-webkit-scrollbar-track {
+            background: #1e293b;
+        }
+
+        .scrollbar-thin::-webkit-scrollbar-thumb {
+            background-color: #475569;
+            border-radius: 4px;
+        }
+
+        input[type='range'] {
+            -webkit-appearance: none;
+            background: transparent;
+        }
+
+        input[type='range']::-webkit-slider-thumb {
+            -webkit-appearance: none;
+        }
+
+        input[type='range']:focus {
+            outline: none;
+        }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "react": "https://esm.sh/react@^19.2.3",
+          "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+          "react/": "https://esm.sh/react@^19.2.3/",
+          "lucide-react": "https://esm.sh/lucide-react@^0.561.0",
+          "@google/genai": "https://esm.sh/@google/genai@^1.33.0",
+          "hls.js": "https://esm.sh/hls.js@^1.6.15",
+          "vite": "https://esm.sh/vite@^7.2.7",
+          "path": "https://esm.sh/path@^0.12.7",
+          "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2",
+          "url": "https://esm.sh/url@^0.11.4",
+          "electron": "https://esm.sh/electron@^39.2.7",
+          "jszip": "https://esm.sh/jszip@^3.10.1",
+          "@heroicons/react/": "https://esm.sh/@heroicons/react@^2.2.0/",
+          "dom": "https://esm.sh/dom@^0.0.3"
+        }
+      }
+    </script>
+</head>
+
+<body class="bg-slate-950 text-slate-200 overflow-hidden h-screen w-screen">
+    <div id="root" class="h-full w-full"></div>
+    <script type="module" src="/index.tsx"></script>
+</body>
+
+</html>
