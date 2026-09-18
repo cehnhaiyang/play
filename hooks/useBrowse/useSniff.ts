@@ -5,6 +5,13 @@ import { getResolvedApiKey, syncRuntimeApiKey } from '../../services/apiKey';
 import { loadJSON, saveJSON } from '../../utils/persist';
 import { isAcgUrl } from '../../utils';
 
+/**
+ * 本地文件不进嗅探：已在本地的东西无需"发现下载"，属纯噪声；
+ * 且 ACG 落盘页正是 file://（无 hostname，isAcgUrl 认不出），不拦会污染列表。
+ */
+const isFileUrl = (url: unknown): boolean =>
+    typeof url === 'string' && url.trim().toLowerCase().startsWith('file:');
+
 export const CATEGORIES: Record<MediaType, string[]> = {
   stream: ['m3u8', 'm3u', 'mpd', 'ts', 'flv', 'f4v'],
   video: ['mp4', 'mkv', 'webm', 'avi', 'mov', 'wmv', 'ogv', '3gp', 'mpg', 'mpeg', 'm4s'],
@@ -194,9 +201,9 @@ export const useSniff = (options?: UseSniffOptions) => {
   const [foundLinks, setFoundLinks] = useState<FoundLink[]>(() => {
     const saved = loadJSON<FoundLink[]>('sniff-links', []);
     if (!Array.isArray(saved)) return [];
-    // 旧缓存顺带清洗：以前混进来的 ACG 条目在此版不再保留
+    // 旧缓存顺带清洗：以前混进来的 ACG / 本地文件条目在此版不再保留
     return saved
-      .filter((l) => l && typeof l.url === 'string' && !isAcgUrl(l.url) && !isAcgUrl(l.pageUrl) && !isAcgUrl((l as FoundLink).referer))
+      .filter((l) => l && typeof l.url === 'string' && !isFileUrl(l.url) && !isFileUrl(l.pageUrl) && !isFileUrl((l as FoundLink).referer) && !isAcgUrl(l.url) && !isAcgUrl(l.pageUrl) && !isAcgUrl((l as FoundLink).referer))
       .slice(0, 300);
   });
   const [error, setError] = useState('');
@@ -236,9 +243,10 @@ export const useSniff = (options?: UseSniffOptions) => {
 
   const addLinks = useCallback((newLinks: FoundLink[]) => {
     // ACG 专属资源一律不进嗅探列表（走画廊流程）：资源直链在 ACG 域名，
-    // 或挂在 ACG 页面下（pageUrl/referer）。所有入库通道（页内扫描/文本兜底/AI/主进程推送）统一在此拦截
+    // 或挂在 ACG 页面下（pageUrl/referer）。本地 file:// 同样排除（无需发现下载，
+    // 且 ACG 落盘页就是 file://）。所有入库通道（页内扫描/文本兜底/AI/主进程推送）统一在此拦截
     const usable = (newLinks || []).filter(
-      (item) => item && typeof item.url === 'string' && !isAcgUrl(item.url) && !isAcgUrl(item.pageUrl) && !isAcgUrl(item.referer)
+      (item) => item && typeof item.url === 'string' && !isFileUrl(item.url) && !isFileUrl(item.pageUrl) && !isFileUrl(item.referer) && !isAcgUrl(item.url) && !isAcgUrl(item.pageUrl) && !isAcgUrl(item.referer)
     );
     if (usable.length === 0) return;
     setFoundLinks((prev) => {

@@ -85,8 +85,25 @@ async function main() {
     process.exit(0);
   }
 
-  const baseDir = outdir || path.join(process.env.USERPROFILE || process.env.HOME || '.', 'Downloads', 'acgmho');
-  const targetDir = path.join(baseDir, String(probe.gid));
+  // 空范围直接退出：之前会继续跑出 0 页空画廊（manifest + .gallery 照写不误）
+  if (targetPages.length === 0) {
+    console.error(`[!] 页码范围「${pages}」无有效页（总 ${probe.totalPages} 页），请检查 --pages 参数`);
+    process.exit(1);
+  }
+
+  // 与主进程 defaultGalleryRoot 同口径：优先系统主目录，USERPROFILE 在非 Windows 下为空会落到相对路径
+  const os = require('os');
+  const homeDir = (() => {
+    try {
+      return os.homedir();
+    } catch (_e) {
+      return '';
+    }
+  })();
+  const baseDir = outdir || path.join(homeDir || process.env.USERPROFILE || process.env.HOME || '.', 'Downloads', 'acgmho');
+  // 与服务层 defaultGalleryRoot 同口径：叶目录带前缀，/h/123 与 /hentai/123 不互踩
+  const leaf = probe.prefix && probe.prefix !== 'auto' ? `${probe.prefix}-${probe.gid}` : String(probe.gid);
+  const targetDir = path.join(outdir || baseDir, leaf);
 
   console.log(`[*] 保存目录: ${targetDir}`);
   console.log(`[*] 开始下载...`);
@@ -99,10 +116,12 @@ async function main() {
 
   const result = await downloadGallery(
     {
-      gidOrUrl: probe.gid,
+      // 传详情页原文 + 配套 probe：纯数字 gid 重探可能串到同名异帖
+      gidOrUrl: probe.firstPageUrl || gidOrUrl,
       pages: targetPages.join(','),
       outDir: targetDir,
       delayMs: Math.round(delay * 1000),
+      probe,
     },
     (progress) => {
       if (progress.status === 'downloading') {
@@ -116,6 +135,10 @@ async function main() {
 
   console.log(`[=] 清单文件: ${result.manifestPath}`);
   console.log(`[=] 成功下载: ${result.totalDownloaded}/${targetPages.length} 页`);
+  // 全军覆没时非零退出：之前打了 0/N 照样 exit 0，脚本调用方无法感知失败
+  if (!result.success) {
+    process.exitCode = 1;
+  }
 }
 
 main().catch((err) => {

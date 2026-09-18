@@ -1,5 +1,6 @@
 
 import { useState, useCallback, useEffect, useRef } from 'react';
+import { loadJSON, saveJSON } from '../../utils/persist';
 
 export interface Tab {
     id: string;
@@ -18,6 +19,43 @@ export interface Tab {
 
 const generateTabId = () => `tab-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
+/* 标签页落盘：只存可重建的 url/title（webview 内部历史/滚动不跨重启），上限 20 */
+const TABS_STORE_KEY = 'browse-tabs';
+const TABS_STORE_MAX = 20;
+
+interface StoredTab {
+    url: string;
+    title: string;
+}
+
+interface StoredTabs {
+    tabs: StoredTab[];
+    activeIndex: number;
+}
+
+const loadStoredTabs = (): StoredTabs | null => {
+    const saved = loadJSON<StoredTabs | null>(TABS_STORE_KEY, null);
+    if (!saved || !Array.isArray(saved.tabs) || saved.tabs.length === 0) return null;
+    const tabs = saved.tabs
+        .filter((t) => t && typeof t.url === 'string' && t.url.length > 0 && t.url.length <= 4096)
+        .slice(0, TABS_STORE_MAX)
+        .map((t) => ({ url: t.url, title: typeof t.title === 'string' ? t.title.slice(0, 120) : '' }));
+    if (tabs.length === 0) return null;
+    const activeIndex = Number.isInteger(saved.activeIndex) ? saved.activeIndex as number : 0;
+    return { tabs, activeIndex: Math.max(0, Math.min(activeIndex, tabs.length - 1)) };
+};
+
+const makeTab = (url = '', title = ''): Tab => ({
+    id: generateTabId(),
+    url,
+    initialUrl: url,  // 首次创建时 initialUrl 与 url 相同
+    title: title || getTitleFromUrl(url),
+    isLoading: !!url,
+    history: url ? [url] : [],
+    historyIndex: url ? 0 : -1,
+    reloadKey: 0
+});
+
 // 从 URL 提取标题
 const getTitleFromUrl = (url: string): string => {
     if (!url) return '新标签页';
@@ -34,12 +72,29 @@ const getTitleFromUrl = (url: string): string => {
  * 职责：管理多标签页状态、历史记录、导航、加载状态
  */
 export const useTabs = () => {
-    // 标签页列表
-    const [tabs, setTabs] = useState<Tab[]>([
-        { id: generateTabId(), url: '', initialUrl: '', title: '新标签页', isLoading: false, history: [], historyIndex: -1, reloadKey: 0 }
-    ]);
-    // 当前激活的标签页 ID
-    const [activeTabId, setActiveTabId] = useState<string>(tabs[0].id);
+    // 恢复落盘时的活动序号（lazy initializer 内写入，挂载只跑一次）
+    const restoredActiveIndexRef = useRef(0);
+    // 标签页列表（有落盘快照则恢复上次的页面，无则空白新标签页）
+    const [tabs, setTabs] = useState<Tab[]>(() => {
+        const stored = loadStoredTabs();
+        if (stored) {
+            restoredActiveIndexRef.current = stored.activeIndex;
+            return stored.tabs.map((t) => makeTab(t.url, t.title));
+        }
+        return [{ id: generateTabId(), url: '', initialUrl: '', title: '新标签页', isLoading: false, history: [], historyIndex: -1, reloadKey: 0 }];
+    });
+    // 当前激活的标签页 ID（恢复落盘时的活动序号）
+    const [activeTabId, setActiveTabId] = useState<string>(
+        () => tabs[restoredActiveIndexRef.current]?.id ?? tabs[0].id
+    );
+    // 标签页快照落盘：只存 url/title，上限 20 个
+    useEffect(() => {
+        const activeIndex = Math.max(0, tabs.findIndex((t) => t.id === activeTabIdRef.current));
+        saveJSON(TABS_STORE_KEY, {
+            tabs: tabs.slice(0, TABS_STORE_MAX).map((t) => ({ url: t.url, title: t.title })),
+            activeIndex,
+        });
+    }, [tabs, activeTabId]);
     // ref 镜像供 closeTab 等回调读取，避免 updater 内副作用与过期闭包
     const activeTabIdRef = useRef(activeTabId);
     useEffect(() => { activeTabIdRef.current = activeTabId; }, [activeTabId]);
@@ -96,14 +151,14 @@ export const useTabs = () => {
     const navigateTab = useCallback((tabId: string, url: string, isLoading: boolean = true) => {
         setTabs(prev => prev.map(tab => {
             if (tab.id !== tabId) return tab;
-            
+
             // 更新历史记录
             const newHistory = tab.history.slice(0, tab.historyIndex + 1);
             newHistory.push(url);
-            
+
             // 如果 initialUrl 为空（首次导航），同时设置 initialUrl
             const newInitialUrl = tab.initialUrl || url;
-            
+
             return {
                 ...tab,
                 url,
@@ -118,14 +173,14 @@ export const useTabs = () => {
 
     // 更新标签页标题
     const updateTabTitle = useCallback((tabId: string, title: string) => {
-        setTabs(prev => prev.map(tab => 
+        setTabs(prev => prev.map(tab =>
             tab.id === tabId ? { ...tab, title: title || getTitleFromUrl(tab.url) } : tab
         ));
     }, []);
 
     // 设置加载状态
     const setTabLoading = useCallback((tabId: string, isLoading: boolean) => {
-        setTabs(prev => prev.map(tab => 
+        setTabs(prev => prev.map(tab =>
             tab.id === tabId ? { ...tab, isLoading } : tab
         ));
     }, []);
@@ -156,7 +211,7 @@ export const useTabs = () => {
 
     // 返回主页
     const goHome = useCallback((tabId: string) => {
-        setTabs(prev => prev.map(tab => 
+        setTabs(prev => prev.map(tab =>
             tab.id === tabId ? { ...tab, url: '', initialUrl: '', title: '新标签页', isLoading: false, historyIndex: -1, history: [] } : tab
         ));
     }, []);
@@ -190,7 +245,7 @@ export const useTabs = () => {
 
     // 清除待处理导航标记
     const clearPendingNavigation = useCallback((tabId: string) => {
-        setTabs(prev => prev.map(tab => 
+        setTabs(prev => prev.map(tab =>
             tab.id === tabId ? { ...tab, pendingNavigation: undefined } : tab
         ));
     }, []);

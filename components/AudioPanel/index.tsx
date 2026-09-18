@@ -5,8 +5,8 @@ import ChatInterface, { ChatInterfaceRef } from './ChatInterface';
 import CodeEditor from './CodeEditor';
 import Visualizer from './Visualizer';
 import AudioToolbox from './AudioToolbox';
-import { AppState, Message } from '../../meta';
-import { useAudio } from '../../engines'; 
+import { AppState, Message, Project } from '../../meta';
+import { useAudio } from '../../hooks'; 
 import { 
   PlayIcon, StopIcon, ArrowUpTrayIcon, ArchiveBoxArrowDownIcon, 
   SparklesIcon, PlusIcon, TrashIcon, ArrowLeftIcon, 
@@ -22,24 +22,17 @@ interface AudioPanelProps {
 
 export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
   // Use the aggregated Audio Hook
-  const { projects, engine, tools, chat } = useAudio();
+  const audio = useAudio();
+  const { state: audioState, actions: audioActions } = audio;
   
-  // Destructure Projects State & Actions
-  const { 
-      projects: projectList, 
-      activeProjectId, 
-      activeProject,
-      actions: projectActions 
-  } = projects;
-
-  // Destructure Engine State & Actions
-  const { 
-      analyser, 
-      state: engineState, 
-      actions: engineActions 
-  } = engine;
+  const projectList = audioState.projects;
+  const activeProjectId = audioState.activeProjectId;
+  const activeProject = audioState.activeProject;
   
-  const { appState, parserError, autoFixCount } = engineState;
+  const analyser = audioState.analyser;
+  const appState = audioState.appState;
+  const parserError = audioState.parserError;
+  const autoFixCount = audioState.autoFixCount;
 
   // UI Local State
   const [view, setView] = useState<ViewState>('dashboard');
@@ -52,45 +45,45 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
   // --- Handlers ---
 
   const handleCreateProject = useCallback(() => {
-    engineActions.stop();
-    projectActions.createProject();
+    audioActions.stop();
+    audioActions.createProject();
     setView('workspace');
-    engineActions.reset();
+    audioActions.reset();
     if (window.innerWidth < 768) setIsSidebarOpen(false);
-  }, [engineActions, projectActions]);
+  }, [audioActions]);
 
   const handleOpenProject = useCallback((id: string) => {
     if (activeProjectId === id && view === 'workspace') return;
     
-    engineActions.reset();
-    projectActions.setActiveProjectId(id);
+    audioActions.reset();
+    audioActions.setActiveProjectId(id);
     setView('workspace');
     
     if (window.innerWidth < 768) setIsSidebarOpen(false);
-  }, [activeProjectId, engineActions, projectActions, view]);
+  }, [activeProjectId, audioActions, view]);
 
   const handleDeleteProject = useCallback((e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     if (window.confirm("确定要删除这个项目吗？此操作无法撤销。")) {
-        projectActions.deleteProject(id);
+        audioActions.deleteProject(id);
         if (activeProjectId === id) {
-            engineActions.stop();
-            engineActions.reset();
+            audioActions.stop();
+            audioActions.reset();
             setView('dashboard'); 
         }
     }
-  }, [activeProjectId, engineActions, projectActions]);
+  }, [activeProjectId, audioActions]);
 
   const handleSwitchToLab = useCallback(() => {
-      engineActions.stop();
-      engineActions.reset();
+      audioActions.stop();
+      audioActions.reset();
       setView('lab');
-  }, [engineActions]);
+  }, [audioActions]);
 
   // --- Workspace Logic ---
 
   const handleCompileAndPlay = useCallback(async (sourceCode: string, currentTryCount: number = 0) => {
-    const result = await engineActions.compileAndPlay(sourceCode, currentTryCount);
+    const result = await audioActions.compileAndPlay(sourceCode, currentTryCount);
     
     // Auto-fix logic needs UI ref access, so it stays here for now, 
     // though triggering it delegates to the chat component which uses the chat hook
@@ -100,43 +93,43 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
             chatInterfaceRef.current?.triggerFix(sourceCode, result.error.message);
         }
     }
-  }, [engineActions]);
+  }, [audioActions]);
 
   const handleCodeUpdate = useCallback((newCode: string, isAutoFix = false) => {
-    projectActions.updateActiveProject({ code: newCode });
+    audioActions.updateActiveProject({ code: newCode });
     // Only auto-run if coming from AI
     handleCompileAndPlay(newCode, isAutoFix ? autoFixCount + 1 : 1);
-  }, [autoFixCount, handleCompileAndPlay, projectActions]);
+  }, [audioActions, autoFixCount, handleCompileAndPlay]);
 
   const handleMessagesUpdate = useCallback((newMessages: Message[]) => {
-      projectActions.updateProjectMessages(newMessages);
-  }, [projectActions]);
+      audioActions.updateProjectMessages(newMessages);
+  }, [audioActions]);
 
   const handleManualFix = useCallback(() => {
       if (parserError && chatInterfaceRef.current && activeProject) {
           chatInterfaceRef.current.triggerFix(activeProject.code, parserError.message);
-          engineActions.setAutoFixCount(1);
+          audioActions.setAutoFixCount(1);
       }
-  }, [activeProject, engineActions, parserError]);
+  }, [activeProject, audioActions, parserError]);
 
   const handleExportBundle = useCallback(() => {
       if (activeProject) {
-          engineActions.exportBundle(activeProject.name, activeProject.code);
+          audioActions.exportBundle(activeProject.name, activeProject.code);
       }
-  }, [activeProject, engineActions]);
+  }, [activeProject, audioActions]);
 
   // Import logic
   const handleFileImport = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
     
-    engineActions.stop();
-    projectActions.importProjectFromFile(file, (newId) => {
+    audioActions.stop();
+    audioActions.importProjectFromFile(file, (newId: string) => {
         setView('workspace');
-        engineActions.reset();
+        audioActions.reset();
     });
     event.target.value = '';
-  }, [engineActions, projectActions]);
+  }, [audioActions]);
 
   // --- Render Views ---
 
@@ -200,7 +193,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
             </div>
 
             {/* Project Cards */}
-            {projectList.map(project => (
+            {projectList.map((project: Project) => (
                 <div 
                   key={project.id}
                   onClick={() => handleOpenProject(project.id)}
@@ -297,7 +290,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
 
         {/* Scrollable List */}
         <div className="flex-1 overflow-y-auto px-2 pb-4 space-y-0.5 custom-scrollbar">
-            {projectList.map(p => (
+            {projectList.map((p: { id: string; name: string }) => (
                 <div 
                     key={p.id}
                     className={`
@@ -356,7 +349,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                         <input 
                             className="bg-transparent border-b border-transparent hover:border-zinc-700 focus:border-cyan-500 focus:outline-none text-sm font-bold text-zinc-100 w-48 transition-all px-1"
                             value={activeProject.name}
-                            onChange={(e) => projectActions.updateActiveProject({ name: e.target.value })}
+                            onChange={(e) => audioActions.updateActiveProject({ name: e.target.value })}
                         />
                         <PencilSquareIcon className="w-3.5 h-3.5 text-zinc-600 group-hover:text-zinc-400" />
                     </div>
@@ -401,7 +394,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                     <div className="flex items-center bg-zinc-900 p-1 rounded-xl border border-zinc-800 shadow-sm">
                         {appState === AppState.PLAYING ? (
                             <button 
-                                onClick={engineActions.stop}
+                                onClick={audioActions.stop}
                                 className="p-2 text-red-400 hover:text-red-300 hover:bg-zinc-800 rounded-lg transition-colors flex items-center gap-2 px-3"
                                 title="停止"
                             >
@@ -441,7 +434,11 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                     <ChatInterface 
                         key={activeProject.id} 
                         ref={chatInterfaceRef}
-                        chat={chat}
+                        chat={{
+                            isProcessing: audioState.isChatProcessing,
+                            sendMessage: audioActions.sendMessage,
+                            triggerFix: audioActions.triggerFix,
+                        }}
                         initialMessages={activeProject.messages}
                         onMessagesUpdate={handleMessagesUpdate}
                         onCodeGenerated={handleCodeUpdate} 
@@ -467,7 +464,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                          </div>
                         <CodeEditor 
                             code={activeProject.code} 
-                            onChange={(code) => projectActions.updateActiveProject({ code })} 
+                            onChange={(code) => audioActions.updateActiveProject({ code })} 
                             error={parserError} 
                         />
                     </div>
@@ -491,7 +488,22 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                 <span className="text-sm font-bold text-zinc-100 tracking-wide">Audio Laboratory</span>
            </header>
            <div className="flex-1 overflow-hidden">
-                <AudioToolbox tools={tools} />
+                <AudioToolbox tools={{
+                    converter: {
+                        state: { isProcessing: audioState.converterProcessing, logs: audioState.converterLogs },
+                        convert: audioActions.convert,
+                    },
+                    analyzer: {
+                        result: audioState.analyzerResult,
+                        analyze: audioActions.analyze,
+                    },
+                    fixer: {
+                        state: { file: audioState.fixerFile, gain: audioState.fixerGain, isProcessing: audioState.fixerProcessing },
+                        setFile: audioActions.setFixerFile,
+                        setGain: audioActions.setFixerGain,
+                        applyFix: audioActions.applyFix,
+                    },
+                }} />
            </div>
       </div>
   );

@@ -3,25 +3,31 @@
 import React, { useState, useEffect, useRef, useImperativeHandle, forwardRef } from 'react';
 import { Message } from '../../meta';
 import { PaperAirplaneIcon, SparklesIcon, UserCircleIcon, CpuChipIcon } from '@heroicons/react/24/solid';
-import { useAudioChat } from '../../engines/useAudio/useAudioChat';
+import { useAudio } from '../../hooks';
 
 export interface ChatInterfaceRef {
     triggerFix: (code: string, error: string) => Promise<void>;
 }
-
-type ChatHook = ReturnType<typeof useAudioChat>;
 
 interface ChatInterfaceProps {
   initialMessages: Message[];
   onCodeGenerated: (code: string, isAutoFix?: boolean) => void;
   onMessagesUpdate: (messages: Message[]) => void;
   // 父级 AudioPanel 已持有 useAudio() 实例，优先复用，避免每个 ChatInterface 再建一套 chat 状态
-  chat?: ChatHook;
+  chat?: {
+    isProcessing: boolean;
+    sendMessage: (content: string) => Promise<{ success: boolean; code?: string; replyMessage: Message }>;
+    triggerFix: (brokenCode: string, error: string) => Promise<{ success: boolean; code?: string; replyMessage: Message }>;
+  };
 }
 
 const ChatInterface = forwardRef<ChatInterfaceRef, ChatInterfaceProps>(({ initialMessages, onCodeGenerated, onMessagesUpdate, chat: chatProp }, ref) => {
-  const fallbackChat = useAudioChat();
-  const chat = chatProp ?? fallbackChat;
+  const audio = useAudio();
+  const chat = chatProp ?? {
+    isProcessing: audio.state.isChatProcessing,
+    sendMessage: audio.actions.sendMessage,
+    triggerFix: audio.actions.triggerFix,
+  };
   const { isProcessing, sendMessage, triggerFix: triggerFixAction } = chat;
 
   const [input, setInput] = useState('');

@@ -2,6 +2,82 @@ import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import Hls from 'hls.js';
 import { PlayerState, PlaylistState, PlaybackMode, ObjectFitMode, VideoFile, MediaType } from '../../meta';
 import { createVideoFile, createStreamFile, revokeVideoFile, STORAGE_KEYS, generateId, detectGalleryFolders, dirOfFile, galleryNameFromMarker } from '../../utils';
+import { loadJSON, saveJSON, loadStr, saveStr } from '../../utils/persist';
+
+/* -------------------------------------------------------------------------- */
+/* 播放列表落盘：只存可重建的在线条目（type==='file' 的本地 File/Blob 重进    */
+/* 即失效，不存）；上限 200 条防爆配额；读到坏缓存直接丢用空列表。             */
+/* -------------------------------------------------------------------------- */
+
+interface StoredPlaylistItem {
+  url: string;
+  name: string;
+  mediaType?: MediaType;
+  groupId?: string;
+  groupName?: string;
+  groupType?: VideoFile['groupType'];
+  page?: number;
+  poster?: string;
+  artist?: string;
+  description?: string;
+}
+
+interface StoredPlaylist {
+  items: StoredPlaylistItem[];
+  currentIndex: number;
+}
+
+const PLAYLIST_STORE_KEY = 'theplay.playlist.v1';
+const PLAYLIST_STORE_MAX = 200;
+
+const isPersistableUrl = (url: string): boolean =>
+  typeof url === 'string' && url.length > 0 && url.length <= 8192 &&
+  /^(https?:\/\/|file:\/\/)/i.test(url.trim());
+
+const serializePlaylist = (files: VideoFile[]): StoredPlaylistItem[] =>
+  files
+    .filter((f) => f && f.type === 'stream' && isPersistableUrl(f.url))
+    .slice(-PLAYLIST_STORE_MAX)
+    .map((f) => ({
+      url: f.url,
+      name: f.name,
+      mediaType: f.mediaType,
+      groupId: f.groupId,
+      groupName: f.groupName,
+      groupType: f.groupType,
+      page: f.page,
+      poster: f.poster,
+      artist: f.artist,
+      description: f.description,
+    }));
+
+const restorePlaylist = (): PlaylistState => {
+  const fallback: PlaylistState = { files: [], currentIndex: -1 };
+  try {
+    const saved = loadJSON<StoredPlaylist | null>(PLAYLIST_STORE_KEY, null, '');
+    if (!saved || !Array.isArray(saved.items) || saved.items.length === 0) return fallback;
+    const files: VideoFile[] = [];
+    for (const it of saved.items.slice(0, PLAYLIST_STORE_MAX)) {
+      if (!it || !isPersistableUrl(it.url)) continue;
+      files.push(
+        createStreamFile(it.url, it.name || it.url, it.mediaType, {
+          groupId: it.groupId,
+          groupName: it.groupName,
+          groupType: it.groupType,
+          page: it.page,
+          poster: it.poster,
+          artist: it.artist,
+          description: it.description,
+        })
+      );
+    }
+    if (files.length === 0) return fallback;
+    const idx = Number.isInteger(saved.currentIndex) ? saved.currentIndex as number : -1;
+    return { files, currentIndex: idx >= 0 && idx < files.length ? idx : 0 };
+  } catch {
+    return fallback;
+  }
+};
 
 export interface UsePlayReturn {
   state: PlayerState;
@@ -22,6 +98,8 @@ export interface UsePlayReturn {
     toggleFullscreen: (element?: HTMLElement | null) => void;
     togglePip: () => Promise<void>;
     addFiles: (files: FileList | File[]) => void;
+    /** 单文件 .gallery（ZIP 包）解包后成组入列：与文件夹画廊同展示，跳到本组第一页 */
+    addUnpackedGallery: (name: string, pages: { file: File; page: number }[]) => void;
     addStream: (url: string, name?: string, autoPlay?: boolean, mediaType?: MediaType) => void;
     addMultipleStreams: (streams: (Partial<VideoFile> & { url: string; title?: string })[], autoPlayFirst?: boolean, clearPrevious?: boolean) => void;
     appendStreams: (streams: (Partial<VideoFile> & { url: string; title?: string })[]) => void;
@@ -44,21 +122,29 @@ export const usePlay = (): UsePlayReturn => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
 
-  const [playlist, setPlaylist] = useState<PlaylistState>({
-    files: [],
-    currentIndex: -1
-  });
+  const [playlist, setPlaylist] = useState<PlaylistState>(restorePlaylist);
   // ref 镜像：让切歌/删除索引计算保持纯函数，避免在 setState updater 内做副作用
   const playlistRef = useRef(playlist);
   useEffect(() => { playlistRef.current = playlist; }, [playlist]);
 
+  // 播放列表快照落盘（只写可重建项，本地 File/Blob 条目天然跳过）。
+  // 防抖 1.5s：边下边播每页 append 都会改 playlist，同步写 localStorage 会把阅读滚动卡成幻灯片。
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const { files, currentIndex } = playlistRef.current;
+      saveJSON(PLAYLIST_STORE_KEY, { items: serializePlaylist(files), currentIndex }, '');
+    }, 1500);
+    return () => clearTimeout(timer);
+  }, [playlist]);
+
   const [mediaError, setMediaError] = useState<string | null>(null);
 
   const [state, setState] = useState<PlayerState>(() => {
-    const savedVol = parseFloat(localStorage.getItem(STORAGE_KEYS.VOLUME) || '0.7');
-    const savedRate = parseFloat(localStorage.getItem(STORAGE_KEYS.RATE) || '1');
-    const savedMode = (localStorage.getItem(STORAGE_KEYS.MODE) as PlaybackMode) || PlaybackMode.ListLoop;
-    const savedFit = (localStorage.getItem(STORAGE_KEYS.FIT) as ObjectFitMode) || 'contain';
+    // 初始化读盘全程防爆：隐私模式/坏值都回落默认值，不崩首屏
+    const savedVol = parseFloat(loadStr(STORAGE_KEYS.VOLUME, '0.7', ''));
+    const savedRate = parseFloat(loadStr(STORAGE_KEYS.RATE, '1', ''));
+    const savedMode = (loadStr(STORAGE_KEYS.MODE, '', '') as PlaybackMode) || PlaybackMode.ListLoop;
+    const savedFit = (loadStr(STORAGE_KEYS.FIT, '', '') as ObjectFitMode) || 'contain';
 
     return {
       isPlaying: false,
@@ -145,18 +231,24 @@ export const usePlay = (): UsePlayReturn => {
   }, [play, pause]);
 
   // 跳转（直播 / 无限时长直接忽略，避免抛异常）
+  // 暂停下快进/快退必须保持暂停：某些 Chromium 在 seek 后会恢复播放，
+  // 这里显式按住暂停态（先记 paused，设完 currentTime 后若被唤醒则按回去）
   const seek = useCallback((time: number) => {
     const video = videoRef.current;
     if (!video) return;
     const dur = video.duration;
     if (!Number.isFinite(dur) || dur <= 0) return;
     const target = Math.max(0, Math.min(time, dur));
+    const wasPaused = video.paused;
     try {
       video.currentTime = target;
     } catch {
       return;
     }
-    setState(prev => ({ ...prev, currentTime: target }));
+    if (wasPaused && !video.paused) {
+      try { video.pause(); } catch { /* ignore */ }
+    }
+    setState(prev => (wasPaused && prev.isPlaying ? { ...prev, currentTime: target, isPlaying: false } : { ...prev, currentTime: target }));
   }, []);
 
   // 音量
@@ -167,7 +259,7 @@ export const usePlay = (): UsePlayReturn => {
       videoRef.current.volume = val;
       videoRef.current.muted = val === 0;
     }
-    localStorage.setItem(STORAGE_KEYS.VOLUME, String(val));
+    saveStr(STORAGE_KEYS.VOLUME, String(val), '');
     setState(prev => ({ ...prev, volume: val, isMuted: val === 0 }));
   }, []);
 
@@ -181,7 +273,7 @@ export const usePlay = (): UsePlayReturn => {
         videoRef.current.muted = false;
       }
       setState(prev => ({ ...prev, volume: restoreVol, isMuted: false }));
-      localStorage.setItem(STORAGE_KEYS.VOLUME, String(restoreVol));
+      saveStr(STORAGE_KEYS.VOLUME, String(restoreVol), '');
     } else {
       if (s.volume > 0) prevVolumeRef.current = s.volume;
       if (videoRef.current) videoRef.current.muted = true;
@@ -195,19 +287,19 @@ export const usePlay = (): UsePlayReturn => {
     if (videoRef.current) {
       try { videoRef.current.playbackRate = rate; } catch { /* ignore */ }
     }
-    localStorage.setItem(STORAGE_KEYS.RATE, String(rate));
+    saveStr(STORAGE_KEYS.RATE, String(rate), '');
     setState(prev => ({ ...prev, playbackRate: rate }));
   }, []);
 
   // 循环模式
   const setPlaybackMode = useCallback((mode: PlaybackMode) => {
-    localStorage.setItem(STORAGE_KEYS.MODE, mode);
+    saveStr(STORAGE_KEYS.MODE, mode, '');
     setState(prev => ({ ...prev, playbackMode: mode }));
   }, []);
 
   // 画面适配模式
   const setObjectFit = useCallback((fit: ObjectFitMode) => {
-    localStorage.setItem(STORAGE_KEYS.FIT, fit);
+    saveStr(STORAGE_KEYS.FIT, fit, '');
     setState(prev => ({ ...prev, objectFit: fit }));
   }, []);
 
@@ -265,13 +357,14 @@ export const usePlay = (): UsePlayReturn => {
 
   // 顺序翻页：图集/文档阅读专用，不受播放模式影响。
   // 背景：nextTrack 在 Random 模式下随机跳页、SingleLoop 下卡住，
-  // 轮播和翻页走它会导致“剧情顺序混乱”，这里永远按列表顺序走（循环）。
+  // 轮播和翻页走它会导致“剧情顺序混乱”，这里永远按列表顺序走。
+  // 到头即停不回绕：看完末页突然跳回 P1 是迷惑行为，轮播到末页自然停住即是"读完"
   const stepPage = useCallback((delta: 1 | -1) => {
     const prev = playlistRef.current;
     const len = prev.files.length;
     if (len === 0) return;
     const base = prev.currentIndex < 0 ? (delta === 1 ? -1 : 0) : prev.currentIndex;
-    const nextIdx = (base + delta + len) % len;
+    const nextIdx = delta === 1 ? Math.min(base + 1, len - 1) : Math.max(base - 1, 0);
     if (nextIdx === prev.currentIndex) return;
     setMediaError(null);
     setPlaylist({ ...prev, currentIndex: nextIdx });
@@ -415,6 +508,30 @@ export const usePlay = (): UsePlayReturn => {
     setPlaylist({ files: updated, currentIndex: nextIdx });
   }, []);
 
+  // 单文件 .gallery 解包入列（与 addFiles 的文件夹画廊分支同构，徽标不进列表）
+  const addUnpackedGallery = useCallback((name: string, pages: { file: File; page: number }[]) => {
+    const ordered = [...pages]
+      .filter((p) => p && p.file && Number.isFinite(p.page))
+      .sort((a, b) => a.page - b.page);
+    if (ordered.length === 0) return;
+    const galleryName = (name || '').trim() || '未命名画廊';
+    const groupId = `gallery:pack/${galleryName}`;
+    const newVideoFiles: VideoFile[] = ordered.map((p) => {
+      const vf = createVideoFile(p.file);
+      vf.name = `${p.page}`;
+      vf.description = p.file.name;
+      vf.groupId = groupId;
+      vf.groupName = galleryName;
+      vf.groupType = 'gallery';
+      vf.page = p.page;
+      return vf;
+    });
+    setMediaError(null);
+    const prev = playlistRef.current;
+    const updated = [...prev.files, ...newVideoFiles];
+    setPlaylist({ files: updated, currentIndex: prev.files.length });
+  }, []);
+
   // 添加网络流
   const addStream = useCallback((url: string, name?: string, autoPlay = true, mediaType?: MediaType) => {
     const trimmed = url.trim();
@@ -429,6 +546,7 @@ export const usePlay = (): UsePlayReturn => {
   }, []);
 
   // 批量添加网络流/图集页面
+  // autoPlayFirst=true 时跳到本批第一项（不清旧列表也会跳，推送新画廊不再靠清空实现“自动播新”）
   const addMultipleStreams = useCallback((streams: (Partial<VideoFile> & { url: string; title?: string })[], autoPlayFirst = true, clearPrevious = false) => {
     if (!streams.length) return;
     const streamFiles = streams.map(s => {
@@ -452,10 +570,9 @@ export const usePlay = (): UsePlayReturn => {
       setPlaylist({ files: streamFiles, currentIndex: 0 });
     } else {
       const updated = [...prev.files, ...streamFiles];
-      const nextIdx = prev.currentIndex === -1 ? 0 : prev.currentIndex;
+      const nextIdx = autoPlayFirst ? prev.files.length : (prev.currentIndex === -1 ? 0 : prev.currentIndex);
       setPlaylist({ files: updated, currentIndex: nextIdx });
     }
-    void autoPlayFirst;
   }, [destroyHls]);
 
   // 追加更多流/图集后续页（不打扰当前播放/阅读索引）
@@ -513,12 +630,24 @@ export const usePlay = (): UsePlayReturn => {
     const inGroup = (f: VideoFile) => (groupId ? f.groupId === groupId : f.page != null);
     const groupFiles = prev.files.filter(inGroup);
     const otherFiles = prev.files.filter(f => !inGroup(f));
-    // 组内去重（按 url），页码缺失的沉底
-    const byUrl = new Map<string, VideoFile>();
-    for (const f of [...groupFiles, ...incoming]) {
-      if (!byUrl.has(f.url)) byUrl.set(f.url, f);
+    // 组内按“页码优先、URL 兜底”归位：同页新条目（如下落盘的本地 file://）
+    // 原位替换旧条目（远程直链），id 沿用旧值保证当前阅读位置锚定不动
+    const groupKey = (f: { page?: number; url: string }) =>
+      f.page != null ? `page:${f.page}` : `url:${f.url}`;
+    const byKey = new Map<string, VideoFile>();
+    for (const f of groupFiles) {
+      byKey.set(groupKey(f), f);
     }
-    const mergedGroup = [...byUrl.values()].sort((a, b) => {
+    for (const f of incoming) {
+      const k = groupKey(f);
+      const old = byKey.get(k);
+      if (old) {
+        byKey.set(k, { ...f, id: old.id, groupName: f.groupName ?? old.groupName });
+      } else {
+        byKey.set(k, f);
+      }
+    }
+    const mergedGroup = [...byKey.values()].sort((a, b) => {
       const pa = a.page ?? Number.MAX_SAFE_INTEGER;
       const pb = b.page ?? Number.MAX_SAFE_INTEGER;
       return pa - pb;
@@ -778,6 +907,7 @@ export const usePlay = (): UsePlayReturn => {
     toggleFullscreen,
     togglePip,
     addFiles,
+    addUnpackedGallery,
     addStream,
     addMultipleStreams,
     appendStreams,
@@ -791,7 +921,7 @@ export const usePlay = (): UsePlayReturn => {
     removeTracks,
     clearPlaylist,
     clearError,
-  }), [play, pause, togglePlay, seek, setVolume, setPlaybackRate, setPlaybackMode, setObjectFit, toggleMute, toggleFullscreen, togglePip, addFiles, addStream, addMultipleStreams, appendStreams, mergeOrderedStreams, selectTrack, nextTrack, prevTrack, nextPage, prevPage, removeTrack, removeTracks, clearPlaylist, clearError]);
+  }), [play, pause, togglePlay, seek, setVolume, setPlaybackRate, setPlaybackMode, setObjectFit, toggleMute, toggleFullscreen, togglePip, addFiles, addUnpackedGallery, addStream, addMultipleStreams, appendStreams, mergeOrderedStreams, selectTrack, nextTrack, prevTrack, nextPage, prevPage, removeTrack, removeTracks, clearPlaylist, clearError]);
 
   return {
     state,

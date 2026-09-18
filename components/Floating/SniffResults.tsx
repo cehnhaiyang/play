@@ -17,7 +17,7 @@ import {
   Trash2,
   Globe,
 } from 'lucide-react';
-import { useSniff } from '../../engines';
+import { useSniff } from '../../hooks';
 import { FoundLink, MediaType } from '../../meta';
 import { isAcgUrl } from '../../utils';
 
@@ -208,7 +208,7 @@ export const SniffResults: React.FC<SnifferResultsProps> = ({
   );
 
   const currentPageLinksCount = foundLinks.filter(
-    (l) => !l.pageUrl || l.pageUrl === currentUrl
+    (l: FoundLink) => !l.pageUrl || l.pageUrl === currentUrl
   ).length;
 
   return (
@@ -389,7 +389,7 @@ export const SniffResults: React.FC<SnifferResultsProps> = ({
             </div>
           </div>
         ) : (
-          filteredLinks.map((link, index) => {
+          filteredLinks.map((link: FoundLink, index: number) => {
             const canDownload = link.type !== 'stream' || downloadCapabilities.ffmpegAvailable;
             const downloadHint =
               link.type === 'stream'

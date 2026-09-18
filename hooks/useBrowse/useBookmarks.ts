@@ -1,10 +1,17 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Bookmark } from '../../meta';
+import { loadStr, saveStr } from '../../utils/persist';
 
 // 本地存储键名常量
 const STORAGE_KEYS = {
     BOOKMARKS: 'react-player-bookmarks',
 };
+
+const isValidBookmark = (b: unknown): b is Bookmark =>
+    !!b && typeof b === 'object' &&
+    typeof (b as Bookmark).id === 'string' &&
+    typeof (b as Bookmark).url === 'string' &&
+    (b as Bookmark).url.length > 0;
 
 /**
  * 书签管理 Hook
@@ -15,34 +22,40 @@ const STORAGE_KEYS = {
 export const useBookmarks = () => {
     const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
 
-    // 初始化：从 LocalStorage 加载书签
+    // 初始化：从 LocalStorage 加载书签（坏缓存只丢弃，不崩；配额异常读空）
     useEffect(() => {
         try {
-            const saved = localStorage.getItem(STORAGE_KEYS.BOOKMARKS);
+            const saved = loadStr(STORAGE_KEYS.BOOKMARKS, '', '');
             if (saved) {
-                setBookmarks(JSON.parse(saved));
-            } else {
-                // 默认预置书签
-                const defaults: Bookmark[] = [
-                    { id: '1', title: 'Google', url: 'https://www.google.com', createdAt: Date.now() },
-                    { id: '2', title: 'Bing', url: 'https://www.bing.com', createdAt: Date.now() },
-                    { id: '3', title: 'YouTube', url: 'https://www.youtube.com', createdAt: Date.now() },
-                    { id: '4', title: 'Bilibili', url: 'https://www.bilibili.com', createdAt: Date.now() },
-                ];
-                setBookmarks(defaults);
-                localStorage.setItem(STORAGE_KEYS.BOOKMARKS, JSON.stringify(defaults));
+                const parsed: unknown = JSON.parse(saved);
+                if (Array.isArray(parsed)) {
+                    const cleaned = parsed.filter(isValidBookmark).slice(0, 500);
+                    if (cleaned.length > 0 || parsed.length === 0) {
+                        setBookmarks(cleaned);
+                        return;
+                    }
+                }
             }
+            // 默认预置书签
+            const defaults: Bookmark[] = [
+                { id: '1', title: 'Google', url: 'https://www.google.com', createdAt: Date.now() },
+                { id: '2', title: 'Bing', url: 'https://www.bing.com', createdAt: Date.now() },
+                { id: '3', title: 'YouTube', url: 'https://www.youtube.com', createdAt: Date.now() },
+                { id: '4', title: 'Bilibili', url: 'https://www.bilibili.com', createdAt: Date.now() },
+            ];
+            setBookmarks(defaults);
+            saveStr(STORAGE_KEYS.BOOKMARKS, JSON.stringify(defaults), '');
         } catch (e) {
             console.error("加载书签失败:", e);
         }
     }, []);
 
     /**
-     * 持久化保存
+     * 持久化保存（写盘失败只影响“记住”，不抛错）
      */
     const saveBookmarks = (newBookmarks: Bookmark[]) => {
         setBookmarks(newBookmarks);
-        localStorage.setItem(STORAGE_KEYS.BOOKMARKS, JSON.stringify(newBookmarks));
+        saveStr(STORAGE_KEYS.BOOKMARKS, JSON.stringify(newBookmarks), '');
     };
 
     /**
@@ -57,9 +70,9 @@ export const useBookmarks = () => {
      */
     const toggleBookmark = useCallback((url: string, title: string = '新书签') => {
         if (!url) return;
-        
+
         const existing = bookmarks.find(b => b.url === url);
-        
+
         if (existing) {
             // 移除
             const next = bookmarks.filter(b => b.url !== url);
@@ -70,9 +83,9 @@ export const useBookmarks = () => {
             let finalTitle = title;
             try {
                 if (title === '新书签' || !title) {
-                    finalTitle = new URL(url).hostname; 
+                    finalTitle = new URL(url).hostname;
                 }
-            } catch {}
+            } catch { }
 
             const newBookmark: Bookmark = {
                 id: Date.now().toString(),

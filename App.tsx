@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { usePlay, useBrowse, useTamper } from './engines';
-import { BrowsePanel, PlayPanel, Floating, AudioPanel } from './components';
-import { FoundLink, getElectronAPI } from './meta';
+import { usePlay, useBrowse, useTamper } from './hooks';
+import { BrowsePanel, PlayPanel, Floating, AudioPanel, GalleryPanel } from './components';
+import { FoundLink, getElectronAPI, MediaType } from './meta';
 import { getMediaType, resolveProbeMedia } from './utils';
 
-type ViewMode = 'sniffer' | 'player' | 'audio';
+type ViewMode = 'sniffer' | 'player' | 'audio' | 'gallery';
 
 const PlayerLayout: React.FC = () => {
   const player = usePlay();
@@ -33,6 +33,13 @@ const PlayerLayout: React.FC = () => {
   }, [getActiveWebview, tamper.actions]);
 
   const [view, setView] = useState<ViewMode>('sniffer');
+  // 画廊懒挂载：GalleryPanel 首屏 effect 会预拉 latest 频道，常驻挂载等于每次启动都偷跑流量；
+  // 且百张封面图常驻后台会持续占用解码与内存。首次进入时挂载，之后 keep-alive 保状态。
+  const [galleryVisited, setGalleryVisited] = useState(false);
+  const openGalleryView = useCallback(() => {
+    setGalleryVisited(true);
+    setView('gallery');
+  }, []);
 
   const handleSnifferPlay = useCallback((link: FoundLink) => {
     player.methods.addStream(link.url, link.title, true, link.type);
@@ -52,11 +59,26 @@ const PlayerLayout: React.FC = () => {
         groupType: 'gallery' as const,
         page: p.page,
       }));
-      player.methods.addMultipleStreams(streamItems, true, true);
+      // 追加成新分组并跳到本批第一页，不再清空旧列表（旧行为每次推送都清空）
+      player.methods.addMultipleStreams(streamItems, true, false);
       setView('player');
     },
     [player.methods]
   );
+
+  // 纯媒体直推（视频 / 音频）：不建画廊分组，不带 groupId/groupType/page。
+  // 只有多图集才有"标题 + 子内容"结构，单个视频/音轨直接进播放列表。
+  const handlePlayMediaStreams = useCallback((pages: { url: string; title: string; mediaType?: MediaType }[]) => {
+    if (pages.length === 0) return;
+    const streamItems = pages.map((p) => ({
+      url: p.url,
+      name: p.title,
+      title: p.title,
+      mediaType: p.mediaType || getMediaType(p.title, undefined, p.url),
+    }));
+    player.methods.addMultipleStreams(streamItems, true, false);
+    setView('player');
+  }, [player.methods]);
 
   const handleAppendGalleryPages = useCallback((pages: { url: string; title: string; page?: number }[], gid?: string) => {
     const groupId = gid ? `acg:${gid}` : undefined;
@@ -111,9 +133,9 @@ const PlayerLayout: React.FC = () => {
         return;
       }
 
-      // 2. 音声 / ASMR / 音频
+      // 2. 音声 / ASMR / 音频（追加新分组，不清空旧列表）
       if (resolved.kind === 'audio') {
-        player.methods.addMultipleStreams(resolved.streams, true, true);
+        player.methods.addMultipleStreams(resolved.streams, true, false);
         setView('player');
         return;
       }
@@ -136,9 +158,9 @@ const PlayerLayout: React.FC = () => {
           galleryRunRef.current += 1;
           const runId = `app-${Date.now()}-${galleryRunRef.current}`;
           electronAPI.acgmho.fetchPages({
-            gidOrUrl: probe.gid,
+            gidOrUrl: probe.firstPageUrl || probe.gid,
             pages: `1-${probe.totalPages}`,
-            delayMs: 60,
+            delayMs: 100,
             runId,
             // 复用详情探测结果，防 /h/ 与 /hentai/ 同名异帖串台
             probe,
@@ -146,11 +168,15 @@ const PlayerLayout: React.FC = () => {
             // 旧轮回包作废（用户又开了一本新的）
             if (!res || res.runId !== runId) return;
             if (res?.pages) {
-              handleAppendGalleryPages(res.pages.slice(1), probe.gid);
+              // 按页码过滤而非 slice(1)：第 1 页抓取失败时 slice 会误丢第 2 页
+              handleAppendGalleryPages(res.pages.filter((p) => p.page !== 1), probe.gid);
             }
             if (res?.errors?.length) {
               console.warn(`Gallery ${probe.gid}: ${res.errors.length} 页解析失败`, res.errors);
             }
+          }).catch((e) => {
+            // 直推抓取是无界面的后台续页，失败只记日志（首屏已展示，不打断阅读）
+            console.warn(`Gallery ${probe.gid} 后续页抓取失败:`, e?.message || e);
           });
         }
       }
@@ -170,6 +196,7 @@ const PlayerLayout: React.FC = () => {
           isVisible={view === 'sniffer'}
           onNavigateToPlayer={() => setView('player')}
           onNavigateToAudio={() => setView('audio')}
+          onNavigateToGallery={openGalleryView}
           onOpenGalleryInPlayer={handleOpenGalleryFromUrl}
           browse={browse}
         />
@@ -181,6 +208,23 @@ const PlayerLayout: React.FC = () => {
         }`}
       >
         {view === 'audio' && <AudioPanel onBack={() => setView('sniffer')} />}
+      </div>
+
+      <div
+        className={`fixed inset-0 z-50 transition-transform duration-300 ease-out will-change-transform bg-slate-950 ${
+          view === 'gallery' ? 'translate-y-0 pointer-events-auto' : 'translate-y-full pointer-events-none'
+        }`}
+      >
+        {galleryVisited && (
+          <GalleryPanel
+            onBack={() => setView('sniffer')}
+            currentUrl={currentUrl}
+            onBrowseInPlayer={handleBrowseGallery}
+            onPlayMediaStreams={handlePlayMediaStreams}
+            onAppendToPlayer={handleAppendGalleryPages}
+            onMergeToPlayer={handleMergeGalleryPages}
+          />
+        )}
       </div>
 
       <div
@@ -201,9 +245,6 @@ const PlayerLayout: React.FC = () => {
             currentUrl={currentUrl}
             onPlay={handleSnifferPlay}
             onAiAnalyze={() => sniffer.actions.analyzeWithAi(currentUrl)}
-            onBrowseGallery={handleBrowseGallery}
-            onAppendGalleryPages={handleAppendGalleryPages}
-            onMergeGalleryPages={handleMergeGalleryPages}
             onOpenGallery={handleOpenGalleryFromUrl}
           />
         </div>

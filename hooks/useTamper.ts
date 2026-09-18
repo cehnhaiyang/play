@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { TamperRule, HeaderRule, WebviewElement } from '../meta';
+import { loadStr, saveStr } from '../utils/persist';
 
 // 注入到页面的核心 Hook 脚本 (Ultimate Edition)
 // 包含：JSON.parse Hook, Response.json Hook, XHR Hook, Fetch Hook, LocalStorage Hook
@@ -265,15 +266,15 @@ export const useTamper = () => {
     // 绑定 Webview 引用 (使用 ref 避免 React DevTools 跨域错误)
     const activeWebviewRef = useRef<WebviewElement | null>(null);
 
-    // 加载/保存规则 (持久化到 localStorage)
+    // 加载/保存规则 (持久化到 localStorage，坏缓存/配额异常都不崩)
     useEffect(() => {
-        const saved = localStorage.getItem('tamper_rules');
+        const saved = loadStr('tamper_rules', '', '');
         if (saved) {
             try {
                 const parsed = JSON.parse(saved);
-                setInterceptRules(parsed.intercept || []);
-                setRequestRules(parsed.request || []);
-                setHeaderRules(parsed.headers || []);
+                setInterceptRules(Array.isArray(parsed.intercept) ? parsed.intercept : []);
+                setRequestRules(Array.isArray(parsed.request) ? parsed.request : []);
+                setHeaderRules(Array.isArray(parsed.headers) ? parsed.headers : []);
             } catch (e) { }
         }
     }, []);
@@ -311,7 +312,7 @@ export const useTamper = () => {
         setInterceptRules(intercept);
         setRequestRules(request);
         setHeaderRules(headers);
-        localStorage.setItem('tamper_rules', JSON.stringify({ intercept, request, headers }));
+        saveStr('tamper_rules', JSON.stringify({ intercept, request, headers }), '');
 
         // 强制重新注入
         const activeWebview = activeWebviewRef.current;

@@ -5,8 +5,14 @@ const STORAGE_KEYS = {
   PROJECTS: 'spg_projects_v1',
 };
 
-// Generate a random ID
-const generateId = () => Math.random().toString(36).substr(2, 9);
+// Generate a random ID（优先 crypto，不可用时回退 Math.random）
+const generateId = () => {
+  try {
+    const uuid = (globalThis as any)?.crypto?.randomUUID?.();
+    if (typeof uuid === 'string' && uuid.length > 0) return uuid.replace(/-/g, '').slice(0, 12);
+  } catch { /* ignore, fallback below */ }
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 11)}`;
+};
 
 export const createNewProject = (): Project => {
   return {
@@ -38,7 +44,16 @@ export const loadProjects = (): Project[] => {
   try {
     const data = localStorage.getItem(STORAGE_KEYS.PROJECTS);
     if (!data) return [];
-    return JSON.parse(data);
+    const parsed: unknown = JSON.parse(data);
+    // 坏缓存自愈：非数组直接丢；条目缺 id/code 的也丢，不让脏数据进状态
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (p): p is Project =>
+        !!p && typeof p === 'object' &&
+        typeof (p as Project).id === 'string' &&
+        typeof (p as Project).code === 'string' &&
+        Array.isArray((p as Project).messages)
+    );
   } catch (e) {
     console.warn("Failed to load projects from localStorage", e);
     return [];
@@ -47,6 +62,10 @@ export const loadProjects = (): Project[] => {
 
 // Legacy support cleanup (optional)
 export const clearLegacyData = () => {
+  try {
     localStorage.removeItem('spg_workspace_code');
     localStorage.removeItem('spg_chat_messages');
+  } catch {
+    // ignore
+  }
 };

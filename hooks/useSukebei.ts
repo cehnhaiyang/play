@@ -92,7 +92,7 @@ export const useSukebei = () => {
     let cancelled = false;
     electronAPI.torrent.tasks()
       .then((all) => { if (!cancelled && Array.isArray(all)) setTasks(all); })
-      .catch(() => {});
+      .catch(() => { });
     return () => { cancelled = true; };
   }, []);
 
@@ -162,7 +162,7 @@ export const useSukebei = () => {
       try {
         const all = await electronAPI.torrent.tasks();
         if (Array.isArray(all)) setTasks(all);
-      } catch (_e) {}
+      } catch (_e) { }
       return res.taskId || null;
     } catch (err: any) {
       setError(err?.message || '任务启动失败');
@@ -209,7 +209,7 @@ export const useSukebei = () => {
     try {
       const all = await electronAPI.torrent.tasks();
       if (Array.isArray(all)) setTasks(all);
-    } catch (_e) {}
+    } catch (_e) { }
   }, []);
 
   const pauseTask = useCallback(async (taskId: string) => {

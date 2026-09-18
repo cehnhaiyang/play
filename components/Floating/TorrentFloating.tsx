@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Download, FolderOpen, Pause, Play, Search, X, FileDown, Link2, ExternalLink } from 'lucide-react';
-import { useSukebei, CATEGORY_OPTIONS as SUKEBEI_CATEGORIES } from '../../engines';
+import { useSukebei, CATEGORY_OPTIONS as SUKEBEI_CATEGORIES } from '../../hooks';
 import type { TorrentTaskSnapshot } from '../../meta';
 
 // nyaa 表区与 sukebei 里区的分类编码完全不同：旧代码切到 nyaa 还带着里区编码，
@@ -70,10 +70,10 @@ export const TorrentFloating: React.FC = () => {
   const onSiteChange = (site: string) => {
     // 切站后旧分类编码在新站无意义，重置为全部分类后按新条件搜
     const next = { ...query, site };
-    if (site === 'nyaa' && !NYAA_CATEGORIES.some((c) => c.value === query.category)) {
+    if (site === 'nyaa' && !NYAA_CATEGORIES.some((c: { value: string; label: string }) => c.value === query.category)) {
       next.category = '0_0';
     }
-    if (site !== 'nyaa' && !SUKEBEI_CATEGORIES.some((c) => c.value === query.category)) {
+    if (site !== 'nyaa' && !SUKEBEI_CATEGORIES.some((c: { value: string; label: string }) => c.value === query.category)) {
       next.category = '0_0';
     }
     actions.setQuery(next);
@@ -127,7 +127,7 @@ export const TorrentFloating: React.FC = () => {
           <option value="nyaa">nyaa 表区</option>
         </select>
         <select value={query.category} onChange={(e) => set({ category: e.target.value })} className={inputCls}>
-          {categoryOptions.map((c) => (
+          {categoryOptions.map((c: { value: string; label: string }) => (
             <option key={c.value} value={c.value}>{c.label}</option>
           ))}
         </select>
@@ -190,7 +190,7 @@ export const TorrentFloating: React.FC = () => {
             </div>
           )}
           <div className="flex flex-col gap-2">
-            {results.map((it) => (
+            {results.map((it: any) => (
               <div key={`${it.site}-${it.id}`} className="rounded-xl border border-white/10 bg-white/[0.03] p-2.5 transition-colors hover:border-white/20">
                 <div className="line-clamp-2 text-xs font-medium leading-5 text-zinc-100" title={it.title}>
                   {it.title}
@@ -249,7 +249,7 @@ export const TorrentFloating: React.FC = () => {
             </div>
           )}
           <div className="flex flex-col gap-2">
-            {tasks.map((t) => (
+            {tasks.map((t: TorrentTaskSnapshot) => (
               <div key={t.id} className="rounded-xl border border-white/10 bg-white/[0.03] p-2.5">
                 <div className="flex items-center justify-between gap-2">
                   <div className="line-clamp-1 flex-1 text-xs font-medium text-zinc-100" title={t.name}>

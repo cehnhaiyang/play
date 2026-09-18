@@ -1,8 +1,8 @@
 
 import React from 'react';
 import { Home, RotateCw, Globe, Search, Star, Sparkles, Play, Music, BookOpen, Headphones, Film } from 'lucide-react';
-import { Tab, useTabs } from '../../engines/useBrowse/useTabs';
-import { useBookmarks } from '../../engines/useBrowse/useBookmarks';
+import { Tab, useTabs } from '../../hooks/useBrowse/useTabs';
+import { useBookmarks } from '../../hooks/useBrowse/useBookmarks';
 import { isAcgUrl } from '../../utils';
 
 interface AddressBarProps {
@@ -19,6 +19,7 @@ interface AddressBarProps {
     isAnalyzing: boolean;
     onNavigateToPlayer: () => void;
     onNavigateToAudio: () => void;
+    onNavigateToGallery: () => void;
     onOpenGalleryInPlayer?: (url: string) => void;
 }
 
@@ -34,6 +35,7 @@ export const AddressBar: React.FC<AddressBarProps> = ({
     isAnalyzing,
     onNavigateToPlayer,
     onNavigateToAudio,
+    onNavigateToGallery,
     onOpenGalleryInPlayer,
 }) => {
     return (
@@ -129,6 +131,15 @@ export const AddressBar: React.FC<AddressBarProps> = ({
                         </button>
                     );
                 })()}
+
+                <button
+                    onClick={onNavigateToGallery}
+                    className="p-2 bg-slate-800 hover:bg-slate-700 text-rose-400 hover:text-rose-300 rounded-xl transition border border-white/5 flex items-center gap-2 group"
+                    title="ACG画廊"
+                >
+                    <BookOpen className="w-4 h-4 group-hover:scale-110 transition-transform" />
+                    <span className="hidden lg:inline text-xs font-bold">画廊</span>
+                </button>
 
                 <button
                     onClick={onNavigateToAudio}

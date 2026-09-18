@@ -2,9 +2,9 @@
 import React from 'react';
 import { AlertCircle } from 'lucide-react';
 import { WebviewElement } from '../../meta';
-import { Tab } from '../../engines/useBrowse/useTabs';
+import { Tab } from '../../hooks/useBrowse/useTabs';
 import { HomePage } from './HomePage';
-import { useBookmarks } from '../../engines/useBrowse/useBookmarks';
+import { useBookmarks } from '../../hooks/useBrowse/useBookmarks';
 
 interface BrowserViewProps {
     tabs: Tab[];

@@ -1,16 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BookOpen, KeyRound, Magnet, ShieldAlert, Sparkles, X } from 'lucide-react';
-import { useSniff, useTamper } from '../../engines';
+import { KeyRound, Magnet, ShieldAlert, Sparkles, X } from 'lucide-react';
+import { useSniff, useTamper } from '../../hooks';
 import { FoundLink } from '../../meta';
 import { ApiKeyFloating } from './ApiKeyFloating';
 import { SniffResults } from './SniffResults';
 import { TamperFloating } from './TamperFloating';
-import { GalleryFloating } from './GalleryFloating';
 import { TorrentFloating } from './TorrentFloating';
 import { FLOATING_PANEL_OVERLAY, FLOATING_PANEL_SHELL, getFloatingTriggerClassName } from './shared';
 import { loadJSON, saveJSON } from '../../utils/persist';
 
-type FloatingPanelType = 'sniff' | 'tamper' | 'gallery' | 'torrent' | 'apikey';
+type FloatingPanelType = 'sniff' | 'tamper' | 'torrent' | 'apikey';
 
 interface FloatingProps {
   sniffer: ReturnType<typeof useSniff>;
@@ -18,9 +17,6 @@ interface FloatingProps {
   currentUrl: string;
   onPlay: (link: FoundLink) => void;
   onAiAnalyze: () => void;
-  onBrowseGallery?: (gallery: { title: string; gid?: string; pages: { url: string; title: string; page?: number }[] }) => void;
-  onAppendGalleryPages?: (pages: { url: string; title: string; page?: number }[], gid?: string) => void;
-  onMergeGalleryPages?: (pages: { url: string; title: string; page?: number }[], gid?: string) => void;
   onOpenGallery?: (url: string) => void;
 }
 
@@ -51,13 +47,6 @@ const PANEL_META: Record<
     hint: '自定义请求拦截、标头注入与存储管理',
     statusText: '规则引擎就绪',
   },
-  gallery: {
-    label: '图集下载',
-    icon: BookOpen,
-    accent: 'from-rose-500 via-pink-500 to-amber-400',
-    hint: '深度抓取与全本归档 ACG 漫画图集',
-    statusText: '抓取服务在线',
-  },
   torrent: {
     label: '磁力下载',
     icon: Magnet,
@@ -85,9 +74,6 @@ export const Floating: React.FC<FloatingProps> = ({
   currentUrl,
   onPlay,
   onAiAnalyze,
-  onBrowseGallery,
-  onAppendGalleryPages,
-  onMergeGalleryPages,
   onOpenGallery,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -347,17 +333,6 @@ export const Floating: React.FC<FloatingProps> = ({
           </div>
         )}
 
-        {visited.has('gallery') && (
-          <div className={activePanel === 'gallery' ? 'flex h-full min-h-0 flex-col' : 'hidden'}>
-            <GalleryFloating
-              currentUrl={currentUrl}
-              onBrowseInPlayer={onBrowseGallery}
-              onAppendToPlayer={onAppendGalleryPages}
-              onMergeToPlayer={onMergeGalleryPages}
-            />
-          </div>
-        )}
-
         {visited.has('torrent') && (
           <div className={activePanel === 'torrent' ? 'flex h-full min-h-0 flex-col' : 'hidden'}>
             <TorrentFloating />
@@ -376,13 +351,12 @@ export const Floating: React.FC<FloatingProps> = ({
   return (
     <>
       <div
-        className={`fixed z-[70] flex flex-col pointer-events-auto select-none group ${
-          isOpen
-            ? FLOATING_PANEL_SHELL
-            : `${getFloatingTriggerClassName(
-                'cursor-grab active:cursor-grabbing hover:scale-105 active:scale-95'
-              )} transition-transform`
-        }`}
+        className={`fixed z-[70] flex flex-col pointer-events-auto select-none group ${isOpen
+          ? FLOATING_PANEL_SHELL
+          : `${getFloatingTriggerClassName(
+            'cursor-grab active:cursor-grabbing hover:scale-105 active:scale-95'
+          )} transition-transform`
+          }`}
         style={panelStyle}
         onPointerDown={!isOpen ? handlePointerDown : undefined}
         onPointerMove={!isOpen ? handlePointerMove : undefined}
@@ -400,9 +374,8 @@ export const Floating: React.FC<FloatingProps> = ({
         {/* ======================= 折叠状态：未来感微晶悬浮球 ======================= */}
         {!isOpen && (
           <div
-            className={`relative flex h-full w-full items-center justify-center transition-all duration-300 ${
-              isIdle ? 'opacity-80 scale-95' : 'opacity-100 scale-100'
-            }`}
+            className={`relative flex h-full w-full items-center justify-center transition-all duration-300 ${isIdle ? 'opacity-80 scale-95' : 'opacity-100 scale-100'
+              }`}
           >
             {/* 1. 声纳扩散波纹（嗅探到资源时向外扩散动态光波） */}
             {sniffer.foundLinks.length > 0 && (
@@ -444,9 +417,8 @@ export const Floating: React.FC<FloatingProps> = ({
             {/* 4. 悬停微型快捷 HUD / 磁吸轮盘 */}
             {isHovered && !isDragging && !isOpen && (
               <div
-                className={`absolute top-1/2 -translate-y-1/2 z-50 flex items-center gap-1.5 rounded-2xl border border-white/15 bg-slate-950/90 p-1.5 backdrop-blur-2xl shadow-[0_16px_40px_rgba(0,0,0,0.65)] animate-in fade-in zoom-in-95 duration-150 pointer-events-auto ${
-                  position.x > window.innerWidth / 2 ? 'right-full mr-3.5' : 'left-full ml-3.5'
-                }`}
+                className={`absolute top-1/2 -translate-y-1/2 z-50 flex items-center gap-1.5 rounded-2xl border border-white/15 bg-slate-950/90 p-1.5 backdrop-blur-2xl shadow-[0_16px_40px_rgba(0,0,0,0.65)] animate-in fade-in zoom-in-95 duration-150 pointer-events-auto ${position.x > window.innerWidth / 2 ? 'right-full mr-3.5' : 'left-full ml-3.5'
+                  }`}
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => e.stopPropagation()}
               >
@@ -483,11 +455,10 @@ export const Floating: React.FC<FloatingProps> = ({
                           setActivePanel(panelKey);
                           setIsOpen(true);
                         }}
-                        className={`relative flex h-8 w-8 items-center justify-center rounded-xl border transition-all ${
-                          isCurrent
-                            ? `border-white/25 bg-gradient-to-br ${meta.accent} text-white shadow-md`
-                            : 'border-white/10 bg-white/5 text-zinc-400 hover:border-white/20 hover:bg-white/15 hover:text-white'
-                        }`}
+                        className={`relative flex h-8 w-8 items-center justify-center rounded-xl border transition-all ${isCurrent
+                          ? `border-white/25 bg-gradient-to-br ${meta.accent} text-white shadow-md`
+                          : 'border-white/10 bg-white/5 text-zinc-400 hover:border-white/20 hover:bg-white/15 hover:text-white'
+                          }`}
                         title={`一键切换到 ${meta.label}`}
                       >
                         <Icon className="h-4 w-4" />
@@ -509,96 +480,93 @@ export const Floating: React.FC<FloatingProps> = ({
         {/* 常驻挂载、关闭只隐藏：关球不再卸载任何面板，抓取进度/输入/滚动原样保留，
             重开就是单纯显示。如改回条件渲染，关球会停掉 ACG 抓取并清空所有状态 */}
         <div
-          className={`relative h-full flex-col p-5 transition-opacity duration-200 ${
-            isOpen ? 'flex' : 'hidden'
-          } ${contentVisible ? 'opacity-100' : 'opacity-0'}`}
+          className={`relative h-full flex-col p-5 transition-opacity duration-200 ${isOpen ? 'flex' : 'hidden'
+            } ${contentVisible ? 'opacity-100' : 'opacity-0'}`}
         >
-            {/* 弥散柔光氛围底光 */}
-            <div
-              className={`pointer-events-none absolute -inset-10 rounded-[48px] bg-gradient-to-br ${activeMeta.accent} opacity-15 blur-3xl transition-all duration-700`}
-            />
+          {/* 弥散柔光氛围底光 */}
+          <div
+            className={`pointer-events-none absolute -inset-10 rounded-[48px] bg-gradient-to-br ${activeMeta.accent} opacity-15 blur-3xl transition-all duration-700`}
+          />
 
-            {/* 面板头部 */}
-            <div className="relative z-10 flex shrink-0 items-center justify-between gap-4 border-b border-white/10 pb-4">
-              <div className="flex items-center gap-3">
-                <div
-                  className={`flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br ${activeMeta.accent} text-white shadow-[0_8px_20px_rgba(0,0,0,0.3)]`}
-                >
-                  <ActiveIcon className="h-5 w-5" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2.5">
-                    <span className="text-xl font-bold tracking-tight text-white">
-                      {activeMeta.label}
-                    </span>
-                    <span className="flex items-center gap-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-medium text-emerald-400">
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                      {activeMeta.statusText}
-                    </span>
-                  </div>
-                  <div className="mt-0.5 text-xs text-zinc-400">{activeMeta.hint}</div>
-                </div>
+          {/* 面板头部 */}
+          <div className="relative z-10 flex shrink-0 items-center justify-between gap-4 border-b border-white/10 pb-4">
+            <div className="flex items-center gap-3">
+              <div
+                className={`flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br ${activeMeta.accent} text-white shadow-[0_8px_20px_rgba(0,0,0,0.3)]`}
+              >
+                <ActiveIcon className="h-5 w-5" />
               </div>
-
-              {/* 操作区 */}
-              <div className="flex items-center gap-2">
-                <span className="hidden items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-zinc-400 sm:inline-flex">
-                  <kbd className="font-mono text-[10px] text-zinc-300">ESC</kbd> 关闭
-                </span>
-                <button
-                  onClick={() => setIsOpen(false)}
-                  className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/5 text-zinc-400 transition-all hover:rotate-90 hover:border-white/20 hover:bg-white/15 hover:text-white active:scale-95"
-                  title="关闭面板 (Esc)"
-                >
-                  <X className="h-4 w-4" />
-                </button>
+              <div>
+                <div className="flex items-center gap-2.5">
+                  <span className="text-xl font-bold tracking-tight text-white">
+                    {activeMeta.label}
+                  </span>
+                  <span className="flex items-center gap-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-medium text-emerald-400">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    {activeMeta.statusText}
+                  </span>
+                </div>
+                <div className="mt-0.5 text-xs text-zinc-400">{activeMeta.hint}</div>
               </div>
             </div>
 
-            {/* 现代化胶囊分段导航栏 */}
-            <div className="relative z-10 mt-3.5 flex shrink-0 items-center gap-1.5 rounded-2xl border border-white/10 bg-white/[0.04] p-1.5 backdrop-blur-md">
-              {(Object.keys(PANEL_META) as FloatingPanelType[]).map((panel) => {
-                const meta = PANEL_META[panel];
-                const Icon = meta.icon;
-                const isActive = panel === activePanel;
-                const count = panel === 'sniff' ? sniffer.foundLinks.length : 0;
-
-                return (
-                  <button
-                    key={panel}
-                    onClick={() => setActivePanel(panel)}
-                    className={`relative flex flex-1 items-center justify-center gap-2 rounded-xl px-3 py-2 text-xs font-semibold transition-all duration-200 ${
-                      isActive
-                        ? 'border border-white/20 bg-gradient-to-r from-white/15 to-white/10 text-white shadow-[0_4px_16px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.2)]'
-                        : 'border border-transparent text-zinc-400 hover:border-white/10 hover:bg-white/5 hover:text-zinc-200'
-                    }`}
-                    title={meta.hint}
-                  >
-                    <div
-                      className={`flex h-6 w-6 items-center justify-center rounded-lg transition-all ${
-                        isActive
-                          ? `bg-gradient-to-br ${meta.accent} text-white shadow-sm`
-                          : 'text-zinc-400'
-                      }`}
-                    >
-                      <Icon className="h-3.5 w-3.5" />
-                    </div>
-                    <span className="tracking-wide">{meta.label}</span>
-                    {count > 0 && (
-                      <span className="flex h-4 min-w-[18px] items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-bold text-white shadow-[0_0_8px_rgba(244,63,94,0.5)]">
-                        {count > 99 ? '99+' : count}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* 主内容展示区 */}
-            <div className="custom-scrollbar relative z-10 mt-3.5 min-h-0 flex-1 overflow-hidden rounded-[20px] border border-white/10 bg-slate-950/40 p-4 shadow-inner">
-              {renderPanelContent()}
+            {/* 操作区 */}
+            <div className="flex items-center gap-2">
+              <span className="hidden items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-zinc-400 sm:inline-flex">
+                <kbd className="font-mono text-[10px] text-zinc-300">ESC</kbd> 关闭
+              </span>
+              <button
+                onClick={() => setIsOpen(false)}
+                className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/5 text-zinc-400 transition-all hover:rotate-90 hover:border-white/20 hover:bg-white/15 hover:text-white active:scale-95"
+                title="关闭面板 (Esc)"
+              >
+                <X className="h-4 w-4" />
+              </button>
             </div>
           </div>
+
+          {/* 现代化胶囊分段导航栏 */}
+          <div className="relative z-10 mt-3.5 flex shrink-0 items-center gap-1.5 rounded-2xl border border-white/10 bg-white/[0.04] p-1.5 backdrop-blur-md">
+            {(Object.keys(PANEL_META) as FloatingPanelType[]).map((panel) => {
+              const meta = PANEL_META[panel];
+              const Icon = meta.icon;
+              const isActive = panel === activePanel;
+              const count = panel === 'sniff' ? sniffer.foundLinks.length : 0;
+
+              return (
+                <button
+                  key={panel}
+                  onClick={() => setActivePanel(panel)}
+                  className={`relative flex flex-1 items-center justify-center gap-2 rounded-xl px-3 py-2 text-xs font-semibold transition-all duration-200 ${isActive
+                    ? 'border border-white/20 bg-gradient-to-r from-white/15 to-white/10 text-white shadow-[0_4px_16px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.2)]'
+                    : 'border border-transparent text-zinc-400 hover:border-white/10 hover:bg-white/5 hover:text-zinc-200'
+                    }`}
+                  title={meta.hint}
+                >
+                  <div
+                    className={`flex h-6 w-6 items-center justify-center rounded-lg transition-all ${isActive
+                      ? `bg-gradient-to-br ${meta.accent} text-white shadow-sm`
+                      : 'text-zinc-400'
+                      }`}
+                  >
+                    <Icon className="h-3.5 w-3.5" />
+                  </div>
+                  <span className="tracking-wide">{meta.label}</span>
+                  {count > 0 && (
+                    <span className="flex h-4 min-w-[18px] items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-bold text-white shadow-[0_0_8px_rgba(244,63,94,0.5)]">
+                      {count > 99 ? '99+' : count}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* 主内容展示区 */}
+          <div className="custom-scrollbar relative z-10 mt-3.5 min-h-0 flex-1 overflow-hidden rounded-[20px] border border-white/10 bg-slate-950/40 p-4 shadow-inner">
+            {renderPanelContent()}
+          </div>
+        </div>
       </div>
 
       {/* 遮罩背景 */}

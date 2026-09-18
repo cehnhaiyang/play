@@ -1,7 +1,7 @@
 
 import React from 'react';
 import { RotateCw, Globe, X, Plus } from 'lucide-react';
-import { useTabs } from '../../engines/useBrowse/useTabs';
+import { Tab, useTabs } from '../../hooks/useBrowse/useTabs';
 
 interface TabsBarProps {
     tabs: ReturnType<typeof useTabs>['tabs'];
@@ -12,7 +12,7 @@ interface TabsBarProps {
 export const TabsBar: React.FC<TabsBarProps> = ({ tabs, activeTabId, actions }) => {
     return (
         <div className="h-9 bg-slate-900 flex items-center px-2 gap-1 border-b border-slate-800 overflow-x-auto scrollbar-hide">
-            {tabs.map(tab => (
+            {tabs.map((tab: Tab) => (
                 <div
                     key={tab.id}
                     onClick={() => actions.switchTab(tab.id)}

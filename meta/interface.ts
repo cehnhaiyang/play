@@ -552,55 +552,59 @@ export interface WebviewElement extends HTMLElement {
 export type AcgmhoChannelKind = 'image' | 'video' | 'audio' | 'mixed';
 
 export interface AcgmhoChannelDef {
-  /** 频道 id：latest | hot | manga | album | animation | hanime | asmr | cosplay | webtoon | western */
-  id: string;
-  /** 中文展示名 */
-  label: string;
-  /** 站点路径前缀 */
-  base: string;
-  /** 内容主类型（cosplay 为图文视频混排） */
-  kind: AcgmhoChannelKind;
+    /** 频道 id：latest | hot | manga | album | animation | hanime | asmr | cosplay | webtoon | western */
+    id: string;
+    /** 中文展示名 */
+    label: string;
+    /** 站点路径前缀 */
+    base: string;
+    /** 内容主类型（cosplay 为图文视频混排） */
+    kind: AcgmhoChannelKind;
 }
 
 /**
  * 画廊列表条目（封面流）
  */
 export interface AcgmhoGalleryItem {
-  /** 作品数字 ID */
-  gid: string;
-  /** 详情页完整地址 */
-  url: string;
-  /** 标题 */
-  title: string;
-  /** 封面直链（可能为空） */
-  cover: string;
-  /** 上架日期文本 */
-  date?: string;
-  /** 语言 */
-  lang?: string;
-  /** 标签/分类 */
-  tag?: string;
-  /** 页数文本（漫画系） */
-  pages?: string;
-  /** 观看数（视频系） */
-  views?: string;
-  /** 时长（视频/音频） */
-  duration?: string;
-  /** 作者/社团（有声） */
-  artist?: string;
-  /** 站点前缀 h | hentai | gif | hanime | asmr | cos | webtoon | western */
-  prefix: string;
-  /** 条目媒体类型 */
-  kind: 'image' | 'video' | 'audio';
-  /** 所属频道 id */
-  channel: string;
+    /** 作品数字 ID */
+    gid: string;
+    /** 详情页完整地址 */
+    url: string;
+    /** 标题 */
+    title: string;
+    /** 封面直链（可能为空） */
+    cover: string;
+    /** 上架日期文本 */
+    date?: string;
+    /** 语言 */
+    lang?: string;
+    /** 标签/分类 */
+    tag?: string;
+    /** 页数文本（漫画系） */
+    pages?: string;
+    /** 观看数（视频系） */
+    views?: string;
+    /** 时长（视频/音频） */
+    duration?: string;
+    /** 作者/社团（有声） */
+    artist?: string;
+    /** 站点前缀 h | hentai | gif | hanime | asmr | cos | webtoon | western */
+    prefix: string;
+    /** 条目媒体类型 */
+    kind: 'image' | 'video' | 'audio';
+    /** 所属频道 id */
+    channel: string;
 }
 
 export interface AcgmhoChannelListResult {
-  channelId: string;
-  page: number;
-  hasMore: boolean;
-  items: AcgmhoGalleryItem[];
+    channelId: string;
+    page: number;
+    hasMore: boolean;
+    items: AcgmhoGalleryItem[];
+    /** 搜索关键词（搜索流） */
+    query?: string;
+    /** 列表页 302 后的规范地址：搜索翻页必须基于它（/q/ 翻页服务端永远回第 1 页） */
+    baseUrl?: string;
 }
 
 /**
@@ -611,8 +615,8 @@ export interface ElectronAcgmhoAPI {
     probe: (gidOrUrl: string) => Promise<GalleryProbeResult>;
     /** 频道表（内置浏览画廊左侧分类） */
     channels: () => Promise<AcgmhoChannelDef[]>;
-    /** 频道列表（分页）：{ channelId, page } */
-    channelList: (options: { channelId: string; page?: number }) => Promise<{ success: boolean; message?: string } & AcgmhoChannelListResult>;
+    /** 频道列表（分页）：{ channelId, page, query, baseUrl }，baseUrl 为上一页规范地址（搜索翻页用） */
+    channelList: (options: { channelId: string; page?: number; query?: string; baseUrl?: string }) => Promise<{ success: boolean; message?: string } & AcgmhoChannelListResult>;
     /** 开启画册批量下载任务 */
     startDownload: (options: GalleryDownloadOptions) => Promise<{
         success: boolean;
@@ -640,6 +644,18 @@ export interface ElectronAcgmhoAPI {
     cancelFetchPages: (gid: string, runId?: string) => Promise<void>;
     /** 监听抓取进度事件，返回取消订阅函数 */
     onFetchProgress: (callback: (progress: GalleryFetchProgress) => void) => () => void;
+    /** 边下边播落盘：按直链保存图片并写 manifest/.gallery 徽标（同 gid 新任务顶掉旧任务） */
+    saveImages: (options: GallerySaveOptions) => Promise<{
+        success: boolean;
+        outDir?: string;
+        manifestPath?: string;
+        galleryMarkerPath?: string;
+        savedFiles?: string[];
+    }>;
+    /** 取消指定 gid 的落盘任务 */
+    cancelSaveImages: (gid: string) => Promise<void>;
+    /** 监听落盘进度事件（含 file-done 单页完成），返回取消订阅函数 */
+    onSaveProgress: (callback: (progress: GallerySaveProgress) => void) => () => void;
 }
 
 /**
@@ -782,6 +798,8 @@ export interface ElectronAPI {
     sukebei?: ElectronSukebeiAPI;
     /** 内置 BT 下载引擎 API (可选模块) */
     torrent?: ElectronTorrentAPI;
+    /** 单文件 .gallery 打包保存 API (可选模块，纯浏览器环境不存在) */
+    galleryPack?: ElectronGalleryPackAPI;
 }
 
 /**
@@ -844,6 +862,11 @@ export interface GalleryProbeResult {
     prefix: string;
     /** 第一页页面地址 */
     firstPageUrl: string;
+    /**
+     * 第一页 HTML 原文（仅内存传递：下载/抓取复用它免去重下一遍第 1 页）。
+     * 体积大，禁止进 localStorage（落盘前必须剔除，见 useAcgmho.StoredProbe）。
+     */
+    firstHtml?: string;
 
     // 多媒体扩展字段
     /** 媒体类型 */
@@ -874,6 +897,8 @@ export interface GalleryDownloadOptions {
     outDir?: string;
     /** 抓取请求间隔延迟 (毫秒，防风控防封禁) */
     delayMs?: number;
+    /** 配套探测结果（gid+前缀双匹配时复用，防同名异站帖子串台） */
+    probe?: GalleryProbeResult;
 }
 
 /**
@@ -941,14 +966,111 @@ export interface GalleryManifest {
 }
 
 /**
+ * 边下边播落盘：单页保存完成记录（主进程 file-done 事件携带）
+ */
+export interface GallerySavedFile {
+    /** 页码（从 1 开始） */
+    page: number;
+    /** 原始远程直链 */
+    url: string;
+    /** 页标题 */
+    title?: string;
+    /** 本地 file:// URL（可直接塞进播放列表） */
+    localUrl: string;
+    /** 本地绝对路径 */
+    savedPath: string;
+    /** 文件大小（字节） */
+    bytes: number;
+}
+
+/**
+ * 边下边播落盘任务配置
+ */
+export interface GallerySaveOptions {
+    /** 作品数字 ID */
+    gid: string;
+    /** 任务键（prefix:gid，缺省由渲染层按 prefix 推导，主进程回传进度时原样带回） */
+    taskKey?: string;
+    /** 作品标题（用于目录徽标/manifest） */
+    title?: string;
+    /** 站点前缀（用于重建 Referer 防盗链） */
+    prefix?: string;
+    /** 详情页地址（写入徽标来源） */
+    sourceUrl?: string;
+    /** 总页数提示（写入徽标） */
+    totalPages?: number;
+    /** 待保存的图片直链（页码升序为佳） */
+    items: { page: number; url: string; title?: string }[];
+    /** 自定义保存目录（默认 Downloads/acgmho/\<prefix\>-\<gid\>） */
+    outDir?: string;
+}
+
+/**
+ * 边下边播落盘进度通知
+ */
+export interface GallerySaveProgress {
+    /** 作品数字 ID */
+    gid: string;
+    /** 任务键（prefix:gid）：同数字 gid 不同前缀的两本作品凭此区分进度 */
+    taskKey?: string;
+    /** 作品标题 */
+    title?: string;
+    /** 已落盘文件数 */
+    doneFiles: number;
+    /** 待保存文件总数 */
+    totalFiles: number;
+    /** 完成百分比（按文件数，0 ~ 100） */
+    percent: number;
+    /** 任务状态（复用下载状态机，另加 file-done 单页完成事件） */
+    status: GalleryDownloadStatus | 'file-done';
+    /** 状态文字说明 */
+    message?: string;
+    /** 落盘目录 */
+    outDir?: string;
+    /** 单页落盘完成时携带（status === 'file-done'） */
+    file?: GallerySavedFile;
+}
+
+/**
+ * 单文件 .gallery（ZIP 改后缀）保存请求
+ */
+export interface GalleryPackSaveOptions {
+    /** 建议文件名（不带路径，如 `我的画廊.gallery`） */
+    fileName: string;
+    /** ZIP 包字节 */
+    data: ArrayBuffer;
+}
+
+/**
+ * 单文件 .gallery 保存结果
+ */
+export interface GalleryPackSaveResult {
+    success: boolean;
+    /** 用户取消了保存对话框 */
+    cancelled?: boolean;
+    /** 实际写入的绝对路径 */
+    filePath?: string;
+    /** 给用户的说明文字 */
+    message?: string;
+}
+
+/**
+ * Electron 注入的单文件 .gallery 打包保存 API
+ */
+export interface ElectronGalleryPackAPI {
+    /** 弹另存为对话框（默认下载目录 + 建议文件名），用户确认后写入 */
+    savePack: (options: GalleryPackSaveOptions) => Promise<GalleryPackSaveResult>;
+}
+
+/**
  * 画册页面基础项数据
  */
 export interface GalleryPageItem {
     /** 页码编号 */
     page: number;
-    /** 页面网页地址 */
+    /** 本页图片直链（非详情页地址，可直接进播放列表/下载） */
     url: string;
-    /** 页面标题 */
+    /** 页标题（如"标题 - P01/20"） */
     title: string;
     /** 图片 alt 描述 */
     alt?: string | null;
@@ -966,10 +1088,8 @@ export interface GalleryFetchProgress {
     current: number;
     /** 预计总页数 */
     total: number;
-    /** 当前刚抓取到的单页信息 */
-    item: GalleryPageItem;
-    /** 累计已获取的所有页面列表 */
-    records: GalleryPageItem[];
+    /** 本次事件新增的单页（失败页为 null，渲染层凭它流式进播放列表） */
+    item?: GalleryPageItem | null;
     /** 抓取阶段状态 */
     status: GalleryFetchStatus;
 }

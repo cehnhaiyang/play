@@ -5,7 +5,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self' data: blob: http://localhost:5173 https://esm.sh https://generativelanguage.googleapis.com https://*.googleapis.com https:; script-src 'self' 'unsafe-inline' http://localhost:5173 https://esm.sh; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; connect-src 'self' data: blob: ws://localhost:5173 http://localhost:5173 https://esm.sh https://generativelanguage.googleapis.com https://*.googleapis.com https:; font-src 'self' data: https:; frame-src 'self' https:; worker-src 'self' blob:;" />
+        content="default-src 'self' data: blob: http://localhost:5173 https://esm.sh https://generativelanguage.googleapis.com https://*.googleapis.com https:; script-src 'self' 'unsafe-inline' http://localhost:5173 https://esm.sh; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: file:; media-src 'self' data: blob: https: file:; connect-src 'self' data: blob: ws://localhost:5173 http://localhost:5173 https://esm.sh https://generativelanguage.googleapis.com https://*.googleapis.com https: file:; font-src 'self' data: https:; frame-src 'self' https:; worker-src 'self' blob:;" />
+    <!-- 注意：img/media/connect 必须放行 file: —— 画廊“边下边播”落盘后，条目 URL 会由远端 https 原位替换为本地 file://（见 bindSaveFileSync → mergeOrderedStreams）；没有 file: 会报 CSP 拦截，表现为“放一会图全裂、本地文件好好的”。Electron 的 webSecurity:false 只关同源策略，不管 CSP，不要删这三处 file: -->
     <title>高级播放器</title>
     <style>
         .scrollbar-thin::-webkit-scrollbar {

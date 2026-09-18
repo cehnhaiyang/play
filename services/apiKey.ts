@@ -1,3 +1,5 @@
+import { loadStr, saveStr } from '../utils/persist';
+
 const API_KEY_STORAGE_KEY = 'play_gemini_api_key';
 
 type RuntimeProcess = {
@@ -8,7 +10,7 @@ type RuntimeProcess = {
 
 export const getStoredApiKey = (): string => {
   try {
-    return localStorage.getItem(API_KEY_STORAGE_KEY)?.trim() || '';
+    return loadStr(API_KEY_STORAGE_KEY, '', '').trim() || '';
   } catch (_error) {
     return '';
   }
@@ -39,11 +41,17 @@ export const syncRuntimeApiKey = () => {
 
 export const saveApiKey = (apiKey: string) => {
   const normalizedKey = apiKey.trim();
-  localStorage.setItem(API_KEY_STORAGE_KEY, normalizedKey);
+  // 配额异常时只丢本次保存，不抛错中断调用方
+  saveStr(API_KEY_STORAGE_KEY, normalizedKey, '');
   syncRuntimeApiKey();
 };
 
 export const clearApiKey = () => {
-  localStorage.removeItem(API_KEY_STORAGE_KEY);
+  saveStr(API_KEY_STORAGE_KEY, '', '');
+  try {
+    localStorage.removeItem(API_KEY_STORAGE_KEY);
+  } catch (_error) {
+    // ignore
+  }
   syncRuntimeApiKey();
 };

@@ -16,7 +16,7 @@ import {
   Trash2,
   Zap,
 } from 'lucide-react';
-import { useTamper } from '../../engines';
+import { useTamper } from '../../hooks';
 import { HeaderRule, TamperRule, getElectronAPI } from '../../meta';
 import { generateId } from '../../utils';
 

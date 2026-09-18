@@ -1,4 +1,4 @@
-import { VideoFile, MediaType } from './meta';
+import { VideoFile, MediaType, GalleryProbeResult } from './meta';
 
 /* -------------------------------------------------------------------------- */
 /*                                常量定义                                     */
@@ -122,26 +122,36 @@ export interface ResolvedProbeMedia {
     status: string | null;
 }
 
+/** 探测音轨单项（与 GalleryProbeResult.audioList 同构，url 为空者视为无效） */
+interface ProbeAudioTrack {
+    name?: string;
+    url?: string;
+    artist?: string;
+    cover?: string;
+    type?: string;
+}
+
 /**
  * ACG probe 结果统一解析（App 与 PlayPanel 共用，消除三处重复分支）。
  * 防护：video/audio 分支缺有效 URL 时不再构造坏条目，而是回落并给出 status。
  */
-export const resolveProbeMedia = (probe: any): ResolvedProbeMedia => {
+export const resolveProbeMedia = (probe: GalleryProbeResult | null | undefined): ResolvedProbeMedia => {
     if (!probe) return { kind: 'none', streams: [], totalPages: 0, status: '未能探测到作品信息，请核对链接或作品 ID' };
     const title = probe.title || '未命名作品';
     const totalPages = Number(probe.totalPages) || 0;
 
-    const audioList = Array.isArray(probe.audioList) ? probe.audioList.filter((a: any) => a && a.url) : [];
+    const rawList: ProbeAudioTrack[] = Array.isArray(probe.audioList) ? probe.audioList : [];
+    const audioList = rawList.filter((a): a is ProbeAudioTrack & { url: string } => Boolean(a && a.url));
     if (probe.mediaType === 'video' || probe.category === 'animation' || probe.videoUrl) {
-        const vUrl = probe.videoUrl || probe.firstImgUrl;
-        if (!vUrl) return { kind: 'none', streams: [], totalPages, status: '作品中未解析到可播放的媒体资源' };
-        return { kind: 'video', streams: [{ url: vUrl, name: title, title }], totalPages, status: null };
+        // 无视频直链时不再拿封面图冒充视频（会产生播不出的坏条目），与音频分支同口径回落
+        if (!probe.videoUrl) return { kind: 'none', streams: [], totalPages, status: '该动画作品未解析到可播放的视频资源' };
+        return { kind: 'video', streams: [{ url: probe.videoUrl, name: title, title }], totalPages, status: null };
     }
     if (probe.mediaType === 'audio' || probe.category === 'asmr' || audioList.length > 0) {
         if (audioList.length > 0) {
             return {
                 kind: 'audio',
-                streams: audioList.map((a: any, idx: number) => ({
+                streams: audioList.map((a, idx: number) => ({
                     url: a.url,
                     name: a.name || `${title} - 音轨 ${idx + 1}`,
                     title: a.name || `${title} - 音轨 ${idx + 1}`,

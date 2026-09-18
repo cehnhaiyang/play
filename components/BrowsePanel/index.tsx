@@ -1,6 +1,6 @@
 
 import React from 'react';
-import { useBrowse } from '../../engines';
+import { useBrowse } from '../../hooks';
 import { TabsBar } from './TabsBar';
 import { AddressBar } from './AddressBar';
 import { BrowserView } from './BrowserView';
@@ -8,6 +8,7 @@ import { BrowserView } from './BrowserView';
 interface BrowsePanelProps {
     onNavigateToPlayer: () => void;
     onNavigateToAudio: () => void;
+    onNavigateToGallery: () => void;
     onOpenGalleryInPlayer?: (url: string) => void;
     isVisible: boolean;
     browse: ReturnType<typeof useBrowse>;
@@ -16,6 +17,7 @@ interface BrowsePanelProps {
 export const BrowsePanel: React.FC<BrowsePanelProps> = ({
     onNavigateToPlayer,
     onNavigateToAudio,
+    onNavigateToGallery,
     onOpenGalleryInPlayer,
     isVisible,
     browse
@@ -62,6 +64,7 @@ export const BrowsePanel: React.FC<BrowsePanelProps> = ({
                 isAnalyzing={isAnalyzing}
                 onNavigateToPlayer={onNavigateToPlayer}
                 onNavigateToAudio={onNavigateToAudio}
+                onNavigateToGallery={onNavigateToGallery}
                 onOpenGalleryInPlayer={onOpenGalleryInPlayer}
             />
 

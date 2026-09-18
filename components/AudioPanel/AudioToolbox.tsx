@@ -7,13 +7,27 @@ import {
     ArrowUpTrayIcon, 
     ArrowDownTrayIcon 
 } from '@heroicons/react/24/outline';
-import { useAudio } from '../../engines';
+import { useAudio } from '../../hooks';
 
 type ToolMode = 'converter' | 'analyzer' | 'fixer';
 
-// 使用 useAudio 提供的 tools
 interface AudioToolboxProps {
-    tools: ReturnType<typeof useAudio>['tools'];
+    tools: {
+        converter: {
+            state: { isProcessing: boolean; logs: string[] };
+            convert: (files: FileList | null, target: 'wav2asf' | 'asf2wav') => Promise<void>;
+        };
+        analyzer: {
+            result: ReturnType<typeof useAudio>['state']['analyzerResult'];
+            analyze: (file: File) => Promise<void>;
+        };
+        fixer: {
+            state: { file: File | null; gain: number; isProcessing: boolean };
+            setFile: (file: File | null) => void;
+            setGain: (gain: number) => void;
+            applyFix: () => Promise<void>;
+        };
+    };
 }
 
 const AudioToolbox: React.FC<AudioToolboxProps> = ({ tools }) => {
