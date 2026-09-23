@@ -1,7 +1,6 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { GoogleGenAI } from '@google/genai';
 import { DownloadCapabilities, DownloadMediaResult, FoundLink, MediaType, WebviewElement, getElectronAPI } from '../../meta';
-import { getResolvedApiKey, syncRuntimeApiKey } from '../../services/apiKey';
+import { extractMediaLinks } from '../../services/AiService';
 import { loadJSON, saveJSON } from '../../utils/persist';
 import { isAcgUrl } from '../../utils';
 
@@ -484,13 +483,6 @@ export const useSniff = (options?: UseSniffOptions) => {
   }, [addLinks, extractLinksLocally]);
 
   const analyzeWithAi = useCallback(async (targetUrl: string) => {
-    syncRuntimeApiKey();
-    const apiKey = getResolvedApiKey();
-    if (!apiKey) {
-      setError('未配置 API Key，无法启用 AI 深度分析。');
-      return;
-    }
-
     setIsAnalyzing(true);
     setError('');
     setStatusMessage('正在提取页面上下文供 AI 分析...');
@@ -519,58 +511,20 @@ export const useSniff = (options?: UseSniffOptions) => {
         }
       }
 
-      const previewContent = content.length > 80000 ? content.slice(0, 80000) : content;
-
       setStatusMessage('AI 正在深度解析页面流媒体与直链...');
-      const ai = new GoogleGenAI({ apiKey });
-      const result = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: {
-          role: 'user',
-          parts: [{
-            text: `Extract direct media URLs from the text below.
-Target: Stream (m3u8, mpd), Video (mp4, mkv, etc), Audio (mp3, etc), Images (high res).
-Return strictly JSON array: [{"url": "...", "title": "...", "type": "video"}]
-Do not wrap in markdown code blocks. Just the raw JSON.
-Text: ${previewContent}`,
-          }],
-        },
-      });
+      const extracted = await extractMediaLinks(content, activeTabRef.current?.title || '');
 
-      const text = result.text || '';
-      const jsonMatch = text.match(/\[[\s\S]*\]/);
-      if (!jsonMatch) {
+      if (extracted.length === 0) {
         setStatusMessage('AI 分析完成，未发现额外结构化资源。');
         return;
       }
 
-      const aiLinks = JSON.parse(jsonMatch[0]) as Array<Partial<FoundLink> & { url: string }>;
-      // AI 输出不可信：只收录 http(s) 直链、已知媒体类型，ext 去掉 query/hash，上限 50 条
-      const KNOWN_TYPES: MediaType[] = ['stream', 'video', 'audio', 'image', 'document'];
-      const formattedLinks: FoundLink[] = aiLinks
-        .filter((item) => typeof item?.url === 'string' && /^(https?:\/\/|blob:)/i.test(item.url.trim()))
-        .slice(0, 50)
-        .map((item): FoundLink | null => {
-          const cleanUrl = (item.url as string).trim();
-          const pathPart = cleanUrl.split('?')[0].split('#')[0];
-          const extGuess = pathPart.split('.').pop()?.toLowerCase();
-          const ext = extGuess && /^[a-z0-9]{2,5}$/.test(extGuess) ? extGuess : 'unknown';
-          const type: MediaType = KNOWN_TYPES.includes(item.type as MediaType)
-            ? (item.type as MediaType)
-            : 'other';
-          // 'other' 非媒体候选项直接丢弃，避免污染嗅探列表
-          if (type === 'other') return null;
-          return {
-            url: cleanUrl,
-            title: item.title || activeTabRef.current?.title || 'AI 识别资源',
-            type,
-            ext,
-            source: 'ai',
-            pageUrl: targetUrl,
-            referer: targetUrl,
-          };
-        })
-        .filter((l): l is FoundLink => l !== null);
+      const formattedLinks: FoundLink[] = extracted.map((item) => ({
+        ...item,
+        source: 'ai',
+        pageUrl: targetUrl,
+        referer: targetUrl,
+      }));
 
       addLinks(formattedLinks);
       setStatusMessage(`AI 深度分析完成，收录 ${formattedLinks.length} 个候选资源。`);

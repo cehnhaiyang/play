@@ -30,6 +30,67 @@
     }
 }
 
+/* 浮层入场动效。
+   Tailwind v4 不含 animate-in / fade-in / zoom-in-* 这一族（那是 tailwindcss-animate
+   插件的产物），本项目 tailwind.config.js 的 plugins 为空，所以这些类此前全是空转：
+   弹窗只有生硬闪现。这里补齐实际用到的四个，名字与旧类保持一致以免大范围改 JSX。 */
+@keyframes ui-fade-in {
+    from {
+        opacity: 0;
+    }
+
+    to {
+        opacity: 1;
+    }
+}
+
+@keyframes ui-zoom-in {
+    from {
+        opacity: 0;
+        transform: scale(var(--ui-zoom-from, 0.95));
+    }
+
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+.animate-in {
+    animation-duration: 150ms;
+    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+    animation-fill-mode: both;
+}
+
+.animate-in.fade-in {
+    animation-name: ui-fade-in;
+}
+
+.animate-in.zoom-in-95 {
+    --ui-zoom-from: 0.95;
+    animation-name: ui-zoom-in;
+}
+
+.animate-in.zoom-in-75 {
+    --ui-zoom-from: 0.75;
+    animation-name: ui-zoom-in;
+}
+
+/* AudioPanel 用了 4 处 animate-fade-in（AudioToolbox ×3、index ×1），
+   但 Tailwind v4 与本项目都没定义过它 —— 与 animate-in 同源问题。
+   这里直接映射到上面的 ui-fade-in，让那 4 处真的淡入。 */
+.animate-fade-in {
+    animation: ui-fade-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* 尊重系统「减少动态效果」：关掉浮层缩放入场，仅保留瞬时切换 */
+@media (prefers-reduced-motion: reduce) {
+    .animate-in,
+    .animate-fade-in {
+        animation: none;
+    }
+}
+
 /* 悬浮球未来感与微晶动效 */
 @keyframes orb-sonar {
     0% {

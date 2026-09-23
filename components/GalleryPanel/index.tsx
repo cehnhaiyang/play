@@ -31,7 +31,7 @@ import {
     acgTaskKeyOf,
 } from '../../hooks';
 import type { AcgSaveTask } from '../../hooks';
-import type { AcgmhoGalleryItem, GalleryPageItem } from '../../meta';
+import type { AcgmhoGalleryItem, GalleryPageItem, MediaType } from '../../meta';
 import { isAcgUrl, resolveProbeMedia } from '../../utils';
 
 /* -------------------------------------------------------------------------- */
@@ -46,8 +46,11 @@ export interface GalleryPanelProps {
         gid?: string;
         pages: { url: string; title: string; page?: number }[];
     }) => void;
-    // 纯媒体直推（视频 / 音频）：调用方把条目直接进播放列表，不建画廊分组
-    onPlayMediaStreams?: (pages: { url: string; title: string }[]) => void;
+    // 纯媒体直推（视频 / 音频）：调用方把条目直接进播放列表，不建画廊分组。
+    // mediaType 必须原样带过去：ACG 音声作品的「音轨」是 HLS（.m3u8）地址，
+    // 下游若按 URL 重新推断只会看到 .m3u8，会把 mp3 音轨判成流媒体、
+    // 进而被播放器的「视频」筛选吞掉。类型由探测结果决定，不由扩展名决定。
+    onPlayMediaStreams?: (pages: { url: string; title: string; mediaType?: MediaType }[]) => void;
     onAppendToPlayer?: (
         pages: { url: string; title: string; page?: number }[],
         gid?: string
@@ -1047,6 +1050,10 @@ export const GalleryPanel: React.FC<GalleryPanelProps> = ({
             const plain = resolved.streams.map((s, i) => ({
                 url: s.url,
                 title: s.title || `${current.title} - ${i + 1}`,
+                // 带上探测已确定的类型（音轨 = audio），别让下游靠 .m3u8 猜成 stream
+                mediaType: s.mediaType || (resolved.kind === 'audio' ? 'audio' : 'video'),
+                artist: s.artist,
+                poster: s.poster,
             }));
             if (onPlayMediaStreams) {
                 onPlayMediaStreams(plain);

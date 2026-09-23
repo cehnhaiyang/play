@@ -5,7 +5,7 @@ import { Project, Message, AppState, ParserError } from '../meta';
 import { loadProjects, saveProjects, createNewProject } from '../services/AudioService/persistence';
 import { BrowserAudioEngine } from '../services/AudioService/audioEngine';
 import { exportProjectBundle, bufferToWave } from '../services/AudioService/utils';
-import { generateSyntax, fixSyntax } from '../services/gemini';
+import { generateSyntax, fixSyntax } from '../services/AiService';
 import { loadJSON, saveJSON, removeStored } from '../utils/persist';
 
 interface UseAudioParams {
@@ -52,7 +52,7 @@ interface UseAudioReturn {
         importProjectFromFile: (file: File, callback: (newId: string) => void) => void;
         setActiveProjectId: React.Dispatch<React.SetStateAction<string | null>>;
         // 引擎操作
-        compileAndPlay: (sourceCode: string, currentTryCount?: number) => Promise<{ success: boolean; error?: ParserError }>;
+        compileAndPlay: (sourceCode: string) => Promise<{ success: boolean; error?: ParserError }>;
         stop: () => void;
         reset: () => void;
         exportBundle: (name: string, code: string) => Promise<void>;
@@ -203,8 +203,11 @@ export const useAudio = ({
     const [autoFixCount, setAutoFixCount] = useState(0);
 
     useEffect(() => {
+        // 取分析器会顺带确保音频上下文存活（StrictMode 重挂载后可能已被关闭）
         setAnalyser(audioEngine.getAnalyser());
-        return () => audioEngine.stop();
+        // 卸载时释放音频上下文，避免每次进出工作台都泄漏一个 AudioContext。
+        // 引擎支持在 dispose 后自我重建，因此这里关闭是安全的。
+        return () => { void audioEngine.dispose(); };
     }, [audioEngine]);
 
     const stop = useCallback(() => {
@@ -220,12 +223,9 @@ export const useAudio = ({
     }, [audioEngine]);
 
     const compileAndPlay = useCallback(
-        async (sourceCode: string, currentTryCount = 0) => {
+        async (sourceCode: string) => {
             setAppState(AppState.SYNTHESIZING_AUDIO);
             setParserError(null);
-
-            if (currentTryCount === 0) setAutoFixCount(0);
-            else setAutoFixCount(currentTryCount);
 
             try {
                 const error = audioEngine.compile(sourceCode);
@@ -234,7 +234,6 @@ export const useAudio = ({
                     setAppState(AppState.ERROR);
                     return { success: false, error };
                 }
-                setAutoFixCount(0);
                 await audioEngine.playRealtime();
                 setAppState(AppState.PLAYING);
                 return { success: true };
@@ -242,7 +241,9 @@ export const useAudio = ({
                 console.error('音频引擎运行异常:', error);
                 setAppState(AppState.ERROR);
                 const message = error instanceof Error ? error.message : '未知运行时错误';
-                return { success: false, error: { message, line: 0 } };
+                const parserError = { message, line: 0 };
+                setParserError(parserError);
+                return { success: false, error: parserError };
             }
         },
         [audioEngine]
@@ -511,8 +512,10 @@ export const useAudio = ({
             return { success: true, code, replyMessage };
         } catch (error: unknown) {
             let errorMsg = '生成失败，请重试。';
-            if (error instanceof Error && error.message.includes('API Key')) {
-                errorMsg = '错误：未检测到 API Key。请检查环境变量。';
+            const message = error instanceof Error ? error.message : '';
+            // AI 服务没配好（地址不通、密钥不对）是最常见的失败原因，直接把原文带出来
+            if (message.includes('无法连接') || message.includes('AI 服务')) {
+                errorMsg = `错误：${message}`;
             }
             const replyMessage: Message = {
                 role: 'model',

@@ -128,7 +128,9 @@ const PlayerLayout: React.FC = () => {
       // 1. 动画 / 视频
       if (resolved.kind === 'video') {
         const vUrl = resolved.streams[0].url;
-        player.methods.addStream(vUrl, probe.title, true);
+        // 必须带上 mediaType：动画直链通常是 .m3u8，不传会被按扩展名判成 stream，
+        // 播放器里就会显示「流媒体」徽章而不是「视频」
+        player.methods.addStream(vUrl, probe.title, true, resolved.streams[0].mediaType);
         setView('player');
         return;
       }

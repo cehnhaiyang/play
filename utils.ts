@@ -115,6 +115,39 @@ export const isAcgUrl = (url: string | undefined | null): boolean => {
     }
 };
 
+/**
+ * ACG 站点 HLS 清单签名补全。
+ * 站点下发的 master 形如 /ha/<id>/zh-chs_master.m3u8?m=<token>&t=<过期戳>，
+ * 其中的变体是相对地址（zh-chs-sd/index.m3u8）。按 RFC 3986，非空相对路径解析时
+ * 不继承 base 的 query，于是 hls.js 实际请求的变体地址不带签名，图床一律回 403
+ * —— 播放器表现为各画质全部 403、重试耗尽后报网络错误。
+ * 站点自身靠 xhrSetup 补 from=<master 路径> + m + t，这里做同一件事。
+ * 只处理 .m3u8（分片实测无需签名，改写反而会打乱 CDN 缓存键），
+ * 且只在「ACG 域 + master 带 m= 令牌」时生效——其它站点的签名 URL 可能是
+ * 对整个 query 做 HMAC，追加参数会让本来能播的流失效。
+ */
+export const signAcgHlsUrl = (requestUrl: string, masterUrl: string): string => {
+    if (!/\.m3u8(\?|#|$)/i.test(requestUrl)) return requestUrl;
+    // master 自身、以及上层已补过签名的地址不重复追加
+    if (/[?&]m=/.test(requestUrl)) return requestUrl;
+    if (!isAcgUrl(masterUrl)) return requestUrl;
+
+    let master: URL;
+    try {
+        master = new URL(masterUrl);
+    } catch {
+        return requestUrl;
+    }
+    const params = master.searchParams;
+    const token = params.get('m');
+    if (!token) return requestUrl;
+
+    const sep = requestUrl.includes('?') ? '&' : '?';
+    const t = params.get('t');
+    const tPart = t ? `&t=${encodeURIComponent(t)}` : '';
+    return `${requestUrl}${sep}m=${encodeURIComponent(token)}${tPart}&from=${encodeURIComponent(master.pathname)}`;
+};
+
 export interface ResolvedProbeMedia {
     kind: 'video' | 'audio' | 'image' | 'none';
     streams: (Partial<VideoFile> & { url: string; title?: string })[];
@@ -145,7 +178,8 @@ export const resolveProbeMedia = (probe: GalleryProbeResult | null | undefined):
     if (probe.mediaType === 'video' || probe.category === 'animation' || probe.videoUrl) {
         // 无视频直链时不再拿封面图冒充视频（会产生播不出的坏条目），与音频分支同口径回落
         if (!probe.videoUrl) return { kind: 'none', streams: [], totalPages, status: '该动画作品未解析到可播放的视频资源' };
-        return { kind: 'video', streams: [{ url: probe.videoUrl, name: title, title }], totalPages, status: null };
+        // 显式标注 video：动画直链多为 .m3u8，靠扩展名推断会被判成 stream（并被「LIVE」逻辑误认）
+        return { kind: 'video', streams: [{ url: probe.videoUrl, name: title, title, mediaType: 'video' as const }], totalPages, status: null };
     }
     if (probe.mediaType === 'audio' || probe.category === 'asmr' || audioList.length > 0) {
         if (audioList.length > 0) {
@@ -156,6 +190,9 @@ export const resolveProbeMedia = (probe: GalleryProbeResult | null | undefined):
                     name: a.name || `${title} - 音轨 ${idx + 1}`,
                     title: a.name || `${title} - 音轨 ${idx + 1}`,
                     mediaType: 'audio' as const,
+                    // 艺术家与封面一并透出：音频视图凭此展示署名与封面 discs，不再裸奔 URL
+                    artist: a.artist,
+                    poster: a.cover,
                 })),
                 totalPages,
                 status: null,
@@ -173,6 +210,42 @@ export const resolveProbeMedia = (probe: GalleryProbeResult | null | undefined):
         };
     }
     return { kind: 'none', streams: [], totalPages, status: '作品中未解析到可播放的媒体资源' };
+};
+
+/** 图集后续页回包（主进程原样带回 runId，调用方凭空 runId 丢弃旧轮） */
+export interface AcgRemainingPages {
+    runId: string;
+    pages: { url: string; title: string; page: number }[];
+    errors: unknown[];
+}
+
+/**
+ * ACG 图集后续页抓取（App 与 PlayPanel 共用，消除两处重复的 fetchPages 样板）。
+ * 只返回首屏之外的页；runId 为空串表示旧轮回包，调用方直接丢弃。
+ * 首屏已展示：失败直接抛错，调用方记日志即可，不打断阅读。
+ */
+export const fetchAcgRemainingPages = async (
+    fetchPages: (opts: { gidOrUrl: string; pages: string; delayMs: number; runId: string; probe: GalleryProbeResult }) => Promise<{ runId?: string; pages?: { url: string; title?: string; page?: number }[]; errors?: unknown[] } | null | undefined>,
+    probe: GalleryProbeResult,
+    tag: string,
+): Promise<AcgRemainingPages> => {
+    // runId 必须随请求下发：主进程原样回带，凭它比对才能认出本轮回包。
+    // 漏传时主进程会自造 runId，下面的比对永远不相等，后续页会被整批当作旧轮丢弃。
+    const runId = `${tag}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const res = await fetchPages({
+        gidOrUrl: probe.firstPageUrl || probe.gid,
+        pages: `1-${probe.totalPages}`,
+        delayMs: 100,
+        runId,
+        // 复用详情探测结果，防 /h/ 与 /hentai/ 同数字作品串台
+        probe,
+    });
+    if (!res || res.runId !== runId) return { runId: '', pages: [], errors: [] };
+    // 按页码过滤而非 slice(1)：第 1 页抓取失败时 slice 会误丢第 2 页
+    const pages = (res.pages ?? [])
+        .filter((p) => p && p.url && p.page !== 1 && Number.isFinite(p.page))
+        .map((p) => ({ url: p.url as string, title: p.title || `P${p.page}`, page: p.page as number }));
+    return { runId, pages, errors: res.errors ?? [] };
 };
 
 /**

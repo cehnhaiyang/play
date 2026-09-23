@@ -82,24 +82,44 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
 
   // --- Workspace Logic ---
 
-  const handleCompileAndPlay = useCallback(async (sourceCode: string, currentTryCount: number = 0) => {
-    const result = await audioActions.compileAndPlay(sourceCode, currentTryCount);
-    
-    // Auto-fix logic needs UI ref access, so it stays here for now, 
-    // though triggering it delegates to the chat component which uses the chat hook
-    if (!result.success && result.error) {
-        if (currentTryCount > 0 && currentTryCount <= 3) {
-            console.log(`Auto-fixing attempt ${currentTryCount}...`);
-            chatInterfaceRef.current?.triggerFix(sourceCode, result.error.message);
-        }
+  // 自动修复的最大尝试次数，防止模型反复给出同样错误的代码时无限循环
+  const MAX_AUTO_FIX = 3;
+  // 用 ref 记录尝试次数：state 在这里会被闭包捕获成旧值，导致计数错乱
+  const fixAttemptRef = useRef(0);
+
+  const handleCompileAndPlay = useCallback(async (
+    sourceCode: string,
+    options: { autoFix?: boolean } = {}
+  ) => {
+    const { autoFix = false } = options;
+    const result = await audioActions.compileAndPlay(sourceCode);
+
+    if (result.success) {
+      fixAttemptRef.current = 0;
+      return;
     }
+
+    if (!autoFix || !result.error) return;
+
+    if (fixAttemptRef.current >= MAX_AUTO_FIX) {
+      audioActions.setParserError({
+        message: `${result.error.message}（已自动修复 ${MAX_AUTO_FIX} 次仍未通过，请手动检查代码）`,
+        line: result.error.line,
+      });
+      fixAttemptRef.current = 0;
+      return;
+    }
+
+    fixAttemptRef.current += 1;
+    audioActions.setAutoFixCount(fixAttemptRef.current);
+    chatInterfaceRef.current?.triggerFix(sourceCode, result.error.message);
   }, [audioActions]);
 
   const handleCodeUpdate = useCallback((newCode: string, isAutoFix = false) => {
     audioActions.updateActiveProject({ code: newCode });
-    // Only auto-run if coming from AI
-    handleCompileAndPlay(newCode, isAutoFix ? autoFixCount + 1 : 1);
-  }, [audioActions, autoFixCount, handleCompileAndPlay]);
+    // AI 产出的代码（含修复结果）自动试跑；修复结果若仍失败会继续触发下一轮修复
+    handleCompileAndPlay(newCode, { autoFix: true });
+  }, [audioActions, handleCompileAndPlay]);
 
   const handleMessagesUpdate = useCallback((newMessages: Message[]) => {
       audioActions.updateProjectMessages(newMessages);
@@ -107,8 +127,9 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
 
   const handleManualFix = useCallback(() => {
       if (parserError && chatInterfaceRef.current && activeProject) {
-          chatInterfaceRef.current.triggerFix(activeProject.code, parserError.message);
+          fixAttemptRef.current = 0;
           audioActions.setAutoFixCount(1);
+          chatInterfaceRef.current.triggerFix(activeProject.code, parserError.message);
       }
   }, [activeProject, audioActions, parserError]);
 
@@ -359,13 +380,18 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                     {/* Status Indicators */}
                     {parserError ? (
                         <div className="flex items-center gap-3 px-3 py-1.5 rounded-full bg-red-950/30 border border-red-900/50">
-                            <span className="text-xs text-red-400 flex items-center gap-1.5 font-mono font-medium">
+                            <span className="text-xs text-red-400 flex items-center gap-1.5 font-mono font-medium" title={parserError.message}>
                                 <span className="relative flex h-2 w-2">
                                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
                                   <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
                                 </span>
                                 Error at line {parserError.line}
                             </span>
+                            {autoFixCount > 0 && (
+                                <span className="text-[10px] text-amber-400 font-mono" title="自动修复尝试次数">
+                                    修复 {autoFixCount}/{MAX_AUTO_FIX}
+                                </span>
+                            )}
                             <div className="h-4 w-px bg-red-900/50"></div>
                             <button 
                                 onClick={handleManualFix}

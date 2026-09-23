@@ -13,6 +13,11 @@ import type {
     StorageType,
     GalleryDownloadStatus,
     GalleryFetchStatus,
+    AiConfig,
+    AiTestResult,
+    EnvelopeCurve,
+    FilterKind,
+    DrumName,
 } from './type';
 
 /**
@@ -225,6 +230,17 @@ export interface Envelope {
     sustain: number;
     /** 释音时间 (Release time, 秒) */
     release: number;
+    /**
+     * 分段过渡曲线。
+     * 缺省为 `exp`（指数，最接近真实乐器的自然衰减）。
+     * 旧版本只支持指数，故保持向后兼容。
+     */
+    curve?: EnvelopeCurve;
+    /**
+     * 起音前的保持延迟 (秒)。用于模拟"吹奏起音前的气息准备"、
+     * 或让和弦各声部错开进入。缺省 0。
+     */
+    delay?: number;
 }
 
 /**
@@ -237,6 +253,16 @@ export interface FilterDef {
     frequency: number;
     /** 品质因数 Q 值 (共振峰尖锐度) */
     Q: number;
+    /**
+     * 搁架/峰值滤波器的增益量 (dB)，仅 lowshelf/highshelf/peaking 有意义。
+     */
+    gain?: number;
+    /**
+     * 自动扫频目标频率 (Hz)。
+     * 若设置，滤波器会在音符时值内从 `frequency` 平滑扫到该值，
+     * 无需 `filter_envelope` 即可实现 riser / 扫频效果。
+     */
+    sweepTo?: number;
 }
 
 /**
@@ -249,8 +275,16 @@ export interface LFODef {
     frequency: number;
     /** 调制深度与强度 */
     amount: number;
-    /** 调制受控参数 ('frequency' | 'filter' | 'gain' | 'pan') */
+    /** 调制受控参数 ('frequency' | 'filter' | 'gain' | 'pan' | 'detune') */
     target: LFOTarget;
+    /**
+     * 起振淡入时间 (秒)。避免 LFO 在音符起始瞬间突变造成"咔哒"声。
+     */
+    ramp?: number;
+    /**
+     * 调制深度是否随时间线性增长（用于 riser 式渐进颤音）。
+     */
+    swell?: boolean;
 }
 
 /**
@@ -264,6 +298,10 @@ export interface DelayEffectDef {
     feedback: number;
     /** 干湿比 (0 ~ 1) */
     mix: number;
+    /** 反馈回路低通截止 (Hz)，越低回声越暗、越像磁带延迟 */
+    damping?: number;
+    /** 是否启用乒乓（左右交替）延迟 */
+    pingPong?: boolean;
 }
 
 /**
@@ -275,6 +313,10 @@ export interface ReverbEffectDef {
     decay: number;
     /** 干湿比 (0 ~ 1) */
     mix: number;
+    /** 预延迟 (秒)，拉开干声与混响的距离以增强空间纵深感 */
+    preDelay?: number;
+    /** 高频阻尼 (Hz)，越低尾音越温暖 */
+    damping?: number;
 }
 
 /**
@@ -284,12 +326,135 @@ export interface DistortionEffectDef {
     type: 'distortion';
     /** 过载与失真程度数值 */
     amount: number;
+    /** 干湿比 (0 ~ 1)，缺省 1（全湿） */
+    mix?: number;
 }
 
 /**
- * 音频效果器联合类型 (包含 Delay, Reverb, Distortion)
+ * 位深压缩效果器配置 (Bitcrusher)
  */
-export type EffectDef = DelayEffectDef | ReverbEffectDef | DistortionEffectDef;
+export interface BitcrushEffectDef {
+    type: 'bitcrush';
+    /** 量化位数，越低越脏 (1 ~ 16) */
+    bits: number;
+    /** 干湿比 (0 ~ 1) */
+    mix: number;
+}
+
+/**
+ * 合唱效果器配置
+ */
+export interface ChorusEffectDef {
+    type: 'chorus';
+    /** 调制速率 (Hz) */
+    rate: number;
+    /** 调制深度 (毫秒) */
+    depth: number;
+    /** 干湿比 (0 ~ 1) */
+    mix: number;
+}
+
+/**
+ * 镶边效果器配置
+ */
+export interface FlangerEffectDef {
+    type: 'flanger';
+    /** 调制速率 (Hz) */
+    rate: number;
+    /** 反馈系数 (0 ~ 1)，越高金属感越强 */
+    feedback: number;
+    /** 干湿比 (0 ~ 1) */
+    mix: number;
+}
+
+/**
+ * 移相效果器配置
+ */
+export interface PhaserEffectDef {
+    type: 'phaser';
+    /** 调制速率 (Hz) */
+    rate: number;
+    /** 扫频下限 (Hz) */
+    min: number;
+    /** 扫频上限 (Hz) */
+    max: number;
+    /** 干湿比 (0 ~ 1) */
+    mix: number;
+}
+
+/**
+ * 颤音（音量调制）效果器配置
+ */
+export interface TremoloEffectDef {
+    type: 'tremolo';
+    /** 调制速率 (Hz) */
+    rate: number;
+    /** 调制深度 (0 ~ 1) */
+    depth: number;
+}
+
+/**
+ * 动态压缩效果器配置
+ */
+export interface CompressorEffectDef {
+    type: 'compressor';
+    /** 阈值 (dB) */
+    threshold: number;
+    /** 压缩比 */
+    ratio: number;
+    /** 启动时间 (秒) */
+    attack: number;
+    /** 释放时间 (秒) */
+    release: number;
+}
+
+/**
+ * 滤波扫频效果器配置（作为效果链一环的整体扫频）
+ */
+export interface FilterEffectDef {
+    type: 'filter';
+    /** 滤波器类型 */
+    kind: FilterKind;
+    /** 起始频率 (Hz) */
+    from: number;
+    /** 结束频率 (Hz) */
+    to: number;
+    /** 品质因数 */
+    Q: number;
+    /** 扫频持续时长 (秒) */
+    duration: number;
+    /** 扫频起始时刻 (秒) */
+    start: number;
+}
+
+/**
+ * 三段式均衡效果器配置
+ */
+export interface EqEffectDef {
+    type: 'eq';
+    /** 低频增益 (dB)，作用在 lowShelf */
+    low: number;
+    /** 中频增益 (dB)，作用在 peaking */
+    mid: number;
+    /** 高频增益 (dB)，作用在 highShelf */
+    high: number;
+}
+
+/**
+ * 音频效果器联合类型
+ */
+export type EffectDef =
+    | DelayEffectDef
+    | ReverbEffectDef
+    | DistortionEffectDef
+    | BitcrushEffectDef
+    | ChorusEffectDef
+    | FlangerEffectDef
+    | PhaserEffectDef
+    | TremoloEffectDef
+    | CompressorEffectDef
+    | FilterEffectDef
+    | EqEffectDef;
 
 /**
  * 乐器音色定义契约
@@ -321,12 +486,99 @@ export interface InstrumentDef {
     fm_ratio?: number;
     /** 音调微调音分 (Detune, 单位: cents，可选) */
     detune?: number;
+
+    /* --- 表现力扩展 --- */
+
+    /**
+     * 起音滑音时长 (秒)。音高从 `portamentoFrom` 半音比滑向目标音，
+     * 模拟弦乐换把、人声滑音、808 滑音贝斯。
+     */
+    glide?: number;
+    /** 滑音起始偏移（半音数，缺省 -12 即低八度滑入） */
+    glideFrom?: number;
+    /**
+     * 音高包络深度（半音数）。正值=起音偏高再落下（打击乐/鼓皮张力），
+     * 负值=起音偏低再扬起。与 `pitchDecay` 配合使用。
+     */
+    pitchEnvAmount?: number;
+    /** 音高包络衰减时长 (秒) */
+    pitchDecay?: number;
+    /**
+     * 立体声展开度 (0 ~ 1)。多个发声体按此值向左右散开，
+     * 是让弦乐群/合唱"变宽"的主要手段。
+     */
+    spread?: number;
+    /** 力度灵敏度 (0 ~ 1)。1 = 力度完全影响音量，0 = 力度不影响音量 */
+    velocitySensitivity?: number;
+    /**
+     * 力度对滤波器截止的影响量 (Hz)。
+     * 让强奏时音色更亮，是管弦乐"强弱=音色变化"的关键。
+     */
+    velocityToFilter?: number;
+    /**
+     * 每音符复音数 (1 ~ 7)。大于 1 时按 `detune` 叠加多个失谐振荡器，
+     * 形成 SuperSaw 式的厚实音墙。
+     */
+    voices?: number;
+    /**
+     * 声部内失谐扩散量 (cents)。第 i 个声部偏移量按此值均分，
+     * 与 `voices` 配合决定"厚"的程度。
+     */
+    unisonSpread?: number;
+    /**
+     * 生成自定义 PeriodicWave 的谐波振幅数组。
+     * 设置后 `wave` 会被忽略，用真实谐波叠加代替内置波形，
+     * 是逼近真实乐器频谱的最强手段。
+     */
+    harmonics?: number[];
+    /**
+     * 起音噪声量 (0 ~ 1)。在音符起始处混入极短噪声爆发，
+     * 用于模拟弓弦摩擦、气息、拨片触弦等"起音质感"。
+     */
+    attackNoise?: number;
+    /**
+     * 乐器级效果链。仅作用于该乐器，与全局 `effect_chain` 串联。
+     * 这是让"主音吉他带失真、弦乐带混响"同时成立的关键。
+     */
+    effects?: EffectDef[];
+    /**
+     * 循环起音点 (秒)。弦乐/管乐的持续音可在此时间点后重新触发，
+     * 用较少的音符时长模拟长音呼吸。
+     */
+    loopPoint?: number;
+}
+
+/**
+ * 单个发声事件的逐音符表现力参数
+ * 让同一乐器可以演奏出强弱、连断、滑音等变化，而不是机械重复同一音色。
+ */
+export interface NoteExpression {
+    /** 力度 (0 ~ 1，缺省 0.8)。同时影响音量与音色亮度 */
+    velocity?: number;
+    /** 声像覆盖 (-1 ~ 1)，覆盖乐器默认声像 */
+    pan?: number;
+    /** 增益覆盖 (0 ~ 1)，覆盖乐器默认增益 */
+    gain?: number;
+    /** 时值缩放 (0 ~ 4，缺省 1)。0.5 = 断奏，1.5 = 连奏 */
+    gate?: number;
+    /** 音高偏移（半音），用于临时离调或装饰音 */
+    transpose?: number;
+    /** 滑音时长 (秒)，覆盖乐器 glide */
+    glide?: number;
+    /** 声部内失谐覆盖 (cents) */
+    detune?: number;
+    /**
+     * 人性化抖动强度 (0 ~ 1)。
+     * 按此强度对音高、力度、时值施加随机微扰，
+     * 消除机械感 —— 这是让程序化作曲"像人演奏"的核心手段。
+     */
+    humanize?: number;
 }
 
 /**
  * 单音音符指令
  */
-export interface NoteCommand {
+export interface NoteCommand extends NoteExpression {
     type: 'note';
     /** 音高记号 (如 'C4', 'F#5', 'Bb3') */
     pitch: string;
@@ -337,26 +589,47 @@ export interface NoteCommand {
 /**
  * 和弦指令 (多音齐鸣)
  */
-export interface ChordCommand {
+export interface ChordCommand extends NoteExpression {
     type: 'chord';
     /** 构成和弦的音高数组 (如 ['C4', 'E4', 'G4']) */
     pitches: string[];
     /** 和弦发声时值 */
     duration: string;
+    /**
+     * 琶音化程度 (0 ~ 1)。
+     * 0 = 完全齐奏；大于 0 时各声部依次错开进入，模拟竖琴/吉他的滚奏。
+     */
+    strum?: number;
 }
 
 /**
  * 琶音指令
  */
-export interface ArpCommand {
+export interface ArpCommand extends NoteExpression {
     type: 'arp';
     /** 琶音基础音阶或和弦音高数组 */
     pitches: string[];
-    /** 扫描形态 ('up' | 'down' | 'upDown' | 'random') */
+    /** 扫描形态 */
     pattern: ArpPattern;
     /** 琶音每个单音触发速率 (如 '16n') */
     rate: string;
     /** 琶音总持续时长 */
+    duration: string;
+    /** 每个音的占空比 (0 ~ 1，缺省 0.9)。越小越断奏 */
+    gate?: number;
+    /** 跨八度数量 (1 ~ 4，缺省 1)。把和弦音向上复制若干八度扩展音域 */
+    octaves?: number;
+}
+
+/**
+ * 鼓组打击指令
+ * 直接引用内置鼓组音色，无需定义乐器即可编写节奏声部。
+ */
+export interface HitCommand extends NoteExpression {
+    type: 'hit';
+    /** 鼓组音色名 */
+    drum: DrumName;
+    /** 时值 */
     duration: string;
 }
 
@@ -372,7 +645,7 @@ export interface RestCommand {
 /**
  * 音序事件指令联合类型
  */
-export type SequenceCommand = NoteCommand | RestCommand | ChordCommand | ArpCommand;
+export type SequenceCommand = NoteCommand | RestCommand | ChordCommand | ArpCommand | HitCommand;
 
 /**
  * 音序轨道定义
@@ -384,6 +657,30 @@ export interface SequenceDef {
     instrumentName: string;
     /** 轨道包含的音符与控制指令列表 */
     commands: SequenceCommand[];
+    /** 整轨力度缩放 (0 ~ 2，缺省 1)，用于快速平衡声部 */
+    gain?: number;
+    /** 整轨移调（半音，缺省 0） */
+    transpose?: number;
+    /** 整轨人性化强度 (0 ~ 1) */
+    humanize?: number;
+}
+
+/**
+ * 混音轨道排布指令
+ */
+export interface MixTrack {
+    /** 引用的音序名 */
+    source: string;
+    /** 起始时刻 (秒) */
+    time: number;
+    /** 重复次数 */
+    loop: number;
+    /** 轨道音量缩放 (缺省 1) */
+    gain?: number;
+    /** 轨道声像 (-1 ~ 1) */
+    pan?: number;
+    /** 每次循环的起始时刻递增（秒），用于做卡农式错位叠加 */
+    stagger?: number;
 }
 
 /**
@@ -420,6 +717,37 @@ export interface ScheduledEvent {
     fm_ratio?: number;
     /** 音调微调 (可选) */
     detune?: number;
+
+    /* --- 表现力扩展（由调度器从乐器定义 + 逐音符表达合并而来） --- */
+
+    /** 起音滑音时长 (秒) */
+    glide?: number;
+    /** 滑音起始半音偏移 */
+    glideFrom?: number;
+    /** 音高包络深度（半音） */
+    pitchEnvAmount?: number;
+    /** 音高包络衰减时长 (秒) */
+    pitchDecay?: number;
+    /** 立体声展开度 (0 ~ 1) */
+    spread?: number;
+    /** 力度 (0 ~ 1) */
+    velocity?: number;
+    /** 力度对滤波器截止的影响量 (Hz) */
+    velocityToFilter?: number;
+    /** 每音符复音数 */
+    voices?: number;
+    /** 声部内失谐扩散 (cents) */
+    unisonSpread?: number;
+    /** 自定义谐波振幅数组 */
+    harmonics?: number[];
+    /** 起音噪声量 (0 ~ 1) */
+    attackNoise?: number;
+    /** 乐器级效果链 */
+    effects?: EffectDef[];
+    /** 打击乐音色（设置时走鼓组合成路径，忽略 wave/fm） */
+    drum?: DrumName;
+    /** 循环起音点 (秒) */
+    loopPoint?: number;
 }
 
 /**
@@ -753,6 +1081,51 @@ export interface ElectronSukebeiAPI {
 }
 
 /**
+ * 应用设置读取结果
+ */
+export interface AppSettingsSnapshot {
+    success: boolean;
+    /** 用户配置的代理端口（'' 表示留空 = 一律直连） */
+    proxyPort: string;
+    /** 当前实际生效的代理端点（'' 表示直连）；配了端口但连不上时这里为空 */
+    applied: string;
+    /** AI 服务配置（OpenAI 兼容协议） */
+    ai: AiConfig;
+    message?: string;
+}
+
+/**
+ * 保存代理端口的返回：normalized 是归一化后的值（如填 "10810" 得到 "127.0.0.1:10810"）
+ */
+export interface SaveProxyPortResult extends AppSettingsSnapshot {
+    normalized: string;
+}
+
+/**
+ * 保存 AI 配置的返回
+ */
+export interface SaveAiConfigResult {
+    success: boolean;
+    /** 归一化后真正落盘的配置；校验失败时回传当前生效的旧配置 */
+    ai: AiConfig;
+    message?: string;
+}
+
+/**
+ * Electron 注入到渲染层的应用设置 API（主进程持久化，改完立即生效）
+ */
+export interface ElectronSettingsAPI {
+    /** 读取当前设置与生效状态 */
+    get: () => Promise<AppSettingsSnapshot>;
+    /** 保存代理端口；留空表示直连，非法值会被拒绝并回传 message */
+    setProxyPort: (value: string) => Promise<SaveProxyPortResult>;
+    /** 保存 AI 配置；字段非法会被拒绝并回传 message */
+    setAiConfig: (value: AiConfig) => Promise<SaveAiConfigResult>;
+    /** 用给定配置发一次真实请求探活（不落盘），验证地址/密钥/模型是否可用 */
+    testAiConfig: (value: AiConfig) => Promise<AiTestResult>;
+}
+
+/**
  * Electron 注入到渲染层的内置 BT 下载引擎 API
  */
 export interface ElectronTorrentAPI {
@@ -794,6 +1167,8 @@ export interface ElectronAPI {
     removeCookie: (url: string, name: string) => Promise<void>;
     /** ACGMHO 画册下载服务 API (可选模块) */
     acgmho?: ElectronAcgmhoAPI;
+    /** 应用设置 API (可选模块，纯浏览器环境不存在) */
+    settings?: ElectronSettingsAPI;
     /** Sukebei / Nyaa 资源搜索与种子 API (可选模块) */
     sukebei?: ElectronSukebeiAPI;
     /** 内置 BT 下载引擎 API (可选模块) */
@@ -808,10 +1183,6 @@ export interface ElectronAPI {
 export interface ElectronProcessEnv {
     /** 是否处于 Electron 桌面运行容器中 */
     isElectron?: boolean;
-    /** 注入的环境变量配置 */
-    env: {
-        API_KEY: string;
-    };
 }
 
 /**

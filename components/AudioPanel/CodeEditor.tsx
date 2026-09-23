@@ -71,8 +71,10 @@ const CodeEditor: React.FC<CodeEditorProps> = ({ code, onChange, error }) => {
         { type: 'string', regex: /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/ }, // 支持转义引号
         { type: 'number', regex: /-?\d+(?:\.\d+)?(?:ms|s|n)?\b/ },
         { type: 'keyword', regex: /\b(?:config|define_instrument|sequence|mix|effect_chain|track)\b/ },
-        { type: 'function', regex: /\b(?:note|chord|rest|arp|delay|reverb|distortion|lowpass|highpass|bandpass|adsr|sine|square|sawtooth|triangle)\b/ },
-        { type: 'property', regex: /\b(?:name|tempo|instrument|wave|envelope|filter|lfo|pan|gain|source|time|loop|feedback|mix|attack|decay|sustain|release|frequency|Q|amount|target|pattern|rate|duration)\b/ }
+        // 指令与效果器
+        { type: 'function', regex: /\b(?:note|chord|arp|hit|rest|delay|pingpong|reverb|distortion|overdrive|bitcrush|chorus|flanger|phaser|tremolo|compressor|filter|eq|lowpass|highpass|bandpass|notch|lowshelf|highshelf|peaking|allpass|adsr|ad|ar|perc|sine|square|sawtooth|triangle)\b/ },
+        // 乐器 / 音序 / 效果器的参数名
+        { type: 'property', regex: /\b(?:name|tempo|master_gain|instrument|wave|envelope|filter|filter_envelope|filter_env_amount|lfo|pan|gain|source|time|loop|stagger|feedback|mix|attack|decay|sustain|release|frequency|Q|amount|target|pattern|rate|duration|strum|gate|velocity|transpose|glide|glide_from|detune|humanize|harmonics|voices|unison_spread|spread|pitch_env_amount|pitch_decay|attack_noise|velocity_sensitivity|velocity_to_filter|fm_wave|fm_index|fm_ratio|preset|curve|delay|ramp|swell|sweep_to|damping|pre_delay|pingpong|bits|depth|threshold|ratio|kind|from|to|octaves|low|mid|high|min|max)\b/ }
     ];
 
     // 2. 组合正则

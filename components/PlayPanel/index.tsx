@@ -20,7 +20,6 @@ import {
     ArrowLeft,
     Link,
     Music,
-    Video,
     Image as ImageIcon,
     Sparkles,
     HelpCircle,
@@ -34,12 +33,13 @@ import {
     FastForward,
     Rewind,
     Radio,
-    SlidersHorizontal,
     Archive,
+    Repeat1,
+    CircleStop,
 } from 'lucide-react';
 import { UsePlayReturn } from '../../hooks/usePlay';
-import { PlaybackMode, ObjectFitMode, VideoFile, getElectronAPI } from '../../meta';
-import { isValidMediaUrl, resolveProbeMedia } from '../../utils';
+import { PlaybackMode, ObjectFitMode, VideoFile, MediaType, getElectronAPI } from '../../meta';
+import { isValidMediaUrl, resolveProbeMedia, fetchAcgRemainingPages } from '../../utils';
 import {
     collectPackSources,
     packToGalleryBlob,
@@ -54,6 +54,48 @@ interface PlayPanelProps {
     onBackToBrowse: () => void;
 }
 
+// 播放模式 / 画面比例中文标签：枚举值是英文（'List Loop'），直接展示会裸奔英文
+const PLAYBACK_MODE_LABEL: Record<PlaybackMode, string> = {
+    [PlaybackMode.ListLoop]: '列表循环',
+    [PlaybackMode.SingleLoop]: '单曲循环',
+    [PlaybackMode.Random]: '随机播放',
+    [PlaybackMode.StopAfter]: '播完即停',
+};
+const OBJECT_FIT_LABEL: Record<ObjectFitMode, string> = {
+    contain: '适应',
+    cover: '填充',
+    fill: '拉伸',
+};
+// 媒体类型中文标签：此前直接把 mediaType 小写拼进 UI（VIDEO/AUDIO/GALLERY），
+// 中文界面里裸奔英文；这里统一口径，列表与顶部标题共用。
+const MEDIA_TYPE_LABEL: Record<MediaType, string> = {
+    video: '视频',
+    stream: '流媒体',
+    audio: '音频',
+    image: '图片',
+    document: '文档',
+    gallery: '画廊',
+    other: '其它',
+};
+const MEDIA_TYPE_ICON: Record<MediaType, React.ComponentType<{ className?: string }>> = {
+    video: Film,
+    stream: Radio,
+    audio: Music,
+    image: ImageIcon,
+    document: FileText,
+    gallery: Library,
+    other: FileQuestion,
+};
+// 列表行图标配色：与顶部类型徽章、底部控制条保持同一套语义色
+const MEDIA_TYPE_ACCENT: Record<MediaType, string> = {
+    video: 'text-indigo-400',
+    stream: 'text-sky-400',
+    audio: 'text-pink-400',
+    image: 'text-emerald-400',
+    document: 'text-cyan-400',
+    gallery: 'text-amber-400',
+    other: 'text-slate-400',
+};
 // 格式化时间为 mm:ss 或 hh:mm:ss
 const formatTime = (seconds: number) => {
     if (isNaN(seconds) || seconds < 0 || !Number.isFinite(seconds)) return '00:00';
@@ -97,6 +139,16 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
     const [isSeeking, setIsSeeking] = useState(false);
     const [seekPreviewTime, setSeekPreviewTime] = useState<number>(0);
 
+    // 拖拽期间挂在 window 上的监听器回收句柄。
+    // 只在 mouseup/touchend 里摘除是不够的：拖到一半切媒体会让进度条卸载，
+    // 监听器会永久驻留并持有过期闭包，下一次松开鼠标就对已经切走的媒体 seek。
+    const dragCleanupRef = useRef<(() => void) | null>(null);
+    const endDrag = useCallback(() => {
+        dragCleanupRef.current?.();
+        dragCleanupRef.current = null;
+    }, []);
+    useEffect(() => () => dragCleanupRef.current?.(), []);
+
     // 确保 duration 是有效数值
     const validDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
 
@@ -123,6 +175,7 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
     const handleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
         if (disabled || isLive || validDuration <= 0) return;
         e.preventDefault();
+        endDrag();
         const startTime = calculateTimeFromEvent(e.clientX);
         setIsSeeking(true);
         setSeekPreviewTime(startTime);
@@ -135,18 +188,22 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
         const onGlobalMouseUp = (upEvent: MouseEvent) => {
             const finalTime = calculateTimeFromEvent(upEvent.clientX);
             setIsSeeking(false);
+            endDrag();
             onSeek(finalTime);
+        };
+
+        dragCleanupRef.current = () => {
             window.removeEventListener('mousemove', onGlobalMouseMove);
             window.removeEventListener('mouseup', onGlobalMouseUp);
         };
-
         window.addEventListener('mousemove', onGlobalMouseMove);
         window.addEventListener('mouseup', onGlobalMouseUp);
-    }, [calculateTimeFromEvent, disabled, isLive, onSeek, validDuration]);
+    }, [calculateTimeFromEvent, disabled, endDrag, isLive, onSeek, validDuration]);
 
     // 触控拖拽支持（以 touchend 落点为准，避免闭包旧值导致永远回到起点）
     const handleTouchStart = useCallback((e: React.TouchEvent<HTMLDivElement>) => {
         if (disabled || isLive || validDuration <= 0 || !e.touches[0]) return;
+        endDrag();
         const startTime = calculateTimeFromEvent(e.touches[0].clientX);
         setIsSeeking(true);
         setSeekPreviewTime(startTime);
@@ -162,14 +219,17 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
             const finalTime = endTouch ? calculateTimeFromEvent(endTouch.clientX) : startTime;
             setSeekPreviewTime(finalTime);
             setIsSeeking(false);
+            endDrag();
             onSeek(finalTime);
+        };
+
+        dragCleanupRef.current = () => {
             window.removeEventListener('touchmove', onGlobalTouchMove);
             window.removeEventListener('touchend', onGlobalTouchEnd);
         };
-
         window.addEventListener('touchmove', onGlobalTouchMove, { passive: true });
         window.addEventListener('touchend', onGlobalTouchEnd);
-    }, [calculateTimeFromEvent, disabled, isLive, onSeek, validDuration]);
+    }, [calculateTimeFromEvent, disabled, endDrag, isLive, onSeek, validDuration]);
 
     if (isLive) {
         return (
@@ -246,9 +306,10 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
                     style={{ width: `${progressPercent}%` }}
                 />
 
-                {/* 进度滑动手柄 (Thumb) */}
+            {/* 进度滑动手柄 (Thumb)。底色不能再用 border-indigo-600：它在深色渐变槽上
+                偏暗，缩到 scale-0 时看不到；改为高亮描边并补一层外发光，拖拽目标更明确。 */}
                 <div
-                    className={`absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3.5 h-3.5 bg-white rounded-full shadow-[0_2px_8px_rgba(0,0,0,0.5)] border-2 border-indigo-600 transition-transform pointer-events-none ${isHovered || isSeeking ? 'scale-125' : 'scale-0 group-hover:scale-100'
+                    className={`absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-4 h-4 rounded-full bg-white shadow-[0_2px_10px_rgba(0,0,0,0.6)] ring-2 ring-indigo-400 transition-[transform,opacity] duration-150 pointer-events-none ${isHovered || isSeeking ? 'scale-110 opacity-100' : 'scale-0 opacity-0 group-hover:scale-100 group-hover:opacity-100'
                         }`}
                     style={{ left: `${progressPercent}%` }}
                 />
@@ -275,7 +336,9 @@ const DocumentDisplay: React.FC<{ file: VideoFile }> = ({ file }) => {
                 let text = '';
                 if (file.file) {
                     if (file.file.size > 2 * 1024 * 1024) {
-                        text = (await file.file.text()).slice(0, MAX_DOC_CHARS);
+                        // 大文件只读前 MAX_DOC_CHARS 字节：整文件 text() 会把几百 MB 日志
+                        // 一次性读进内存再截断，直接卡死渲染进程
+                        text = await file.file.slice(0, MAX_DOC_CHARS).text();
                         if (!cancelled) {
                             setContent(text);
                             setTruncated(true);
@@ -375,7 +438,7 @@ const DocumentDisplay: React.FC<{ file: VideoFile }> = ({ file }) => {
 };
 
 export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) => {
-    const { state, playlist, videoRef, currentFile, mediaError, methods } = player;
+    const { state, playlist, videoRef, currentFile, mediaError, pageInfo, methods } = player;
 
     // 播放器容器引用（用于真正的纯视频全屏，隔离左侧播放列表）
     const playerContainerRef = useRef<HTMLDivElement>(null);
@@ -413,7 +476,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
     const [acgStatus, setAcgStatus] = useState<string | null>(null);
 
     // 播放列表分类过滤
-    const [playlistFilter, setPlaylistFilter] = useState<'all' | 'video' | 'audio' | 'image' | 'document' | 'gallery'>('all');
+    const [playlistFilter, setPlaylistFilter] = useState<'all' | 'video' | 'stream' | 'audio' | 'image' | 'document' | 'gallery'>('all');
     // 树节点展开状态（缺省全展开，只记手动收起的）
     const [collapsedNodes, setCollapsedNodes] = useState<Record<string, boolean>>({});
     const toggleNode = useCallback((id: string) => {
@@ -535,8 +598,20 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
     // 单击/双击消歧：单击延迟 260ms 生效，双击直接取消单击，避免双击快进时连带暂停两次
     const clickTimerRef = useRef<number | null>(null);
 
-    // 双击视频画面分区域响应（左退10s、右进10s、中全屏）；单击切换播放/暂停
+    // 单击/双击画面响应。两条护栏：文档分支直接放行（选词/滚动不许误触播放态），
+    // 按钮/链接/输入/代码块冒泡一律忽略（下载、导入按钮点下去不再连带暂停）。
+    // 图集/文档双击按区域翻页（左上页、右下页、中暂停/继续）；视频保持左退10s、右进10s、中全屏。
+    const pagedKind = currentFile?.mediaType === 'image' || currentFile?.mediaType === 'document';
+    // 有真实播放态的媒体：音视频/流，以及走幻灯片轮播的图集与文档
+    const isPlayableMedia = !!currentFile
+        && (currentFile.mediaType === 'video'
+            || currentFile.mediaType === 'stream'
+            || currentFile.mediaType === 'audio'
+            || pagedKind);
     const handleVideoAreaClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+        const target = e.target as HTMLElement;
+        if (target.closest?.('button, a, input, textarea, select, pre')) return;
+        if (currentFile?.mediaType === 'document') return;
         const rect = e.currentTarget.getBoundingClientRect();
         const clickX = e.clientX - rect.left;
         const width = rect.width;
@@ -547,6 +622,16 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                 clickTimerRef.current = null;
             }
             // 双击事件
+            if (pagedKind) {
+                if (clickX < width * 0.35) {
+                    methods.prevPage();
+                } else if (clickX > width * 0.65) {
+                    methods.nextPage();
+                } else {
+                    methods.togglePlay();
+                }
+                return;
+            }
             if (clickX < width * 0.35) {
                 handleSeekDelta(-10);
             } else if (clickX > width * 0.65) {
@@ -561,18 +646,18 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
             const wasPlaying = state.isPlaying;
             clickTimerRef.current = window.setTimeout(() => {
                 clickTimerRef.current = null;
+                // 纯静态占位页（画廊徽标/other）没有播放态，togglePlay 是空操作，
+                // 这里同步不弹提示，避免"提示播放中但画面毫无变化"的误导
+                if (!pagedKind && !isPlayableMedia) return;
                 methods.togglePlay();
                 showFeedback(wasPlaying ? '已暂停' : '播放中', wasPlaying ? 'pause' : 'play');
             }, 260);
         }
-    }, [handleSeekDelta, handleToggleFullscreen, methods, showFeedback, state.isPlaying]);
+    }, [currentFile?.mediaType, handleSeekDelta, handleToggleFullscreen, isPlayableMedia, methods, pagedKind, showFeedback, state.isPlaying]);
 
     useEffect(() => () => {
         if (clickTimerRef.current !== null) window.clearTimeout(clickTimerRef.current);
     }, []);
-
-    // 直达抓取轮次：连开两本时旧回包凭此丢弃，不灌进新分组
-    const acgFetchSeqRef = useRef(0);
 
     // 免下载直接抓取网络作品推送到播放器（与 App 共用 resolveProbeMedia）
     const handleFetchAcg = async () => {
@@ -607,34 +692,21 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
             setAcgInput('');
             setAcgStatus(null);
 
-            // 图集后续页面异步流式抓取并追加到列表（带页码+分组，供有序合并；复用 probe 防串台）
+            // 图集后续页面异步流式抓取并追加到列表（带页码+分组，供有序合并）
             if (resolved.kind === 'image' && resolved.totalPages > 1 && electronAPI.acgmho.fetchPages) {
-                acgFetchSeqRef.current += 1;
-                const acgRunId = `playpanel-${Date.now()}-${acgFetchSeqRef.current}`;
-                electronAPI.acgmho.fetchPages({
-                    gidOrUrl: probe.firstPageUrl || probe.gid,
-                    pages: `1-${resolved.totalPages}`,
-                    delayMs: 100,
-                    runId: acgRunId,
-                    probe,
-                }).then((res) => {
-                    // 旧轮回包作废（用户又开了一本新的）：主进程原样带回 runId
-                    if (!res || res.runId !== acgRunId) return;
-                    // 按页码过滤而非 slice(1)：第 1 页抓取失败时 slice 会误丢第 2 页
-                    const remaining = (res?.pages ?? []).filter((p: any) => p.page !== 1);
-                    if (remaining.length > 0) {
-                        const remainingPages = remaining.map((p: any) => ({
-                            url: p.url,
-                            name: p.title,
-                            title: p.title,
-                            mediaType: 'image' as const,
-                            groupId: `acg:${probe.gid}`,
-                            groupName: probe.title,
-                            groupType: 'gallery' as const,
-                            page: p.page,
-                        }));
-                        methods.appendStreams(remainingPages);
-                    }
+                fetchAcgRemainingPages(electronAPI.acgmho.fetchPages, probe, 'playpanel').then(({ runId, pages }) => {
+                    // 空 runId 即旧轮回包（用户又开了一本新的），直接丢弃不灌进新分组
+                    if (!runId || pages.length === 0) return;
+                    methods.appendStreams(pages.map((p) => ({
+                        url: p.url,
+                        name: p.title,
+                        title: p.title,
+                        mediaType: 'image' as const,
+                        groupId: `acg:${probe.gid}`,
+                        groupName: probe.title,
+                        groupType: 'gallery' as const,
+                        page: p.page,
+                    })));
                 }).catch((e: any) => {
                     // 后台续页失败不打断已展示的首屏，只记日志
                     console.warn(`ACG ${probe.gid} 后续页抓取失败:`, e?.message || e);
@@ -656,6 +728,16 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         return () => clearInterval(timer);
     }, [currentFile?.mediaType, currentFile?.id, state.isPlaying, state.playbackRate, methods]);
 
+    // 一键关闭所有浮层（URL/ACG/快捷键/倍速菜单）：Esc 分支凭此执行，handler 只绑一次
+    const closeOverlaysRef = useRef(() => { });
+    closeOverlaysRef.current = () => {
+        setShowUrlModal(false);
+        setShowAcgModal(false);
+        setAcgStatus(null);
+        setShowShortcuts(false);
+        setShowRateMenu(false);
+    };
+
     // 全局快捷键处理：用 ref 承接高频 state，避免 timeupdate 每次重绑监听
     const shortcutsRef = useRef({ methods, handleSeekDelta, handleToggleFullscreen, showFeedback });
     shortcutsRef.current = { methods, handleSeekDelta, handleToggleFullscreen, showFeedback };
@@ -666,11 +748,20 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
 
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
+            // Esc 优先关闭一切浮层（含弹窗输入框内）：放 INPUT 守卫之前，
+            // 否则框内聚焦时按 Esc 永远关不掉弹窗
+            if (e.code === 'Escape') {
+                closeOverlaysRef.current();
+                return;
+            }
             const target = e.target as HTMLElement;
             const tag = target.tagName;
             if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tag) || target.isContentEditable) {
                 return;
             }
+            // 焦点在进度条滑杆上时方向键交给滑杆自身（自带 ±5s 步进），
+            // 全局不再重复 seek 一次，否则每次跳 10s
+            if (target.closest?.('[role="slider"]')) return;
             // 聚焦在按钮上时空格交给按钮默认行为，避免一次空格触发两次 toggle
             if (e.code === 'Space' && (tag === 'BUTTON' || target.closest?.('button'))) {
                 return;
@@ -761,10 +852,6 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                         setShowShortcuts((prev) => !prev);
                     }
                     break;
-                case 'Escape':
-                    setShowShortcuts((prev) => (prev ? false : prev));
-                    setShowRateMenu(false);
-                    break;
             }
         };
 
@@ -792,7 +879,10 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
 
     const leafVisible = useCallback((file: VideoFile): boolean => {
         if (playlistFilter === 'all') return true;
-        if (playlistFilter === 'video') return file.mediaType === 'video' || file.mediaType === 'stream';
+        // 视频与流媒体分开：此前 video 把 stream 一并吞掉，纯 HLS 直播/音轨会被算进「视频」，
+        // 用户按「视频」筛却看到音频，按「音频」筛又找不到它。
+        if (playlistFilter === 'video') return file.mediaType === 'video';
+        if (playlistFilter === 'stream') return file.mediaType === 'stream';
         if (playlistFilter === 'audio') return file.mediaType === 'audio';
         if (playlistFilter === 'image') return file.mediaType === 'image';
         if (playlistFilter === 'document') return file.mediaType === 'document';
@@ -869,6 +959,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
     // —— 工作区文件树渲染 ——
     const renderFileRow = (file: VideoFile, originalIndex: number, depth: number) => {
         const isActive = playlist.currentIndex === originalIndex;
+        const TypeIcon = MEDIA_TYPE_ICON[file.mediaType] || FileQuestion;
         return (
             <div
                 key={file.id || originalIndex}
@@ -879,20 +970,8 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                     : 'hover:bg-white/5 text-slate-400 hover:text-slate-200'
                     }`}
             >
-                <div className="shrink-0 text-slate-500 group-hover:text-slate-300">
-                    {file.mediaType === 'video' || file.mediaType === 'stream' ? (
-                        <Film className={`w-4 h-4 ${isActive ? 'text-indigo-400' : ''}`} />
-                    ) : file.mediaType === 'audio' ? (
-                        <Music className={`w-4 h-4 ${isActive ? 'text-pink-400' : ''}`} />
-                    ) : file.mediaType === 'image' ? (
-                        <ImageIcon className={`w-4 h-4 ${isActive ? 'text-emerald-400' : ''}`} />
-                    ) : file.mediaType === 'document' ? (
-                        <FileText className={`w-4 h-4 ${isActive ? 'text-cyan-400' : ''}`} />
-                    ) : file.mediaType === 'gallery' ? (
-                        <Library className={`w-4 h-4 ${isActive ? 'text-amber-400' : ''}`} />
-                    ) : (
-                        <FileQuestion className="w-4 h-4" />
-                    )}
+                <div className={`shrink-0 transition-colors ${isActive ? MEDIA_TYPE_ACCENT[file.mediaType] : 'text-slate-500 group-hover:text-slate-300'}`}>
+                    <TypeIcon className="w-4 h-4" />
                 </div>
                 <div className="flex-1 min-w-0">
                     <p
@@ -904,7 +983,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                     <p className="text-[10px] text-slate-500 font-mono mt-0.5 flex items-center gap-1.5">
                         <span>{file.page != null ? `P${file.page}` : `#${originalIndex + 1}`}</span>
                         <span>·</span>
-                        <span className="uppercase">{file.mediaType}</span>
+                        <span>{MEDIA_TYPE_LABEL[file.mediaType]}</span>
                     </p>
                 </div>
                 <button
@@ -1012,7 +1091,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         const currentIndex = modes.indexOf(state.playbackMode);
         const nextMode = modes[(currentIndex + 1) % modes.length];
         methods.setPlaybackMode(nextMode);
-        showFeedback(`模式: ${nextMode}`);
+        showFeedback(`模式: ${PLAYBACK_MODE_LABEL[nextMode]}`);
     };
 
     // 切换画面填充模式
@@ -1021,7 +1100,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         const currentIndex = fits.indexOf(state.objectFit);
         const nextFit = fits[(currentIndex + 1) % fits.length];
         methods.setObjectFit(nextFit);
-        showFeedback(`比例: ${nextFit.toUpperCase()}`);
+        showFeedback(`画面: ${OBJECT_FIT_LABEL[nextFit]}`);
     };
 
     // 判断是否为流媒体直播：duration 保留 Infinity 语义，未加载完成前不误判 VOD 为 LIVE
@@ -1100,12 +1179,15 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                         </div>
                     </div>
 
-                    {/* 分类过滤标签 */}
-                    <div className="flex gap-1 bg-black/40 p-1 rounded-xl border border-white/5 text-xs">
+                    {/* 分类过滤标签：7 个分类塞进 320px 侧栏，保持 flex-1 单行会把
+                        每格压到 ~40px 且中文挤成两行；改为两行网格（3 + 4），
+                        每格宽度仍在 70px 以上，标签可读。 */}
+                    <div className="grid grid-cols-4 gap-1 bg-black/40 p-1 rounded-xl border border-white/5 text-xs">
                         {(
                             [
                                 { key: 'all', label: '全部' },
                                 { key: 'video', label: '视频' },
+                                { key: 'stream', label: '流媒体' },
                                 { key: 'audio', label: '音频' },
                                 { key: 'image', label: '图片' },
                                 { key: 'gallery', label: '画廊' },
@@ -1115,7 +1197,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                             <button
                                 key={tab.key}
                                 onClick={() => setPlaylistFilter(tab.key)}
-                                className={`flex-1 py-1 text-center font-medium rounded-lg transition ${playlistFilter === tab.key
+                                className={`py-1 text-center font-medium rounded-lg transition ${playlistFilter === tab.key
                                     ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30 font-bold'
                                     : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'
                                     }`}
@@ -1253,8 +1335,8 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                             <div className="flex items-center gap-2 max-w-lg truncate pl-1">
                                 <span className="text-xs font-bold text-slate-100 truncate">{currentFile.name}</span>
                                 {currentFile.mediaType && (
-                                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white/10 text-slate-300 uppercase">
-                                        {currentFile.mediaType}
+                                    <span className={`text-[10px] px-1.5 py-0.5 rounded bg-white/10 uppercase tracking-wide ${MEDIA_TYPE_ACCENT[currentFile.mediaType]}`}>
+                                        {MEDIA_TYPE_LABEL[currentFile.mediaType]}
                                     </span>
                                 )}
                             </div>
@@ -1296,9 +1378,15 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                     </div>
                 )}
 
-                {/* 媒体展示与播放主视口 */}
+                {/* 媒体展示与播放主视口。
+                    底栏是覆盖式渐变浮层，高度实测约 109px：视频有黑边挡着无所谓，
+                    但图片/文档是「内容本身」，底边会被实打实盖住（实测遮挡 100px，
+                    长图最后一行看不全）。因此这两类在控制条可见时预留出底栏高度，
+                    控制条自动隐藏（幻灯片播放中）时再让出空间，长图不被永久压小。 */}
                 <div
-                    className="flex-1 relative flex items-center justify-center overflow-hidden"
+                    className={`flex-1 relative flex items-center justify-center overflow-hidden transition-[padding] duration-300 ${
+                        pagedKind && (isControlsVisible || !state.isPlaying) ? 'pb-28' : 'pb-0'
+                    }`}
                     onClick={handleVideoAreaClick}
                 >
                     {currentFile ? (
@@ -1313,7 +1401,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                                 <div className="absolute top-16 right-4 z-10 flex items-center gap-2">
                                     <span className="px-2.5 py-1 bg-slate-900/80 rounded-xl backdrop-blur border border-white/10 text-[11px] font-mono text-emerald-300 shadow-lg flex items-center gap-1.5">
                                         <ImageIcon className="w-3 h-3 text-emerald-400" />
-                                        {playlist.currentIndex + 1} / {playlist.files.length}
+                                        {pageInfo.index} / {pageInfo.total}
                                     </span>
                                     {state.isPlaying && state.playbackRate !== 1 && (
                                         <span
@@ -1326,20 +1414,39 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                                 </div>
                             </div>
                         ) : currentFile.mediaType === 'audio' ? (
-                            <div className="flex flex-col items-center justify-center gap-6 p-8 text-center select-none">
+                            // 音频没有画面，但空占满屏黑底会让整个视口显得「坏了」。
+                            // 用同心唱片替代单圈圆环（原来只有一圈 + 中心小方块，中间大面积空），
+                            // 并按播放态切换旋转与光环，静止时也有可看的层级。
+                            <div className="flex flex-col items-center justify-center gap-7 p-8 text-center select-none">
                                 <video ref={videoRef} className="hidden" />
-                                <div
-                                    className={`w-48 h-48 rounded-full bg-gradient-to-tr from-slate-900 via-indigo-950 to-slate-900 border-4 border-indigo-500/40 flex items-center justify-center shadow-2xl relative ${state.isPlaying ? 'animate-spin' : ''
-                                        }`}
-                                    style={{ animationDuration: '12s' }}
-                                >
-                                    <div className="w-16 h-16 rounded-full bg-slate-950 border border-white/10 flex items-center justify-center shadow-inner">
-                                        <Music className="w-8 h-8 text-indigo-400" />
+                                <div className="relative flex items-center justify-center">
+                                    {state.isPlaying && (
+                                        <>
+                                            <span className="absolute w-52 h-52 rounded-full border border-indigo-500/30 animate-orb-sonar" />
+                                            <span className="absolute w-52 h-52 rounded-full border border-cyan-400/25 animate-orb-sonar-delayed" />
+                                        </>
+                                    )}
+                                    <div
+                                        className={`w-48 h-48 rounded-full border border-indigo-400/30 flex items-center justify-center shadow-2xl relative ${state.isPlaying ? 'animate-spin' : ''}`}
+                                        style={{
+                                            animationDuration: '12s',
+                                            background:
+                                                'repeating-radial-gradient(circle at 50% 50%, rgba(99,102,241,0.16) 0 2px, rgba(2,6,23,0) 2px 9px), radial-gradient(circle at 50% 50%, #1e1b4b 0%, #020617 72%)',
+                                        }}
+                                    >
+                                        {/* 唱片高光，避免纯平圆盘显得呆板 */}
+                                        <span className="absolute inset-0 rounded-full bg-gradient-to-tr from-white/10 via-transparent to-transparent" />
+                                        <div className="w-16 h-16 rounded-full bg-slate-950 border border-white/10 flex items-center justify-center shadow-inner z-10">
+                                            <Music className="w-8 h-8 text-indigo-400" />
+                                        </div>
                                     </div>
                                 </div>
                                 <div className="max-w-md">
                                     <h2 className="text-lg font-bold text-white truncate">{currentFile.name}</h2>
-                                    <p className="text-xs text-slate-400 mt-1 font-mono truncate">{currentFile.url}</p>
+                                    <p className="text-xs text-slate-500 mt-1 font-mono truncate" title={currentFile.url}>{currentFile.url}</p>
+                                    <p className="text-[11px] text-slate-600 mt-2">
+                                        {state.isPlaying ? '正在播放' : '已暂停'} · 点击画面或按空格切换
+                                    </p>
                                 </div>
                             </div>
                         ) : currentFile.mediaType === 'document' ? (
@@ -1441,39 +1548,41 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                 {/* ========================================================================= */}
                 {/* 底部悬浮控制底栏 (带渐变遮罩与沉浸式自动隐藏)                            */}
                 {/* ========================================================================= */}
+                {/* 未选择媒体时整条底栏都是死的：进度条 00:00/00:00、播放键点了没反应、
+                    倍速/画幅/CONTAIN 全无对象。空态隐藏，让画面中央的引导按钮成为唯一焦点。 */}
                 <div
-                    className={`absolute bottom-0 left-0 right-0 z-30 p-4 bg-gradient-to-t from-black/95 via-black/75 to-transparent backdrop-blur-md flex flex-col gap-2 transition-all duration-300 pointer-events-auto ${isControlsVisible || !state.isPlaying ? 'translate-y-0 opacity-100' : 'translate-y-4 opacity-0 pointer-events-none'
+                    className={`absolute bottom-0 left-0 right-0 z-30 p-4 bg-gradient-to-t from-black/95 via-black/75 to-transparent backdrop-blur-md flex-col gap-2 transition-all duration-300 ${currentFile ? 'flex pointer-events-auto' : 'hidden pointer-events-none'} ${isControlsVisible || !state.isPlaying ? 'translate-y-0 opacity-100' : 'translate-y-4 opacity-0 pointer-events-none'
                         }`}
                 >
                     {/* 核心专业进度条 */}
                     {currentFile?.mediaType === 'image' || currentFile?.mediaType === 'document' ? (
                         <div className="flex items-center gap-3">
                             <button
-                                onClick={() => methods.selectTrack(0)}
+                                onClick={() => methods.selectTrack(pageInfo.firstIndex)}
                                 className="text-[11px] font-mono text-slate-400 hover:text-white px-2 py-0.5 rounded bg-white/10 transition shrink-0"
-                                title="首项"
+                                title={pageInfo.grouped ? '本画廊首页' : '首项'}
                             >
                                 1
                             </button>
                             <span className="text-xs font-mono text-indigo-300 w-16 text-right font-bold">
-                                {playlist.currentIndex + 1}
+                                {pageInfo.index}
                             </span>
                             <input
                                 type="range"
-                                min={0}
-                                max={Math.max(0, playlist.files.length - 1)}
+                                min={pageInfo.firstIndex}
+                                max={pageInfo.lastIndex}
                                 step={1}
-                                value={playlist.currentIndex >= 0 ? playlist.currentIndex : 0}
+                                value={playlist.currentIndex >= 0 ? playlist.currentIndex : pageInfo.firstIndex}
                                 onChange={(e) => methods.selectTrack(parseInt(e.target.value, 10))}
                                 className="flex-1 h-1.5 bg-white/20 rounded-lg appearance-none cursor-pointer accent-indigo-500 hover:h-2 transition-all"
                             />
-                            <span className="text-xs font-mono text-slate-400 w-16">共 {playlist.files.length}</span>
+                            <span className="text-xs font-mono text-slate-400 w-16">共 {pageInfo.total}</span>
                             <button
-                                onClick={() => methods.selectTrack(playlist.files.length - 1)}
+                                onClick={() => methods.selectTrack(pageInfo.lastIndex)}
                                 className="text-[11px] font-mono text-slate-400 hover:text-white px-2 py-0.5 rounded bg-white/10 transition shrink-0"
-                                title="末项"
+                                title={pageInfo.grouped ? '本画廊末页' : '末项'}
                             >
-                                {playlist.files.length}
+                                {pageInfo.total}
                             </button>
                         </div>
                     ) : (
@@ -1505,19 +1614,16 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                             <button
                                 onClick={cycleMode}
                                 className="p-2 hover:bg-white/10 rounded-xl text-slate-400 hover:text-white transition"
-                                title={`播放模式: ${state.playbackMode}`}
+                                title={`播放模式: ${PLAYBACK_MODE_LABEL[state.playbackMode]}（点击切换）`}
                             >
                                 {state.playbackMode === PlaybackMode.Random ? (
                                     <Shuffle className="w-4 h-4 text-indigo-400" />
                                 ) : state.playbackMode === PlaybackMode.StopAfter ? (
-                                    <span className="w-4 h-4 text-xs font-black text-slate-400 flex items-center justify-center font-mono">1</span>
+                                    <CircleStop className="w-4 h-4 text-amber-400" />
+                                ) : state.playbackMode === PlaybackMode.SingleLoop ? (
+                                    <Repeat1 className="w-4 h-4 text-cyan-400" />
                                 ) : (
-                                    <Repeat
-                                        className={`w-4 h-4 ${state.playbackMode === PlaybackMode.SingleLoop
-                                            ? 'text-cyan-400'
-                                            : 'text-slate-400'
-                                            }`}
-                                    />
+                                    <Repeat className="w-4 h-4" />
                                 )}
                             </button>
 
@@ -1548,23 +1654,25 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                         </div>
 
                         {/* 中间：上一个 / 快退10s / 播放 / 快进10s / 下一个
-              （图集/文档走顺序翻页，不受 Random 影响） */}
+              （图集/文档走顺序翻页，不受 Random 影响；时间轴跳转对分页媒体无意义，故隐藏） */}
                         <div className="flex items-center gap-3">
                             <button
-                                onClick={() => (currentFile?.mediaType === 'image' || currentFile?.mediaType === 'document' ? methods.prevPage() : methods.prevTrack())}
+                                onClick={() => (pagedKind ? methods.prevPage() : methods.prevTrack())}
                                 className="p-2 hover:bg-white/10 rounded-xl text-slate-300 hover:text-white transition"
-                                title="上一个 (P)"
+                                title={pagedKind ? '上一页 (P / ←)' : '上一个 (P)'}
                             >
                                 <SkipBack className="w-5 h-5" />
                             </button>
 
-                            <button
-                                onClick={() => handleSeekDelta(-10)}
-                                className="p-2 hover:bg-white/10 rounded-xl text-slate-300 hover:text-white transition"
-                                title="快退 10 秒 (J / ←)"
-                            >
-                                <Rewind className="w-4 h-4" />
-                            </button>
+                            {!pagedKind && (
+                                <button
+                                    onClick={() => handleSeekDelta(-10)}
+                                    className="p-2 hover:bg-white/10 rounded-xl text-slate-300 hover:text-white transition"
+                                    title="快退 10 秒 (J / ←)"
+                                >
+                                    <Rewind className="w-4 h-4" />
+                                </button>
+                            )}
 
                             <button
                                 onClick={methods.togglePlay}
@@ -1574,18 +1682,20 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                                 {state.isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 fill-current" />}
                             </button>
 
-                            <button
-                                onClick={() => handleSeekDelta(10)}
-                                className="p-2 hover:bg-white/10 rounded-xl text-slate-300 hover:text-white transition"
-                                title="快进 10 秒 (L / →)"
-                            >
-                                <FastForward className="w-4 h-4" />
-                            </button>
+                            {!pagedKind && (
+                                <button
+                                    onClick={() => handleSeekDelta(10)}
+                                    className="p-2 hover:bg-white/10 rounded-xl text-slate-300 hover:text-white transition"
+                                    title="快进 10 秒 (L / →)"
+                                >
+                                    <FastForward className="w-4 h-4" />
+                                </button>
+                            )}
 
                             <button
-                                onClick={() => (currentFile?.mediaType === 'image' || currentFile?.mediaType === 'document' ? methods.nextPage() : methods.nextTrack(true))}
+                                onClick={() => (pagedKind ? methods.nextPage() : methods.nextTrack(true))}
                                 className="p-2 hover:bg-white/10 rounded-xl text-slate-300 hover:text-white transition"
-                                title="下一个 (N)"
+                                title={pagedKind ? '下一页 (N / →)' : '下一个 (N)'}
                             >
                                 <SkipForward className="w-5 h-5" />
                             </button>
@@ -1624,13 +1734,13 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                                 )}
                             </div>
 
-                            {/* 画面比例 */}
+                            {/* 画面比例：显示中文标签，英文枚举继续留在 title 里备查 */}
                             <button
                                 onClick={cycleFit}
-                                className="px-2.5 py-1 bg-white/5 hover:bg-white/10 rounded-xl text-slate-300 hover:text-white border border-white/5 transition text-xs font-mono"
-                                title={`画面适配: ${state.objectFit}`}
+                                className="px-2.5 py-1 bg-white/5 hover:bg-white/10 rounded-xl text-slate-300 hover:text-white border border-white/5 transition text-xs font-semibold whitespace-nowrap"
+                                title={`画面适配: ${OBJECT_FIT_LABEL[state.objectFit]}（${state.objectFit}，点击切换）`}
                             >
-                                {state.objectFit.toUpperCase()}
+                                {OBJECT_FIT_LABEL[state.objectFit]}
                             </button>
 
                             {/* 真正视频全屏按钮 */}

@@ -3,7 +3,6 @@
 import React, { useState, useEffect, useRef, useImperativeHandle, forwardRef } from 'react';
 import { Message } from '../../meta';
 import { PaperAirplaneIcon, SparklesIcon, UserCircleIcon, CpuChipIcon } from '@heroicons/react/24/solid';
-import { useAudio } from '../../hooks';
 
 export interface ChatInterfaceRef {
     triggerFix: (code: string, error: string) => Promise<void>;
@@ -13,21 +12,19 @@ interface ChatInterfaceProps {
   initialMessages: Message[];
   onCodeGenerated: (code: string, isAutoFix?: boolean) => void;
   onMessagesUpdate: (messages: Message[]) => void;
-  // 父级 AudioPanel 已持有 useAudio() 实例，优先复用，避免每个 ChatInterface 再建一套 chat 状态
-  chat?: {
+  /**
+   * 对话能力由父级 AudioPanel 注入。
+   * 这里刻意不调用 useAudio()：那会为每个 ChatInterface 实例
+   * 额外创建一个 AudioContext 且从不关闭，造成音频上下文泄漏。
+   */
+  chat: {
     isProcessing: boolean;
     sendMessage: (content: string) => Promise<{ success: boolean; code?: string; replyMessage: Message }>;
     triggerFix: (brokenCode: string, error: string) => Promise<{ success: boolean; code?: string; replyMessage: Message }>;
   };
 }
 
-const ChatInterface = forwardRef<ChatInterfaceRef, ChatInterfaceProps>(({ initialMessages, onCodeGenerated, onMessagesUpdate, chat: chatProp }, ref) => {
-  const audio = useAudio();
-  const chat = chatProp ?? {
-    isProcessing: audio.state.isChatProcessing,
-    sendMessage: audio.actions.sendMessage,
-    triggerFix: audio.actions.triggerFix,
-  };
+const ChatInterface = forwardRef<ChatInterfaceRef, ChatInterfaceProps>(({ initialMessages, onCodeGenerated, onMessagesUpdate, chat }, ref) => {
   const { isProcessing, sendMessage, triggerFix: triggerFixAction } = chat;
 
   const [input, setInput] = useState('');
@@ -113,7 +110,7 @@ const ChatInterface = forwardRef<ChatInterfaceRef, ChatInterfaceProps>(({ initia
             <SparklesIcon className="w-4 h-4 text-cyan-400" />
             <h2 className="text-sm font-bold text-zinc-200">AI Assistant</h2>
         </div>
-        <span className="text-[10px] text-zinc-600 bg-zinc-900 px-2 py-1 rounded border border-zinc-800">GEMINI PRO</span>
+        <span className="text-[10px] text-zinc-600 bg-zinc-900 px-2 py-1 rounded border border-zinc-800">AI COMPOSE</span>
       </div>
       
       {/* Message List */}

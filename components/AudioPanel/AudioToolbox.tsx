@@ -265,7 +265,7 @@ const StatCard: React.FC<{label: string, value: string | number, highlight?: boo
 );
 
 const FixerView: React.FC<{ fixer: any }> = ({ fixer }) => {
-    const { state, setFile, setGain, apply } = fixer;
+    const { state, setFile, setGain, applyFix } = fixer;
     const { file, gain, isProcessing } = state;
 
     return (
@@ -324,7 +324,7 @@ const FixerView: React.FC<{ fixer: any }> = ({ fixer }) => {
 
                 {/* Action */}
                 <button
-                    onClick={apply}
+                    onClick={applyFix}
                     disabled={!file || isProcessing}
                     className={`
                         w-full py-4 rounded-xl font-bold transition-all shadow-lg transform active:scale-95

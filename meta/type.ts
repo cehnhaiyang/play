@@ -114,6 +114,7 @@ export type ExpandedOscillatorType =
     | 'triangle'     // 三角波 (泛音较弱，适合柔和笛音与低音)
     | 'white_noise'  // 白噪声 (全频段均匀能量，适合打击乐/雨声)
     | 'pink_noise'   // 粉红噪声 (按倍频程衰减，适合海浪/环境音/风声)
+    | 'brown_noise'  // 布朗噪声 (低频随机游走，适合雷鸣/低频轰鸣)
     | 'custom';      // 自定义 PeriodicWave 振荡周期
 
 /**
@@ -122,17 +123,83 @@ export type ExpandedOscillatorType =
  * - `filter`: 调制滤波器截止频率 (自动哇音 Auto-Wah)
  * - `gain`: 调制增益/音量 (震音 Tremolo)
  * - `pan`: 调制立体声声像 (自动摇摆 Auto-Pan)
+ * - `detune`: 调制失谐量，制造更宽的合唱/超级锯琴听感
  */
-export type LFOTarget = 'frequency' | 'filter' | 'gain' | 'pan';
+export type LFOTarget = 'frequency' | 'filter' | 'gain' | 'pan' | 'detune';
+
+/**
+ * 滤波器响应类型
+ * 覆盖 Web Audio BiquadFilterNode 的全部可用类型，
+ * 解析层据此白名单校验，避免把非法字符串塞进节点 type 触发运行时异常。
+ */
+export type FilterKind =
+    | 'lowpass'
+    | 'highpass'
+    | 'bandpass'
+    | 'notch'
+    | 'lowshelf'
+    | 'highshelf'
+    | 'peaking'
+    | 'allpass';
+
+/**
+ * 噪声色彩
+ * - `white`: 全频段等能量，适合镲片、军鼓、雨声
+ * - `pink`: 按倍频程衰减，适合海浪、风声、氛围铺底
+ * - `brown`: 更低频的随机游走，适合雷鸣、低沉轰鸣
+ */
+export type NoiseColor = 'white' | 'pink' | 'brown';
+
+/**
+ * 包络分段曲线形态
+ * - `linear`: 线性过渡，听感机械、可预测
+ * - `exp`: 指数过渡，接近自然衰减（打击乐、拨弦的默认形态）
+ * - `hold`: 阶梯保持，用于 S 段之前制造延迟感
+ */
+export type EnvelopeCurve = 'linear' | 'exp' | 'hold';
 
 /**
  * 琶音音符扫描模式
  * - `up`: 从低音扫描到高音
  * - `down`: 从高音扫描到低音
- * - `upDown`: 往返扫描 (低 -> 高 -> 低)
+ * - `upDown`: 往返扫描且首尾音不重复 (低 -> 高 -> 低)
+ * - `downUp`: 反向往返扫描
+ * - `asPlayed`: 严格按书写顺序循环
  * - `random`: 在和弦音中随机选取
  */
-export type ArpPattern = 'up' | 'down' | 'upDown' | 'random';
+export type ArpPattern = 'up' | 'down' | 'upDown' | 'downUp' | 'asPlayed' | 'random';
+
+/**
+ * 鼓组音色合成模型
+ * - `membrane`: 带音高包络的正弦膜振动（底鼓、通鼓、808 低音）
+ * - `noise`: 噪声为主叠加带通塑形（军鼓、拍手、沙锤）
+ * - `metallic`: 多个非谐分音叠加（镲片、踩镲、牛铃）
+ */
+export type DrumVoiceType = 'membrane' | 'noise' | 'metallic';
+
+/**
+ * 内置鼓组音色名
+ * 通过 `hit("kick", "4n")` 之类的指令引用，无需自建乐器即可获得节奏声部。
+ */
+export type DrumName =
+    | 'kick' | 'sub_kick' | 'snare' | 'rim' | 'clap'
+    | 'hat' | 'open_hat' | 'pedal_hat'
+    | 'tom_low' | 'tom_mid' | 'tom_high'
+    | 'crash' | 'ride' | 'cowbell' | 'shaker' | 'tambourine';
+
+/**
+ * 效果器种类
+ * - 时间类：`delay` `reverb`
+ * - 失真类：`distortion` `bitcrush` `overdrive`
+ * - 滤波类：`filter` (可做自动扫频) `eq`
+ * - 动态类：`chorus` `flanger` `phaser` `tremolo` `compressor` `pingpong`
+ */
+export type EffectType =
+    | 'delay' | 'pingpong' | 'reverb'
+    | 'distortion' | 'bitcrush' | 'overdrive'
+    | 'filter' | 'eq'
+    | 'chorus' | 'flanger' | 'phaser' | 'tremolo'
+    | 'compressor';
 
 /**
  * 聊天交互消息角色
@@ -141,6 +208,78 @@ export type ArpPattern = 'up' | 'down' | 'upDown' | 'random';
  * - `system`: 系统的预置提示词或上下文配置
  */
 export type MessageRole = 'user' | 'model' | 'system';
+
+/**
+ * ============================================================================
+ * 3.5 AI 服务类型
+ * ============================================================================
+ */
+
+/**
+ * AI 思考（推理）强度档位
+ * 直接对应 OpenAI 兼容接口的 `reasoning_effort` 字段。
+ * 注意：服务端对该字段做白名单校验，传入其它值会直接返回 503，
+ * 因此这里是闭合联合而非 string。
+ * - `low`: 最快、最省 token，适合格式转换类任务
+ * - `high`: 平衡档，适合常规生成
+ * - `max`: 最强推理，适合复杂修复与长链推理
+ */
+export type ReasoningEffort = 'low' | 'high' | 'max';
+
+/**
+ * AI 服务连接配置（OpenAI 兼容协议）
+ * 由主进程 settings.json 持有，渲染层只通过 IPC 读写，密钥不落到渲染进程。
+ */
+export interface AiConfig {
+    /** 接口基址，需带版本段，如 http://127.0.0.1:7863/v1（末尾斜杠会被归一化去掉） */
+    baseUrl: string;
+    /** 调用密钥；本地服务可为空串 */
+    apiKey: string;
+    /** 模型标识，如 global:deepseek-v4.1-flash */
+    model: string;
+    /** 思考强度档位 */
+    reasoningEffort: ReasoningEffort;
+}
+
+/**
+ * 单轮对话消息
+ */
+export interface AiChatMessage {
+    role: 'system' | 'user' | 'assistant';
+    content: string;
+}
+
+/**
+ * 一次补全请求的可选参数
+ */
+export interface AiChatOptions {
+    /** 系统提示词，会作为首条 system 消息插入 */
+    system?: string;
+    /** 对话消息列表 */
+    messages: AiChatMessage[];
+    /** 采样温度 */
+    temperature?: number;
+    /** 回复长度上限 */
+    maxTokens?: number;
+    /** 要求模型返回严格 JSON 对象 */
+    jsonMode?: boolean;
+    /** 覆盖默认思考强度（不传则用配置里的档位） */
+    reasoningEffort?: ReasoningEffort;
+}
+
+/**
+ * AI 连接测试结果
+ */
+export interface AiTestResult {
+    success: boolean;
+    message: string;
+    /** 往返耗时（毫秒） */
+    latency?: number;
+    /** 服务端回显的实际模型名 */
+    model?: string;
+    /** 服务端返回内容的截断预览 */
+    reply?: string;
+}
 
 /**
  * ============================================================================

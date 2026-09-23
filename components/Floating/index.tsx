@@ -1,15 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { KeyRound, Magnet, ShieldAlert, Sparkles, X } from 'lucide-react';
+import { Magnet, Settings, ShieldAlert, Sparkles, X } from 'lucide-react';
 import { useSniff, useTamper } from '../../hooks';
 import { FoundLink } from '../../meta';
-import { ApiKeyFloating } from './ApiKeyFloating';
+import { SettingsFloating } from './SettingsFloating';
 import { SniffResults } from './SniffResults';
 import { TamperFloating } from './TamperFloating';
 import { TorrentFloating } from './TorrentFloating';
 import { FLOATING_PANEL_OVERLAY, FLOATING_PANEL_SHELL, getFloatingTriggerClassName } from './shared';
 import { loadJSON, saveJSON } from '../../utils/persist';
 
-type FloatingPanelType = 'sniff' | 'tamper' | 'torrent' | 'apikey';
+type FloatingPanelType = 'sniff' | 'tamper' | 'torrent' | 'settings';
 
 interface FloatingProps {
   sniffer: ReturnType<typeof useSniff>;
@@ -54,12 +54,12 @@ const PANEL_META: Record<
     hint: '搜索 sukebei / nyaa，内置引擎直下正片',
     statusText: 'BT 引擎就绪',
   },
-  apikey: {
-    label: 'API Key',
-    icon: KeyRound,
-    accent: 'from-emerald-500 via-teal-500 to-cyan-400',
-    hint: '配置和同步 AI 模型服务调用密钥',
-    statusText: '密钥服务正常',
+  settings: {
+    label: '设置',
+    icon: Settings,
+    accent: 'from-sky-500 via-blue-500 to-indigo-400',
+    hint: '网络代理与 AI 服务配置',
+    statusText: '配置即时生效',
   },
 };
 
@@ -339,9 +339,9 @@ export const Floating: React.FC<FloatingProps> = ({
           </div>
         )}
 
-        {visited.has('apikey') && (
-          <div className={activePanel === 'apikey' ? 'flex h-full min-h-0 flex-col' : 'hidden'}>
-            <ApiKeyFloating />
+        {visited.has('settings') && (
+          <div className={activePanel === 'settings' ? 'flex h-full min-h-0 flex-col' : 'hidden'}>
+            <SettingsFloating />
           </div>
         )}
       </>
@@ -582,4 +582,4 @@ export const Floating: React.FC<FloatingProps> = ({
 
 export { SniffResults } from './SniffResults';
 export { TamperFloating } from './TamperFloating';
-export { ApiKeyFloating } from './ApiKeyFloating';
+export { SettingsFloating } from './SettingsFloating';
