@@ -11,7 +11,7 @@ import {
   PlayIcon, StopIcon, ArrowUpTrayIcon, ArchiveBoxArrowDownIcon, 
   SparklesIcon, PlusIcon, TrashIcon, ArrowLeftIcon, 
   PencilSquareIcon, Bars3Icon, CubeIcon, BeakerIcon, MusicalNoteIcon,
-  HomeIcon
+  HomeIcon, ExclamationTriangleIcon
 } from '@heroicons/react/24/solid';
 
 type ViewState = 'dashboard' | 'workspace' | 'lab';
@@ -33,6 +33,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
   const appState = audioState.appState;
   const parserError = audioState.parserError;
   const autoFixCount = audioState.autoFixCount;
+  const compileWarnings = audioState.compileWarnings;
 
   // UI Local State
   const [view, setView] = useState<ViewState>('dashboard');
@@ -412,6 +413,19 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                             </span>
                             <span className={`text-xs font-mono font-medium ${appState === AppState.PLAYING ? 'text-green-400' : 'text-zinc-500'}`}>
                                  {appState === AppState.PLAYING ? 'SYNTHESIZING' : 'READY'}
+                            </span>
+                        </div>
+                    )}
+
+                    {/* 编译提示：代码能跑，但有些东西大概率不是作者本意 */}
+                    {compileWarnings.length > 0 && (
+                        <div
+                            className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-950/30 border border-amber-900/50 cursor-help"
+                            title={compileWarnings.map((w) => `第 ${w.line} 行: ${w.message}`).join('\n')}
+                        >
+                            <ExclamationTriangleIcon className="w-3.5 h-3.5 text-amber-400" />
+                            <span className="text-xs text-amber-300 font-medium">
+                                {compileWarnings.length} 条提示
                             </span>
                         </div>
                     )}

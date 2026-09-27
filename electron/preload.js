@@ -27,16 +27,16 @@ contextBridge.exposeInMainWorld('process', {
 
 // 暴露 IPC 通信接口
 contextBridge.exposeInMainWorld('electronAPI', {
-    // 监听来自主进程的导航请求（新标签页链接）
+    // 监听来自主进程的导航请求（新标签页链接），返回取消订阅函数
     onNavigateToUrl: (callback) => subscribe('navigate-to-url', callback),
-    // 移除监听器
-    removeNavigateListener: () => {
-        ipcRenderer.removeAllListeners('navigate-to-url');
-    },
     // 监听网络嗅探结果
     onSniffedMedia: (callback) => subscribe('sniffed-media', callback),
     getDownloadCapabilities: () => ipcRenderer.invoke('get-download-capabilities'),
     downloadMedia: (payload) => ipcRenderer.invoke('download-media', payload),
+    /** 取消正在进行的媒体下载（kill 子进程/请求，并删掉半成品文件） */
+    cancelMediaDownload: (url) => ipcRenderer.invoke('cancel-media-download', url),
+    /** 媒体下载实时进度（流媒体走 ffmpeg 的 Duration/out_time，直链走 Content-Length） */
+    onMediaDownloadProgress: (callback) => subscribe('media-download-progress', callback),
     // --- 单文件 .gallery 打包保存（渲染层组包，主进程弹另存为对话框落盘） ---
     galleryPack: {
         savePack: (options) => ipcRenderer.invoke('gallery-save-pack', options),
@@ -67,12 +67,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
         get: () => ipcRenderer.invoke('settings-get'),
         setProxyPort: (value) => ipcRenderer.invoke('settings-set-proxy-port', value),
         setAiConfig: (value) => ipcRenderer.invoke('settings-set-ai-config', value),
-        testAiConfig: (value) => ipcRenderer.invoke('settings-test-ai-config', value),
+        testAiConfig: (value, reasoningEffort) => ipcRenderer.invoke('settings-test-ai-config', value, reasoningEffort),
     },
-    // --- Sukebei / Nyaa 资源搜索与种子 API ---
-    sukebei: {
-        search: (options) => ipcRenderer.invoke('sukebei-search', options),
-        getTorrent: (options) => ipcRenderer.invoke('sukebei-get-torrent', options),
+    // --- 种子文件获取（只有落盘需要主进程：文件系统权限） ---
+    // 搜索不经过这里：搜索引擎完整地待在 services/SearchService，
+    // 用渲染层 fetch 直接请求各站点，代理配在 Chromium 会话上、自动生效。
+    torrentFile: {
+        fetchFile: (options) => ipcRenderer.invoke('torrent-fetch-file', options),
     },
     // --- 内置 BT 下载引擎 API（磁力直下，无需外部工具） ---
     torrent: {

@@ -2,7 +2,7 @@
 /// <reference lib="dom" />
 import { ScheduledEvent, EffectDef, Envelope, DrumName } from '../../../meta';
 import { fillNoise, createRandom, clamp, midiToFreq } from '../utils';
-import { DRUM_SPECS } from './drums';
+import { DRUM_SPECS, DrumSpec } from './drums';
 
 /** 指数自动化不能到 0，用极小值代替 */
 const ZERO = 0.0001;
@@ -549,8 +549,31 @@ export class AudioSynthesizer {
         event: ScheduledEvent,
         registerSource: (node: AudioScheduledSourceNode) => void
     ) {
-        const spec = DRUM_SPECS[event.drum as DrumName];
-        if (!spec) return;
+        const baseSpec = DRUM_SPECS[event.drum as DrumName];
+        if (!baseSpec) return;
+
+        /**
+         * 逐次击打微调。
+         *
+         * `tune` 改基频、`decay` 改衰减、`tone` 移滤波频率、`snap` 加瞬态。
+         * 没有这些参数时，整首歌里同一个 `hit("kick")` 每次听起来一模一样，
+         * 而这正是"程序化鼓组"最容易被听出来的地方；有了它们，
+         * 模型可以用 `tune=-2, decay=0.8` 把同一套鼓拆成"主歌的闷底鼓"
+         * 与"副歌的亮底鼓"，而不必依赖并不存在的额外鼓组音色。
+         */
+        const tune = event.drumTune ?? 0;
+        const decayScale = Math.max(0.05, event.drumDecay ?? 1);
+        const toneShift = event.drumTone ?? 0;
+        const snap = clamp(event.drumSnap ?? 0, 0, 1, 0);
+        const tuneRatio = Math.pow(2, tune / 12);
+
+        const spec: DrumSpec = {
+            ...baseSpec,
+            freq: clamp(baseSpec.freq * tuneRatio, 10, 20000, baseSpec.freq),
+            noiseFreq: clamp(baseSpec.noiseFreq + toneShift, 20, 20000, baseSpec.noiseFreq),
+            decay: baseSpec.decay * decayScale,
+            pitchDecay: baseSpec.pitchDecay * decayScale,
+        };
 
         const t = event.time;
         const velocity = clamp(event.velocity ?? 0.8, 0, 1, 0.8);
@@ -566,7 +589,7 @@ export class AudioSynthesizer {
         if (spec.highpass) {
             const hp = ctx.createBiquadFilter();
             hp.type = 'highpass';
-            hp.frequency.value = spec.highpass;
+            hp.frequency.value = clamp(spec.highpass + toneShift, 20, 20000, spec.highpass);
             hp.Q.value = 0.7;
             out.connect(hp);
             hp.connect(destination);
@@ -595,8 +618,18 @@ export class AudioSynthesizer {
                 // 金属分音衰减更快，模拟镲片能量耗散
                 const partialDecay = spec.model === 'metallic' ? decay * (0.4 + 0.6 / (i + 1)) : decay;
 
+                /**
+                 * 起音斜坡必须严格短于衰减终点。
+                 *
+                 * 旧实现写死 0.002 秒的起音，而 `decay` 会被 hit 的时值截断：
+                 * `hit("kick","64n")` 的 decay 只有 0.031 秒，起音还来得及，
+                 * 但 `hit("kick","128n")` 这种极短时值会让 `t + 0.002` 越过
+                 * `t + decay`，两个自动化事件时间倒流 —— 浏览器的自动化行为
+                 * 在乱序时是未定义的，表现为音量忽大忽小甚至爆音。
+                 */
+                const attackEnd = t + Math.min(0.002, Math.max(0.0002, decay * 0.1));
                 g.gain.setValueAtTime(ZERO, t);
-                g.gain.exponentialRampToValueAtTime(Math.max(ZERO, partialAmp), t + 0.002);
+                g.gain.exponentialRampToValueAtTime(Math.max(ZERO, partialAmp), attackEnd);
                 g.gain.exponentialRampToValueAtTime(ZERO, t + Math.max(0.02, partialDecay));
                 g.gain.setValueAtTime(0, t + Math.max(0.02, partialDecay) + 0.005);
 
@@ -623,21 +656,36 @@ export class AudioSynthesizer {
                 filter.Q.value = spec.noiseQ;
 
                 const g = ctx.createGain();
-                const noiseAmp = spec.noise;
+                const noiseAmp = spec.noise * (1 + snap * 0.8);
+                const noiseAttack = Math.min(0.002, Math.max(0.0002, decay * 0.1));
                 // 拍手的多次爆发：用几个短促包络堆叠出"啪"的群感
                 if (event.drum === 'clap') {
+                    /**
+                     * 四次爆发的包络必须写成一条**严格递增**的时间线。
+                     *
+                     * 旧实现先把四次爆发（固定 0/11/23/36 毫秒）排完，再补一句
+                     * `setValueAtTime(noiseAmp, t + 0.036)` —— 而最后一次爆发已经把
+                     * 自动化推到了 `t + 0.045`，这一句把时间点**倒拨**回 0.036。
+                     * 浏览器对乱序的自动化事件行为未定义，实测表现为拍手音量忽大忽小；
+                     * 而且固定的毫秒间隔在极短时值（如 `hit("clap","128n")`）下会整段越界。
+                     * 这里改为按可用衰减时长缩放爆发间隔，并在每次爆发后直接衔接下一次。
+                     */
+                    const burstSpan = Math.min(0.036, Math.max(0.008, decay * 0.6));
+                    const offsets = [0, 0.3, 0.62, 1].map((f) => f * burstSpan);
+                    const tailEnd = t + burstSpan + Math.max(0.01, decay);
+
                     g.gain.setValueAtTime(ZERO, t);
-                    const bursts = [0, 0.011, 0.023, 0.036];
-                    bursts.forEach((offset, i) => {
+                    offsets.forEach((offset, i) => {
                         const level = noiseAmp * (0.5 + i * 0.16);
-                        g.gain.setValueAtTime(Math.max(ZERO, level * 0.4), t + offset);
-                        g.gain.exponentialRampToValueAtTime(ZERO, t + offset + 0.009);
+                        const isLast = i === offsets.length - 1;
+                        const nextAt = isLast ? tailEnd : t + offsets[i + 1] - 0.0005;
+                        g.gain.setValueAtTime(Math.max(ZERO, level * (isLast ? 1 : 0.4)), t + offset);
+                        g.gain.exponentialRampToValueAtTime(ZERO, nextAt);
                     });
-                    g.gain.setValueAtTime(Math.max(ZERO, noiseAmp), t + 0.036);
-                    g.gain.exponentialRampToValueAtTime(ZERO, t + Math.max(0.05, decay));
+                    g.gain.setValueAtTime(0, tailEnd + 0.005);
                 } else {
                     g.gain.setValueAtTime(ZERO, t);
-                    g.gain.exponentialRampToValueAtTime(Math.max(ZERO, noiseAmp), t + 0.002);
+                    g.gain.exponentialRampToValueAtTime(Math.max(ZERO, noiseAmp), t + noiseAttack);
                     g.gain.exponentialRampToValueAtTime(ZERO, t + Math.max(0.02, decay));
                     g.gain.setValueAtTime(0, t + Math.max(0.02, decay) + 0.005);
                 }
@@ -648,6 +696,33 @@ export class AudioSynthesizer {
 
                 src.start(t);
                 src.stop(endTime);
+                registerSource(src);
+            }
+        }
+
+        // 3. 起音冲击层：极短的高频噪声，让瞬态"扎"出来
+        if (snap > 0) {
+            const buffer = this.noiseBufferFor(ctx, 'white');
+            if (buffer) {
+                const src = ctx.createBufferSource();
+                src.buffer = buffer;
+                src.loop = true;
+                const hp = ctx.createBiquadFilter();
+                hp.type = 'highpass';
+                hp.frequency.value = clamp(spec.noiseFreq * 0.6 + toneShift, 200, 20000, 4000);
+                const g = ctx.createGain();
+                const burst = 0.012;
+                const level = snap * 0.5;
+                g.gain.setValueAtTime(ZERO, t);
+                g.gain.exponentialRampToValueAtTime(Math.max(ZERO, level), t + 0.0008);
+                g.gain.exponentialRampToValueAtTime(ZERO, t + burst);
+                g.gain.setValueAtTime(0, t + burst + 0.005);
+
+                src.connect(hp);
+                hp.connect(g);
+                g.connect(out);
+                src.start(t);
+                src.stop(t + burst + 0.02);
                 registerSource(src);
             }
         }
@@ -677,7 +752,9 @@ export class AudioSynthesizer {
             masterBus.connect(destination);
         }
 
-        // 乐器级效果链按签名缓存总线，避免每个音符都重建卷积器
+        // 乐器级效果链按签名缓存总线，避免每个音符都重建卷积器。
+        // 链内 LFO 的停止时刻取全局 chainStop，因此缓存必须限定在同一次调度内
+        // （每次 scheduleEvents 都会新建 map，天然满足）。
         const busCache = new Map<string, AudioNode>();
         const busFor = (instEffects: EffectDef[]): AudioNode => {
             const key = JSON.stringify(instEffects);
@@ -693,6 +770,7 @@ export class AudioSynthesizer {
 
         events.forEach((event) => {
             if (event.drum) {
+                // 鼓组走 masterBus，绕开逐音符的滤波器/声像/包络链路
                 this.scheduleDrum(ctx, masterBus, event, registerSource);
                 return;
             }

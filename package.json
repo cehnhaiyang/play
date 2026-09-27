@@ -9,27 +9,31 @@
         "preview": "vite preview",
         "electron:dev": "concurrently -k \"vite\" \"wait-on tcp:5173 && electron .\"",
         "electron:build": "vite build && electron-builder",
-        "gallery": "node scripts/gallery.js"
+        "gallery": "node scripts/gallery.js",
+        "test:spg": "node scripts/test/index.js",
+        "test:proxy-sync": "node scripts/proxy-sync-check.js",
+        "test:ui": "concurrently -k -s first \"vite --port 5174 --strictPort\" \"wait-on tcp:5174 && electron scripts/ui-check.js\"",
+        "test:ui:only": "electron scripts/ui-check.js"
     },
     "dependencies": {
         "@tailwindcss/postcss": "^4.3.3",
         "ffmpeg-static": "^5.3.0",
         "hls.js": "^1.7.3",
         "jszip": "^3.10.2",
-        "lucide-react": "^1.46.0",
+        "lucide-react": "^1.48.0",
         "react": "^19.3.0",
         "react-dom": "^19.3.0",
         "webtorrent": "^3.0.21"
     },
     "devDependencies": {
         "@heroicons/react": "^2.2.0",
-        "@types/node": "^26.5.1",
+        "@types/node": "^26.6.2",
         "@types/react": "^19.3.0",
         "@types/react-dom": "^19.3.0",
         "@vitejs/plugin-react": "^6.1.1",
-        "autoprefixer": "^10.6.0",
+        "autoprefixer": "^10.6.1",
         "concurrently": "^10.0.5",
-        "electron": "^44.3.0",
+        "electron": "^44.4.5",
         "electron-builder": "^26.15.3",
         "postcss": "^8.5.28",
         "tailwindcss": "^4.3.3",
@@ -39,7 +43,7 @@
     },
     "build": {
         "appId": "com.player.app",
-        "productName": "React Advanced Player",
+        "productName": "The Play",
         "asarUnpack": [
             "node_modules/ffmpeg-static/**/*"
         ],
@@ -51,5 +55,14 @@
         "directories": {
             "buildResources": "assets"
         }
+    },
+    "allowScripts": {
+        "bufferutil@4.1.0": true,
+        "electron-winstaller@5.4.0": true,
+        "ffmpeg-static@5.3.0": true,
+        "node-datachannel@0.32.3": true,
+        "utf-8-validate@6.0.6": true,
+        "utp-native@2.5.3": true,
+        "ip-set": false
     }
 }

@@ -635,8 +635,16 @@ export const PRESETS: Record<string, PresetDef> = {
   },
 };
 
-/** 按名称取预设（大小写不敏感） */
+/**
+ * 按名称取预设（大小写不敏感）。
+ *
+ * 入参做空值防御：签名是 `name: string`，但本函数是导出给外部的工具，
+ * 而 `Map.get()` / 索引访问取不到值时返回的是 `undefined` ——
+ * 那种写法 TS 不会报错，却会在这里炸成 `Cannot read properties of undefined`。
+ * 返回 null 与"未知预设"同义，调用方本来就要处理。
+ */
 export const getPreset = (name: string): PresetDef | null => {
+    if (typeof name !== 'string') return null;
     return PRESETS[name.toLowerCase()] || null;
 };
 

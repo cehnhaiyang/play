@@ -1,9 +1,10 @@
 /// <reference lib="dom" />
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import type React from 'react';
 import { Project, Message, AppState, ParserError } from '../meta';
 import { loadProjects, saveProjects, createNewProject } from '../services/AudioService/persistence';
 import { BrowserAudioEngine } from '../services/AudioService/audioEngine';
+import type { SPGWarning } from '../services/AudioService/audioEngine/parser';
 import { exportProjectBundle, bufferToWave } from '../services/AudioService/utils';
 import { generateSyntax, fixSyntax } from '../services/AiService';
 import { loadJSON, saveJSON, removeStored } from '../utils/persist';
@@ -23,6 +24,8 @@ interface UseAudioReturn {
         appState: AppState;
         parserError: ParserError | null;
         autoFixCount: number;
+        /** 编译通过但值得提醒的问题（如音序没被 mix 引用） */
+        compileWarnings: SPGWarning[];
         // 工具箱
         converterProcessing: boolean;
         converterLogs: string[];
@@ -81,7 +84,33 @@ export const useAudio = ({
     // 1. 工程管理状态
     const [projects, setProjects] = useState<Project[]>([]);
     const [activeProjectId, setActiveProjectId] = useState<string | null>(initialProjectId);
-    const hasLoadedRef = useRef(false);
+
+    /**
+     * 是否已经把存储里的工程读进状态。**必须是 state，不能是 ref。**
+     *
+     * 这里原先用的是 `hasLoadedRef`：读取 effect 在末尾同步写
+     * `hasLoadedRef.current = true`，可它上面那句 `setProjects(savedProjects)`
+     * 要等重渲染才生效。两个 effect 在同一次 commit 里按声明顺序执行，
+     * 于是紧随其后的保存 effect 看到的是"已加载 = true"配"projects 仍是初始 []"，
+     * 直接 `saveProjects([])` 把存储清空 —— 实测时序（Electron + 真实 React 19）：
+     *
+     *   GET  spg_projects -> [P1,P2]     ← 读到用户的两个工程
+     *   SET  spg_projects = []           ← 首帧就用空数组覆盖了存储
+     *   REMOVE spg_active_project        ← 顺带把"上次打开哪个"也删了
+     *   SET  spg_projects = [P1,P2]      ← 重渲染后才补回来
+     *
+     * 生产构建下这次覆盖会在同一轮微任务里被补回，看不出问题；但开发版
+     * StrictMode 会重放 effect，第二次读取拿到的正是被清空后的 `[]`
+     * （实测 trace 里的 `GET spg_projects -> []`）。更关键的是：在那两个写入
+     * 之间，持久化状态就是"一个工程都没有"，此时渲染进程一旦崩溃/被关闭/
+     * 重载，用户的工程就真的没了。
+     *
+     * 用 state 就对了：它和 `setProjects` 在同一次更新里批处理，
+     * 重渲染后两者**同时**就位，保存 effect 见到的永远是配对的
+     * (hydrated=true, projects=已加载的列表)。首帧 hydrated 仍为 false，
+     * 一次写都不会发生。
+     */
+    const [hydrated, setHydrated] = useState(false);
 
     useEffect(() => {
         const savedProjects = loadProjects();
@@ -94,22 +123,22 @@ export const useAudio = ({
                 setActiveProjectId(initialProjectId);
             }
         }
-        hasLoadedRef.current = true;
+        setHydrated(true);
     }, [initialProjectId]);
 
     useEffect(() => {
-        if (!hasLoadedRef.current) return;
+        if (!hydrated) return;
         saveProjects(projects);
-    }, [projects]);
+    }, [hydrated, projects]);
 
     useEffect(() => {
-        if (!hasLoadedRef.current) return;
+        if (!hydrated) return;
         if (activeProjectId) {
             saveJSON(AUDIO_DEFAULTS.ACTIVE_PROJECT_KEY, activeProjectId);
         } else {
             removeStored(AUDIO_DEFAULTS.ACTIVE_PROJECT_KEY);
         }
-    }, [activeProjectId]);
+    }, [hydrated, activeProjectId]);
 
     const activeProject = useMemo(
         () => projects.find((project) => project.id === activeProjectId) || null,
@@ -201,6 +230,7 @@ export const useAudio = ({
     const [appState, setAppState] = useState<AppState>(AppState.IDLE);
     const [parserError, setParserError] = useState<ParserError | null>(null);
     const [autoFixCount, setAutoFixCount] = useState(0);
+    const [compileWarnings, setCompileWarnings] = useState<SPGWarning[]>([]);
 
     useEffect(() => {
         // 取分析器会顺带确保音频上下文存活（StrictMode 重挂载后可能已被关闭）
@@ -220,6 +250,7 @@ export const useAudio = ({
         setAppState(AppState.IDLE);
         setParserError(null);
         setAutoFixCount(0);
+        setCompileWarnings([]);
     }, [audioEngine]);
 
     const compileAndPlay = useCallback(
@@ -229,6 +260,9 @@ export const useAudio = ({
 
             try {
                 const error = audioEngine.compile(sourceCode);
+                // 编译通过时也要把提示取出来：最常见的提示是"某个音序没被 mix 引用"，
+                // 代码看起来完全正常却少了一整轨声音，不提示的话用户无从排查
+                setCompileWarnings(error ? [] : audioEngine.getWarnings());
                 if (error) {
                     setParserError(error);
                     setAppState(AppState.ERROR);
@@ -561,6 +595,7 @@ export const useAudio = ({
             appState,
             parserError,
             autoFixCount,
+            compileWarnings,
             converterProcessing,
             converterLogs,
             analyzerResult,
@@ -577,6 +612,7 @@ export const useAudio = ({
             appState,
             parserError,
             autoFixCount,
+            compileWarnings,
             converterProcessing,
             converterLogs,
             analyzerResult,

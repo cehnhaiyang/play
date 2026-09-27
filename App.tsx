@@ -1,36 +1,45 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { usePlay, useBrowse, useTamper } from './hooks';
+import { usePlay, useBrowse, useAgent } from './hooks';
 import { BrowsePanel, PlayPanel, Floating, AudioPanel, GalleryPanel } from './components';
-import { FoundLink, getElectronAPI, MediaType } from './meta';
-import { getMediaType, resolveProbeMedia } from './utils';
+import { FoundLink, MediaType } from './meta';
+import { getMediaType } from './utils/utils';
 
 type ViewMode = 'sniffer' | 'player' | 'audio' | 'gallery';
 
 const PlayerLayout: React.FC = () => {
   const player = usePlay();
   const browse = useBrowse();
-  const tamper = useTamper();
 
-  const { tabs, sniffer, interactions } = browse;
-  const { getActiveWebview, isElectron } = interactions;
+  const { tabs, sniffer, interactions, tamper } = browse;
+  const { isElectron } = interactions;
   const currentUrl = tabs.activeTab.url;
 
-  useEffect(() => {
-    if (currentUrl) {
-      sniffer.actions.scan(currentUrl);
-      const t1 = window.setTimeout(() => sniffer.actions.scan(currentUrl), 1500);
-      const t2 = window.setTimeout(() => sniffer.actions.scan(currentUrl), 3500);
-      return () => {
-        window.clearTimeout(t1);
-        window.clearTimeout(t2);
-      };
-    }
-  }, [currentUrl, sniffer.actions.scan]);
+  // Agent 与篡改引擎共用同一条 webview 生命周期：
+  // 都靠 interactions 的 dom-ready 广播拿到页面，不各自持有 webview 引用。
+  // 同时把 tamper 整个传进去 —— Agent 的三组新工具（tamper_rules / storage /
+  // tokens）做的正是篡改面板里那些事，规则真值由 useTamper 持有，这里不复制。
+  const agent = useAgent({
+    getActiveWebview: interactions.getActiveWebview,
+    onPageReady: interactions.onPageReady,
+    tamper,
+  });
 
+  // 一次 URL 变化扫三轮（立即 + 1.5s + 3.5s），等 SPA 把资源渲染出来。
+  // 三轮共用一个 runId：用户快速切页时，上一页的迟到轮次会被丢弃，
+  // 不会把旧页资源写进当前列表、也不会抢走新轮次的加载态。
+  const scanRunRef = useRef(0);
   useEffect(() => {
-    const webview = getActiveWebview();
-    tamper.actions.registerWebview(webview);
-  }, [getActiveWebview, tamper.actions]);
+    if (!currentUrl) return;
+    scanRunRef.current += 1;
+    const runId = scanRunRef.current;
+    sniffer.actions.scan(currentUrl, runId);
+    const t1 = window.setTimeout(() => sniffer.actions.scan(currentUrl, runId), 1500);
+    const t2 = window.setTimeout(() => sniffer.actions.scan(currentUrl, runId), 3500);
+    return () => {
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+    };
+  }, [currentUrl, sniffer.actions.scan]);
 
   const [view, setView] = useState<ViewMode>('sniffer');
   // 画廊懒挂载：GalleryPanel 首屏 effect 会预拉 latest 频道，常驻挂载等于每次启动都偷跑流量；
@@ -109,113 +118,32 @@ const PlayerLayout: React.FC = () => {
     player.methods.mergeOrderedStreams(streamItems, groupId);
   }, [player.methods]);
 
-  // 直连抓取的 run 标识：用户连点两次时，旧轮回包直接丢弃
-  const galleryRunRef = useRef(0);
-
-  const handleOpenGalleryFromUrl = useCallback(async (url: string) => {
-    const electronAPI = getElectronAPI();
-    if (!electronAPI?.acgmho?.probe) return;
-    try {
-      const probe = await electronAPI.acgmho.probe(url);
-      // 与 PlayPanel 共用 resolveProbeMedia：video/audio 缺有效 URL 时回落并提示，
-      // 不再把页面地址硬塞成音视频条目（旧分支会产生播不出的坏条目）
-      const resolved = resolveProbeMedia(probe);
-      if (resolved.kind === 'none' || resolved.streams.length === 0) {
-        console.warn('Gallery probe produced no playable media:', resolved.status);
-        return;
-      }
-
-      // 1. 动画 / 视频
-      if (resolved.kind === 'video') {
-        const vUrl = resolved.streams[0].url;
-        // 必须带上 mediaType：动画直链通常是 .m3u8，不传会被按扩展名判成 stream，
-        // 播放器里就会显示「流媒体」徽章而不是「视频」
-        player.methods.addStream(vUrl, probe.title, true, resolved.streams[0].mediaType);
-        setView('player');
-        return;
-      }
-
-      // 2. 音声 / ASMR / 音频（追加新分组，不清空旧列表）
-      if (resolved.kind === 'audio') {
-        player.methods.addMultipleStreams(resolved.streams, true, false);
-        setView('player');
-        return;
-      }
-
-      // 3. 图集 / 漫画 / 动图
-      if (resolved.kind === 'image') {
-        handleBrowseGallery({
-          title: probe.title,
-          gid: probe.gid,
-          pages: [
-            {
-              url: resolved.streams[0].url,
-              title: `${probe.title} - P01/${probe.totalPages}`,
-              page: 1,
-            },
-          ],
-        });
-
-        if (probe.totalPages > 1) {
-          galleryRunRef.current += 1;
-          const runId = `app-${Date.now()}-${galleryRunRef.current}`;
-          electronAPI.acgmho.fetchPages({
-            gidOrUrl: probe.firstPageUrl || probe.gid,
-            pages: `1-${probe.totalPages}`,
-            delayMs: 100,
-            runId,
-            // 复用详情探测结果，防 /h/ 与 /hentai/ 同名异帖串台
-            probe,
-          }).then((res) => {
-            // 旧轮回包作废（用户又开了一本新的）
-            if (!res || res.runId !== runId) return;
-            if (res?.pages) {
-              // 按页码过滤而非 slice(1)：第 1 页抓取失败时 slice 会误丢第 2 页
-              handleAppendGalleryPages(res.pages.filter((p) => p.page !== 1), probe.gid);
-            }
-            if (res?.errors?.length) {
-              console.warn(`Gallery ${probe.gid}: ${res.errors.length} 页解析失败`, res.errors);
-            }
-          }).catch((e) => {
-            // 直推抓取是无界面的后台续页，失败只记日志（首屏已展示，不打断阅读）
-            console.warn(`Gallery ${probe.gid} 后续页抓取失败:`, e?.message || e);
-          });
-        }
-      }
-    } catch (e) {
-      console.error('Failed to open gallery from URL:', e);
-    }
-  }, [handleBrowseGallery, handleAppendGalleryPages, player.methods]);
-
   return (
     <div className="h-full w-full bg-slate-950 text-slate-200 font-sans overflow-hidden">
       <div
-        className={`fixed inset-0 z-20 transition-all duration-300 ease-out ${
-          view === 'sniffer' ? 'translate-x-0 opacity-100' : '-translate-x-[30%] opacity-0 pointer-events-none'
-        }`}
+        className={`fixed inset-0 z-20 transition-all duration-300 ease-out ${view === 'sniffer' ? 'translate-x-0 opacity-100' : '-translate-x-[30%] opacity-0 pointer-events-none'
+          }`}
       >
         <BrowsePanel
           isVisible={view === 'sniffer'}
           onNavigateToPlayer={() => setView('player')}
           onNavigateToAudio={() => setView('audio')}
           onNavigateToGallery={openGalleryView}
-          onOpenGalleryInPlayer={handleOpenGalleryFromUrl}
           browse={browse}
+          agent={agent}
         />
       </div>
 
       <div
-        className={`fixed inset-0 z-50 transition-transform duration-300 ease-out will-change-transform bg-slate-950 ${
-          view === 'audio' ? 'translate-y-0' : 'translate-y-full'
-        }`}
+        className={`fixed inset-0 z-50 transition-transform duration-300 ease-out will-change-transform bg-slate-950 ${view === 'audio' ? 'translate-y-0' : 'translate-y-full'
+          }`}
       >
         {view === 'audio' && <AudioPanel onBack={() => setView('sniffer')} />}
       </div>
 
       <div
-        className={`fixed inset-0 z-50 transition-transform duration-300 ease-out will-change-transform bg-slate-950 ${
-          view === 'gallery' ? 'translate-y-0 pointer-events-auto' : 'translate-y-full pointer-events-none'
-        }`}
+        className={`fixed inset-0 z-50 transition-transform duration-300 ease-out will-change-transform bg-slate-950 ${view === 'gallery' ? 'translate-y-0 pointer-events-auto' : 'translate-y-full pointer-events-none'
+          }`}
       >
         {galleryVisited && (
           <GalleryPanel
@@ -230,24 +158,22 @@ const PlayerLayout: React.FC = () => {
       </div>
 
       <div
-        className={`fixed inset-0 z-30 flex flex-col transition-transform duration-300 ease-out will-change-transform bg-slate-950 ${
-          view === 'player' ? 'translate-x-0' : 'translate-x-full'
-        }`}
+        className={`fixed inset-0 z-30 flex flex-col transition-transform duration-300 ease-out will-change-transform bg-slate-950 ${view === 'player' ? 'translate-x-0' : 'translate-x-full'
+          }`}
       >
         <PlayPanel player={player} onBackToBrowse={() => setView('sniffer')} />
       </div>
 
       {/* 悬浮球常驻挂载：切到播放器/音频工坊时只 display:none 藏起来，不卸载。
-        之前这里 view !== 'sniffer' 直接不渲染，切一次视图球内全部状态清零 */}
+        之前这里 view !== 'sniffer' 直接不渲染，切一次视图球内全部状态清零。
+        Agent 不在这里 —— 它是浏览器面板的右侧边栏，与 webview 同生共死 */}
       {isElectron && (
         <div className={view === 'sniffer' ? 'fixed inset-0 z-50 pointer-events-none block' : 'hidden'}>
           <Floating
             sniffer={sniffer}
-            tamper={tamper}
             currentUrl={currentUrl}
             onPlay={handleSnifferPlay}
             onAiAnalyze={() => sniffer.actions.analyzeWithAi(currentUrl)}
-            onOpenGallery={handleOpenGalleryFromUrl}
           />
         </div>
       )}

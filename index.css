@@ -83,13 +83,77 @@
     animation: ui-fade-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
-/* 尊重系统「减少动态效果」：关掉浮层缩放入场，仅保留瞬时切换 */
-@media (prefers-reduced-motion: reduce) {
-    .animate-in,
-    .animate-fade-in {
-        animation: none;
+/* 地址栏的加载进度条。
+   Tailwind 的任意值只生成 animation 声明，关键帧得自己提供；
+   这里直接做成一个具名类，比在 JSX 里写 `animate-[loading_2s_...]` 更清楚，
+   也避免类名里再出现一个"必须与关键帧同名"的隐式约定。 */
+@keyframes bp-progress {
+    0% {
+        transform: translateX(-100%);
+    }
+
+    50% {
+        transform: translateX(100%);
+    }
+
+    100% {
+        transform: translateX(-100%);
     }
 }
+
+.bp-progress-bar {
+    width: 33.333%;
+    height: 100%;
+    animation: bp-progress 1.6s ease-in-out infinite;
+}
+
+/* 不定进度：拿不到总长时用（直链无 Content-Length、ffmpeg 还没打印 Duration）。
+   来回扫动表示"在动，但不知道还剩多久"，而不是画一条编造出来的百分比。 */
+@keyframes bp-indeterminate {
+    0% {
+        transform: translateX(-100%);
+    }
+
+    100% {
+        transform: translateX(400%);
+    }
+}
+
+.bp-indeterminate {
+    animation: bp-indeterminate 1.2s ease-in-out infinite;
+}
+
+/* ==========================================================================
+   Agent 边栏（浏览器面板右侧）
+   —— 边栏宽度可拖拽（320–720），所以"字段排几列"必须按**边栏自身宽度**决定，
+   不能用 sm:/lg: 视口断点：1440px 的窗口里，拖到 320 的边栏只有 320px 可用，
+   而 lg:（1024px）会判定为"宽"、把两个输入框硬挤成并排。
+   ========================================================================== */
+.bp-agent-aside {
+    container-type: inline-size;
+    container-name: bpagent;
+}
+
+/* 规则卡片里的字段：默认竖排（窄边栏下并排会挤成竖排单字） */
+.bp-field-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.625rem;
+}
+
+/* 边栏拉宽到 460px 以上才切成两列；URL 匹配始终占满整行 */
+@container bpagent (min-width: 460px) {
+    .bp-field-grid {
+        grid-template-columns: 1fr 1fr;
+    }
+
+    .bp-field-wide {
+        grid-column: 1 / -1;
+    }
+}
+
+/* prefers-reduced-motion 的覆盖块在文件下方、悬浮球动画之后 ——
+   两边选择器特异性相同，谁在后面谁生效，放在这里会被后面的规则盖掉。 */
 
 /* 悬浮球未来感与微晶动效 */
 @keyframes orb-sonar {
@@ -104,30 +168,23 @@
     }
 }
 
-@keyframes orb-spin-slow {
-    from {
-        transform: rotate(0deg);
-    }
-
-    to {
-        transform: rotate(360deg);
-    }
-}
-
+/* 只补间 transform，**不要**在这里写 opacity。
+   CSS 动画的优先级高于普通声明，关键帧里一旦有 opacity，
+   元素上的 `opacity-45 group-hover:opacity-85` 就永远被压住、hover 完全没反应。 */
 @keyframes orb-breath {
 
     0%,
     100% {
         transform: scale(1);
-        opacity: 0.55;
     }
 
     50% {
         transform: scale(1.15);
-        opacity: 0.95;
     }
 }
 
+/* 有限次：角标是"有新资源了"的提示，弹三下足够被看见；
+   无限循环会让悬浮球永远在动，长时间挂着很烦人 */
 @keyframes orb-badge-bounce {
 
     0%,
@@ -152,22 +209,63 @@
     animation: orb-sonar 2.4s cubic-bezier(0.16, 1, 0.3, 1) infinite 1.2s;
 }
 
-.animate-orb-spin {
-    animation: orb-spin-slow 12s linear infinite;
-}
-
 .animate-orb-breath {
     animation: orb-breath 3.5s ease-in-out infinite;
 }
 
 .animate-orb-badge {
-    animation: orb-badge-bounce 2s ease-in-out infinite;
+    /* 3 次 × 0.6s：够看清，又不至于一直晃 */
+    animation: orb-badge-bounce 0.6s ease-in-out 3;
 }
 
 .orb-specular {
     box-shadow:
         inset 0 1.5px 2px rgba(255, 255, 255, 0.5),
         inset 0 -2px 6px rgba(0, 0, 0, 0.45);
+}
+
+/* 尊重系统「减少动态效果」：关掉入场动效与悬浮球的全部循环动画。
+ *
+ * 这里**不能**只列裸类名 `.animate-in`。animation-name 实际写在复合选择器上
+ * （`.animate-in.fade-in`、`.animate-in.zoom-in-95`、`.animate-in.zoom-in-75`），
+ * 特异性是 (0,2,0)，高于 `.animate-in` 的 (0,1,0)。特异性高的规则无条件胜出，
+ * 与书写顺序无关 —— 所以原写法对带 fade-in/zoom-in 的元素**根本没生效**，
+ * 注释里"特异性相同时后写的胜出"那句在复合选择器上是不成立的。
+ * 必须把复合选择器逐条列出，或直接对 .animate-in 用 !important。
+ *
+ * 另外补上此前完全漏掉的动画：进度条（bp-progress-bar / bp-indeterminate）、
+ * 音频频谱条（tp-eq-bar）、上浮入场（tp-rise）。前两个是无限循环，
+ * 恰恰是「减少动态效果」最该关掉的那类。 */
+@media (prefers-reduced-motion: reduce) {
+
+    .animate-in,
+    .animate-in.fade-in,
+    .animate-in.zoom-in-95,
+    .animate-in.zoom-in-75,
+    .animate-fade-in,
+    .animate-orb-sonar,
+    .animate-orb-sonar-delayed,
+    .animate-orb-breath,
+    .animate-orb-badge,
+    .bp-progress-bar,
+    .bp-indeterminate,
+    .tp-eq-bar,
+    .tp-rise {
+        animation: none;
+    }
+
+    /* Tailwind 自带的装饰性循环动画。
+     * 这些工具类由 Tailwind v4 生成在 `@layer utilities` 里，而本块是**未分层**的 ——
+     * 未分层样式在层叠中恒定胜过任何 @layer，与特异性无关，
+     * 所以裸类名在这里足以覆盖，不需要 !important（已用构建产物实测确认）。
+     *
+     * 逐个列而不是只写 .animate-spin：spin 表达"正在加载"，是**有信息量**的状态；
+     * 减动效的用户要的是别晃，不是看不到状态，因此只关掉纯装饰的那几个。
+     * 加载指示仍会转，但用户可在系统层面自行取舍。 */
+    .animate-ping,
+    .animate-bounce {
+        animation: none;
+    }
 }
 
 .custom-scrollbar::-webkit-scrollbar,
@@ -190,4 +288,270 @@
 .custom-scrollbar::-webkit-scrollbar-thumb:hover,
 .scrollbar-thin::-webkit-scrollbar-thumb:hover {
     background: rgba(255, 255, 255, 0.28);
+}
+
+/* BrowsePanel 此前把这两个类写在组件内的 <style> 里，播放器的横向标签条也要用，
+   提到全局避免同一份规则存在两处。 */
+.scrollbar-hide::-webkit-scrollbar {
+    display: none;
+}
+
+.scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}
+
+/* ==========================================================================
+   PlayPanel 视觉系统
+   —— 播放器 UI 的共享令牌与原子件。排版交给 Tailwind，这里只放 Tailwind
+   表达不了的三类东西：原生 range 控件、关键帧、以及少数需要伪元素的样式。
+   ========================================================================== */
+
+:root {
+    /* 主强调色，取 indigo-500 同值，便于在原生控件里引用 */
+    --tp-accent: #6366f1;
+    /* 统一缓动：起步快、收尾慢，避免线性动画的机械感 */
+    --tp-ease: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* --------------------------------------------------------------------------
+   原生 range 控件
+   —— index.html 此前只写了 `-webkit-appearance: none` 却没有补 thumb 样式，
+   于是「隐藏原生外观」实际变成了「什么都不画」：底栏的页码条与音量条都没有
+   滑块，只剩一根光秃秃的轨道，拖拽目标完全不可见。这里补全整套（含 Firefox
+   分支）。`--tp-fill` 由 React 侧写入，用渐变伪造 Chromium 缺失的「已填充
+   轨道」；`--tp-range-color` 让同一条轨道能跟随媒体类型的强调色。
+   -------------------------------------------------------------------------- */
+input[type='range'] {
+    -webkit-appearance: none;
+    appearance: none;
+    /* content-box：让 padding 真正成为可点击区域，而不是被 border-box 吃掉 */
+    box-sizing: content-box;
+    height: 8px;
+    padding: 6px 0;
+    background: transparent;
+    cursor: pointer;
+}
+
+input[type='range']::-webkit-slider-runnable-track {
+    height: 8px;
+    border-radius: 9999px;
+    background: linear-gradient(to right,
+            var(--tp-range-color, var(--tp-accent)) 0 var(--tp-fill, 0%),
+            rgba(255, 255, 255, 0.16) var(--tp-fill, 0%) 100%);
+}
+
+input[type='range']::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    /* (14 - 8) / 2：把滑块压回轨道中线 */
+    margin-top: -3px;
+    border-radius: 9999px;
+    background: #fff;
+    border: 2px solid var(--tp-range-color, var(--tp-accent));
+    box-shadow: 0 1px 6px rgba(0, 0, 0, 0.55);
+    transition: transform 120ms var(--tp-ease);
+}
+
+input[type='range']:hover::-webkit-slider-thumb,
+input[type='range']:active::-webkit-slider-thumb {
+    transform: scale(1.15);
+}
+
+input[type='range']::-moz-range-track {
+    height: 8px;
+    border-radius: 9999px;
+    background: rgba(255, 255, 255, 0.16);
+}
+
+input[type='range']::-moz-range-progress {
+    height: 8px;
+    border-radius: 9999px;
+    background: var(--tp-range-color, var(--tp-accent));
+}
+
+input[type='range']::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    border-radius: 9999px;
+    background: #fff;
+    border: 2px solid var(--tp-range-color, var(--tp-accent));
+}
+
+input[type='range']:focus {
+    outline: none;
+}
+
+input[type='range']:focus-visible {
+    outline: 2px solid rgba(129, 140, 248, 0.75);
+    outline-offset: 2px;
+    border-radius: 9999px;
+}
+
+/* 播放中的均衡器指示：比一个静态圆点更能说明「正在出声」 */
+@keyframes tp-eq {
+
+    0%,
+    100% {
+        transform: scaleY(0.3);
+    }
+
+    50% {
+        transform: scaleY(1);
+    }
+}
+
+.tp-eq-bar {
+    transform-origin: center bottom;
+    animation: tp-eq 900ms ease-in-out infinite;
+}
+
+/* 底栏 / 弹出菜单从下方抬起 */
+@keyframes tp-rise {
+    from {
+        opacity: 0;
+        transform: translateY(6px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.tp-rise {
+    animation: tp-rise 180ms var(--tp-ease) both;
+}
+
+/* 长文本横向缓慢滚动（音频标题过长时用），悬停暂停便于阅读 */
+@keyframes tp-marquee {
+    0%,
+    12% {
+        transform: translateX(0);
+    }
+
+    88%,
+    100% {
+        transform: translateX(var(--tp-marquee-shift, 0));
+    }
+}
+
+/* 侧栏拖拽调宽时禁止选中，否则会顺手把行文字选蓝 */
+.tp-resizing {
+    cursor: col-resize !important;
+    user-select: none !important;
+}
+
+/* 列表行内的操作按钮（删除等）。
+   原来写成 `opacity-0 group-hover:opacity-100`，在触屏上永远等不到 hover：
+   按钮虽然占着位置却完全不可见，用户根本不知道能删。改成只在真正支持
+   hover 的设备上隐藏，触屏与键盘焦点一律常显。 */
+.tp-row-action {
+    opacity: 1;
+    transition: opacity 150ms var(--tp-ease), color 150ms var(--tp-ease);
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .tp-row-action {
+        opacity: 0;
+    }
+
+    .group:hover .tp-row-action,
+    .group:focus-within .tp-row-action,
+    .tp-row-action:focus-visible {
+        opacity: 1;
+    }
+}
+
+/* 新动效同样要尊重系统的「减少动态效果」 */
+@media (prefers-reduced-motion: reduce) {
+
+    .tp-eq-bar,
+    .tp-rise {
+        animation: none;
+    }
+
+    input[type='range']::-webkit-slider-thumb {
+        transition: none;
+    }
+}
+
+/* ==========================================================================
+   底栏自适应（容器查询）
+   —— 关键点：底栏的可用宽度 = 视口宽度 − 侧栏宽度（默认 320px，且可拖拽）。
+   所以 Tailwind 的 sm:/md:/lg: 视口断点在这里是错的度量：880px 的窗口里
+   底栏实际只有约 528px，而 sm: 断点（640px）会判定为「窄」、md:（768px）
+   判定为「宽」，于是窄屏该收的没收、宽屏该显示的没显示。
+   改用容器查询，按底栏自身宽度决定收放，与侧栏宽度、窗口大小解耦。
+   ========================================================================== */
+.tp-player-main {
+    container-type: inline-size;
+    container-name: tpbar;
+}
+
+/* 注意：本文件是「无层级（unlayered）」CSS，而 Tailwind v4 的 utilities 位于
+   @layer utilities。按 CSS 级联层规则，无层级样式**无条件胜过**任何层级样式，
+   与选择器权重无关。所以这里绝不能写 `display: revert` 之类的「默认值还原」——
+   那会把元素上 Tailwind 的 flex / inline-flex 一并顶掉（实测：音量滑杆容器被还原成
+   block 后，静音键与滑杆从横排变成上下堆叠，左栏宽度从 158px 掉到 120px）。
+   正确做法是：不声明默认值，只写收窄时需要的 `display: none`；未命中查询时
+   元素自然保留自己的 Tailwind 类。 */
+
+/* 紧凑静音键：默认藏起来，宽容器下由「静音键 + 音量滑杆」那组承担 */
+.tp-mute-compact {
+    display: none;
+}
+
+/* < 620px：底栏放不下「音量滑杆 + 完整播放控制 + 倍速/画幅/全屏/帮助」，
+   继续硬撑会让中栏的上一首/下一首被左右两栏盖住（实测 528px 时「上一个」
+   完全被音量滑杆压住，点不到）。依次收起次要项，保留主操作。 */
+@container tpbar (max-width: 620px) {
+
+    /* 音量滑杆先收：静音键仍在，且 ↑↓ 与 M 都能调音量 */
+    .tp-vol-slider {
+        display: none;
+    }
+
+    /* 滑杆收了，把独立的紧凑静音键放出来 */
+    .tp-mute-compact {
+        display: inline-flex;
+    }
+
+    .tp-fit-btn {
+        display: none;
+    }
+}
+
+/* < 500px：再收全屏（顶部浮层仍有全屏按钮，快捷键 F 也在） */
+@container tpbar (max-width: 500px) {
+    .tp-fs-btn {
+        display: none;
+    }
+}
+
+/* < 430px：最后收帮助（快捷键 ? 仍在） */
+@container tpbar (max-width: 430px) {
+    .tp-help-btn {
+        display: none;
+    }
+}
+
+/* < 470px：底栏只剩三百多像素时，连「上一个 / 下一个」都会被 ±10s 挤出去。
+   收起 ±10s（它们有 J / L 与 ← → 两组快捷键，且双击画面左右侧同样能跳），
+   优先保住列表导航——那才是没有等价替代的操作。 */
+@container tpbar (max-width: 470px) {
+    .tp-seek-btn {
+        display: none;
+    }
+}
+
+/* 顶部浮层的按钮文字：窄容器下只留图标，避免标题被挤没 */
+@container tpbar (max-width: 620px) {
+
+    .tp-pip-label,
+    .tp-book-label {
+        display: none;
+    }
 }

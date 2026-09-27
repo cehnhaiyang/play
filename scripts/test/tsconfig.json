@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "skipLibCheck": true,
+    "noEmit": false,
+    "outDir": "./build",
+    "rootDir": "../../",
+    "esModuleInterop": true,
+    "allowJs": true,
+    "strict": false,
+    "noImplicitAny": false,
+    "useDefineForClassFields": false,
+    "experimentalDecorators": true,
+    "isolatedModules": false
+  },
+  "include": [
+    "../../services/AudioService/**/*.ts",
+    "../../services/AiService.ts",
+    "../../services/SearchService/**/*.ts",
+    "../../utils/**/*.ts",
+    "../../meta/**/*.ts"
+  ]
+}

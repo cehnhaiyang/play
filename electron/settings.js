@@ -16,13 +16,13 @@ const path = require('path');
  * 语义（用户约定）：
  * - 代理端口留空 = 一律直连，不做任何系统代理探测；
  *   有值 = 用这个端口（host:port，或只写端口号则默认 127.0.0.1）。
- * - AI 走 OpenAI 兼容协议（/chat/completions），默认指向本地 tc2api。
+ * - AI 走 OpenAI 兼容协议（/chat/completions），默认指向tc2api。
  */
 
-/** 思考强度档位：与 tc2api 的 reasoning_effort 取值一致，非法值服务端会直接 503 */
+/** 合法档位：界面与配置里只有这三档；服务商口径的转换在 AiService 下发前做 */
 const REASONING_EFFORTS = ['low', 'high', 'max'];
 
-/** AI 服务默认值：本地 tc2api，开箱即用 */
+/** AI 服务默认值：本地 tc2api */
 const DEFAULT_AI = {
     baseUrl: 'http://127.0.0.1:7863/v1',
     apiKey: '1',
@@ -110,9 +110,15 @@ function writeSettings(patch) {
 }
 
 /**
- * 归一化用户填写的代理端口/地址。
- * 接受 "10810"、"127.0.0.1:10810"、"http://127.0.0.1:10810"、"[::1]:10810"。
+ * 归一化用户填写的代理地址。
+ * 接受 "10808"、"127.0.0.1:10808"、"http://127.0.0.1:10808"、
+ * "socks5://127.0.0.1:10808"、"socks5://用户:密码@127.0.0.1:10808"、"[::1]:10808"。
  * 返回 { value, error }：value 为空串表示"留空 = 直连"。
+ *
+ * 协议前缀要保留：http 与 socks5 的默认端口常常成对相邻（v2rayN 10809/10808、
+ * Clash 7890/7891），用户填错一个数字就会得到一句无从下手的 socket hang up。
+ * 显式写下 socks5:// 是最确定的线索，丢掉它等于逼服务层再去猜一遍。
+ * 不写前缀也合法——服务层会探测端口说的是哪种协议。
  */
 function normalizeProxyInput(input) {
     const raw = String(input == null ? '' : input).trim();
@@ -125,19 +131,45 @@ function normalizeProxyInput(input) {
         return { value: `127.0.0.1:${port}`, error: '' };
     }
 
-    const s = raw.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
-    const idx = s.lastIndexOf(':');
-    if (idx <= 0) return { value: '', error: '格式应为 端口 或 主机:端口，例如 10810 / 127.0.0.1:10810' };
-    const host = s.slice(0, idx).replace(/^\[|\]$/g, '').trim();
-    const port = Number(s.slice(idx + 1));
+    let scheme = '';
+    let rest = raw;
+    const schemeMatch = raw.match(/^([a-z][a-z0-9+.-]*):\/\//i);
+    if (schemeMatch) {
+        const s = schemeMatch[1].toLowerCase();
+        if (!['http', 'https', 'socks', 'socks5', 'socks5h'].includes(s)) {
+            return { value: '', error: `不支持的代理协议 ${s}（可用 http / https / socks5）` };
+        }
+        // socks / socks5h 统一记作 socks5：前者是别名，后者的"远端解析"本就是我们的默认行为
+        scheme = s === 'socks' || s === 'socks5h' ? 'socks5' : s;
+        rest = raw.slice(schemeMatch[0].length);
+    }
+
+    // 凭据段 user:pass@：密码里可能有 '@'，取最后一个
+    let cred = '';
+    const at = rest.lastIndexOf('@');
+    if (at > 0) {
+        cred = rest.slice(0, at);
+        rest = rest.slice(at + 1);
+        if (!cred.includes(':')) return { value: '', error: '代理凭据格式应为 用户名:密码@主机:端口' };
+    }
+
+    const idx = rest.lastIndexOf(':');
+    if (idx <= 0) {
+        return { value: '', error: '格式应为 端口 或 主机:端口，例如 10808 / socks5://127.0.0.1:10808' };
+    }
+    const host = rest.slice(0, idx).replace(/^\[|\]$/g, '').trim();
+    const portStr = rest.slice(idx + 1).trim();
+    const port = Number(portStr);
     if (!host) return { value: '', error: '缺少主机名' };
-    if (!/^\d+$/.test(s.slice(idx + 1).trim()) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    if (!/^\d+$/.test(portStr) || !Number.isInteger(port) || port < 1 || port > 65535) {
         return { value: '', error: '端口需为 1-65535 的整数' };
     }
     if (/\s/.test(host)) return { value: '', error: '主机名不能包含空格' };
-    // IPv6 保留方括号：裸写的 ::1:10810 无法与 host:port 区分，回读会解析错
+    // IPv6 保留方括号：裸写的 ::1:10808 无法与 host:port 区分，回读会解析错
     const hostPart = host.includes(':') ? `[${host}]` : host;
-    return { value: `${hostPart}:${port}`, error: '' };
+    const prefix = scheme ? `${scheme}://` : '';
+    const credPart = cred ? `${cred}@` : '';
+    return { value: `${prefix}${credPart}${hostPart}:${port}`, error: '' };
 }
 
 /**
@@ -212,10 +244,18 @@ function saveAiConfig(input) {
 /**
  * 真实探活：拿当前配置发一次最小请求，验证地址/密钥/模型三者确实可用。
  * 设置面板的「测试连接」用它，避免用户存了一份连不上的配置却毫不知情。
+ *
+ * `wireEffort` 是映射后的档位取值（如 OFM 的 balanced），由渲染层算好传入；
+ * 缺省时用配置里的档位。
  */
-async function testAiConnection(input) {
+async function testAiConnection(input, wireEffort) {
     const { value, error } = normalizeAiInput(input);
     if (error) return { success: false, message: error };
+
+    // 这里只做粗略的形状校验，档位的合法性由映射表那一侧负责
+    const effort = typeof wireEffort === 'string' && /^[a-z0-9_-]{1,32}$/i.test(wireEffort.trim())
+        ? wireEffort.trim()
+        : value.reasoningEffort;
 
     const startedAt = Date.now();
     try {
@@ -231,7 +271,7 @@ async function testAiConnection(input) {
                 // 128 而非 8：推理模型的思考过程也占 completion 预算，
                 // 给太小会导致 content 为空，探活看起来"通了但没回话"
                 max_tokens: 128,
-                reasoning_effort: value.reasoningEffort,
+                reasoning_effort: effort,
             }),
             signal: AbortSignal.timeout(20000),
         });

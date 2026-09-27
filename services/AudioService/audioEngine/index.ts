@@ -2,7 +2,7 @@
 /// <reference lib="dom" />
 import { ParserError, ScheduledEvent } from '../../../meta';
 import { bufferToWave, clamp } from '../utils';
-import { SPGParser, ParseResult, SPGError } from './parser';
+import { SPGParser, ParseResult, SPGError, SPGWarning } from './parser';
 import { EventScheduler } from './scheduler';
 import { AudioSynthesizer } from './synthesizer';
 
@@ -142,14 +142,17 @@ export class BrowserAudioEngine {
         parsed.sequences,
         parsed.instruments,
         parsed.mix,
-        parsed.tempo
+        parsed.tempo,
+        parsed.swing
       );
+
+      // 先落盘本次解析结果，警告才能在"没有事件"这条失败路径上也拿得到
+      this.lastParseResult = parsed;
 
       if (events.length === 0) {
         return { message: '代码编译通过，但没有产生任何音符事件', line: 0 };
       }
 
-      this.lastParseResult = parsed;
       this.scheduledEvents = events;
       // 效果链会拖出尾音，导出时需要留出余量
       this.totalDuration = totalDuration + (parsed.effects.length > 0 ? EFFECT_TAIL : 0.5);
@@ -159,6 +162,17 @@ export class BrowserAudioEngine {
     } catch (e: unknown) {
       return this.toParserError(e);
     }
+  }
+
+  /**
+   * 最近一次成功编译产生的非致命提示。
+   *
+   * 典型场景是"某个 sequence 没被 mix 引用，因此不会发声"——
+   * 代码语法完全正确、编译通过、界面显示 READY，但用户听不到那一轨，
+   * 只能靠提示告诉他原因。
+   */
+  public getWarnings(): SPGWarning[] {
+    return this.lastParseResult?.warnings ?? [];
   }
 
   public async playRealtime() {

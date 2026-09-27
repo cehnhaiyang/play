@@ -10,7 +10,6 @@ import type {
     LFOTarget,
     ArpPattern,
     MessageRole,
-    StorageType,
     GalleryDownloadStatus,
     GalleryFetchStatus,
     AiConfig,
@@ -105,6 +104,34 @@ export interface DownloadMediaParams {
 }
 
 /**
+ * 媒体下载实时进度（主进程 → 渲染层推送）。
+ *
+ * 两种下载方式共用这一个形状：流媒体走 ffmpeg（用 Duration + out_time_ms 算
+ * 真实百分比），直链文件走 HTTP（用 Content-Length + 已收字节）。
+ * 拿不到总长时 percent 为 null —— 界面据此显示不定进度条，
+ * 而不是拿一个假百分比骗人。
+ */
+export interface MediaDownloadProgress {
+    /** 同一 URL 的下载标识，渲染层用来确认这条进度属于当前那次下载 */
+    url: string;
+    /** 0~100；无法确定总长时为 null */
+    percent: number | null;
+    /** 已处理字节（ffmpeg 的 total_size 或 HTTP 已收字节） */
+    receivedBytes: number;
+    /** 总字节；未知为 0 */
+    totalBytes: number;
+    /** 已处理时长（秒）；直链文件无此概念时为 0 */
+    processedSeconds: number;
+    /** 总时长（秒）；未知为 0 */
+    totalSeconds: number;
+    /** 处理速度倍率（ffmpeg 的 speed=2.1x → 2.1）；未知为 0 */
+    speed: number;
+    /** 被跳过的 HLS 分片数（源站缺失，ffmpeg 自报） */
+    skippedSegments: number;
+    status: 'starting' | 'downloading' | 'completed' | 'error' | 'cancelled';
+}
+
+/**
  * 媒体下载任务返回结果
  */
 export interface DownloadMediaResult {
@@ -114,6 +141,15 @@ export interface DownloadMediaResult {
     message: string;
     /** 下载成功后的本地保存绝对路径 */
     filePath?: string;
+    /** 是否被用户取消（取消不算失败，半成品文件已删除） */
+    cancelled?: boolean;
+    /**
+     * 非致命警告：下载成功但内容有缺失（如 HLS 源站丢了分片，ffmpeg 跳过继续）。
+     * 与 success 并存——文件确实下下来了，只是不完整，不该当成失败。
+     */
+    warning?: string;
+    /** 被跳过的 HLS 分片数（ffmpeg 自报，仅流媒体下载有意义） */
+    skippedSegments?: number;
 }
 
 /**
@@ -631,6 +667,62 @@ export interface HitCommand extends NoteExpression {
     drum: DrumName;
     /** 时值 */
     duration: string;
+    /**
+     * 鼓组音高微调（半音）。正值更紧更高，负值更沉更低。
+     * 用于把同一个 kick 音色调成不同调性的底鼓。
+     */
+    drumTune?: number;
+    /** 衰减时长缩放倍数（1 = 音色原值）。大于 1 更长，小于 1 更短促 */
+    drumDecay?: number;
+    /**
+     * 音色明暗偏移（Hz）。作用于鼓组的高通/噪声层，
+     * 正值更亮更"脆"，负值更暗更"闷"。
+     */
+    drumTone?: number;
+    /** 起音冲击感 (0 ~ 1)。越大瞬态越硬，适合军鼓/拍手 */
+    drumSnap?: number;
+}
+
+/**
+ * 和弦进行指令
+ *
+ * 一次写完一整段和声进行，每个和弦按时值依次发声。
+ * 这是让 LLM 用"和声思维"而不是"逐音符思维"作曲的关键指令：
+ * 模型只需给出和弦符号序列，具体声位由引擎按规则展开。
+ */
+export interface ProgressionCommand extends NoteExpression {
+    type: 'progression';
+    /** 每个和弦的音高数组（已由和弦符号展开） */
+    chords: string[][];
+    /** 每个和弦的时值记号，长度与 chords 一致 */
+    beats: string[];
+    /** 跨八度数量 (1 ~ 4)，把和弦向上复制若干八度铺开 */
+    octaves?: number;
+    /** 和弦内音的演奏方式：up/down 等做琶音化，asPlayed 齐奏 */
+    pattern: ArpPattern;
+    /** 每个音的占空比 (0 ~ 1，缺省 1) */
+    gate?: number;
+    /** 和弦内各音错开进入的程度 (0 ~ 1)，做竖琴式滚奏 */
+    strum?: number;
+}
+
+/**
+ * 快速音阶/音型跑动指令
+ *
+ * 用固定速率把一串音高依次奏出，是填充乐句空隙、制造推进感最省笔墨的写法。
+ */
+export interface RunCommand extends NoteExpression {
+    type: 'run';
+    /** 依次奏出的音高序列 */
+    pitches: string[];
+    /** 每个音的速率（如 '16n'） */
+    rate: string;
+    /** 整条音型重复次数（缺省 1） */
+    repeat?: number;
+    /** 方向：up 原序 / down 逆序 / updown 往返 */
+    direction: 'up' | 'down' | 'updown';
+    /** 每个音的占空比 (0 ~ 1，缺省 1) */
+    gate?: number;
 }
 
 /**
@@ -645,7 +737,14 @@ export interface RestCommand {
 /**
  * 音序事件指令联合类型
  */
-export type SequenceCommand = NoteCommand | RestCommand | ChordCommand | ArpCommand | HitCommand;
+export type SequenceCommand =
+    | NoteCommand
+    | RestCommand
+    | ChordCommand
+    | ArpCommand
+    | HitCommand
+    | ProgressionCommand
+    | RunCommand;
 
 /**
  * 音序轨道定义
@@ -746,6 +845,14 @@ export interface ScheduledEvent {
     effects?: EffectDef[];
     /** 打击乐音色（设置时走鼓组合成路径，忽略 wave/fm） */
     drum?: DrumName;
+    /** 鼓组音高微调（半音） */
+    drumTune?: number;
+    /** 鼓组衰减缩放倍数 */
+    drumDecay?: number;
+    /** 鼓组音色明暗偏移 (Hz) */
+    drumTone?: number;
+    /** 鼓组起音冲击感 (0 ~ 1) */
+    drumSnap?: number;
     /** 循环起音点 (秒) */
     loopPoint?: number;
 }
@@ -794,17 +901,52 @@ export interface Project {
 
 /**
  * 响应数据拦截与篡改规则
+ *
+ * 生效范围限于**当前页面主世界**的 JS。以下路径的解析发生在别处，规则不生效：
+ * Web Worker / SharedWorker / Service Worker 内的解析、跨域 iframe 内的请求、
+ * 页面在引擎装钩前就存下的 JSON.parse 引用、WASM 或原生层解析的 JSON。
+ * （Service Worker 本身不构成绕过：它只拦截网络，响应仍由页面主世界解析。）
  */
 export interface TamperRule {
     /** 规则唯一 ID */
     id?: string;
     /** 规则是否启用生效 */
     enabled: boolean;
-    /** 匹配的网络 URL 正则或 Glob 通配模式 */
+    /**
+     * URL 匹配模式。留空、`*`、`.*` 都表示匹配全部。
+     *
+     * 含 `*`（任意串）或 `?`（任意单字符）时按 glob 匹配，
+     * 否则按子串包含匹配。**不是正则**。
+     *
+     * 匹配对象是「页面地址」与「接口地址」两者取或 —— 针对具体接口写的
+     * 规则（如 `*api.example.com*`）不需要页面地址本身也含该串。
+     */
     urlPattern: string;
-    /** 需要修改的 JSONPath 路径表达式 */
+    /**
+     * 要替换的目标键名。取最后一段：`data.user.id` 与 `id` 等价，都匹配任意
+     * 层级上名为 `id` 的字段。**不是 JSONPath**，不支持下标、通配与过滤。
+     *
+     * 响应/请求路径下按字段名匹配；存储路径下按完整的存储键匹配
+     * （整条写法或它的末段都可以）。
+     */
     jsonPath: string;
-    /** 篡改后的替换目标新值 (JSON 字符串或纯文本) */
+    /**
+     * 替换目标新值。
+     *
+     * 类型按写法推断，判据是**严格 JSON 数字字面量**：
+     * - `true` / `false` / `null` → 对应类型
+     * - `42` / `3.14` / `-5` / `1e3` → number
+     * - 其余一律按字符串（`007`、`0x10`、`Infinity`、`1.`、`.5`、`+1`、带空格的数字都是字符串）
+     *
+     * 两个特殊写法：
+     * - `=` 前缀强制当字符串：`=007` 得到字符串 `"007"`（而不是数字 7）。
+     *   想写一个**本身以 `=` 开头**的字符串就双写：`==1+1` 得到 `"=1+1"`。
+     * - `undefined` 会让该字段从响应里消失（`JSON.stringify` 会丢掉值为 undefined 的键），
+     *   效果等于删除字段。想写字符串 `"undefined"` 请用 `=undefined`。
+     *
+     * 注意：JSON 响应路径会还原成上述类型，但 **localStorage / sessionStorage 路径
+     * 始终返回字符串** —— Storage 规范规定 `getItem` 只能返回字符串或 null。
+     */
     newValue: string;
 }
 
@@ -816,24 +958,34 @@ export interface HeaderRule {
     id?: string;
     /** 是否启用 */
     enabled: boolean;
-    /** 匹配的目标 URL 规则 */
+    /** URL 匹配模式，语义同 {@link TamperRule.urlPattern} */
     urlPattern: string;
-    /** 目标 Header 键名 (如 Referer, User-Agent, Authorization) */
+    /** 目标 Header 键名 (如 Referer, User-Agent, Authorization)，大小写不敏感 */
     headerName: string;
-    /** 注入或覆盖的 Header 值 */
+    /** 注入或覆盖的 Header 值；留空表示**删除**该请求头 */
     headerValue: string;
 }
 
 /**
- * 浏览器存储条目项
+ * 一条 Cookie。
+ *
+ * 字段与 Electron `cookies.get()` 的返回对齐。除 name/value 外全部可选 ——
+ * 面板与 Agent 工具都要把它们**原样回填**给 `cookies.set`：
+ * 那是整条覆盖语义，漏掉 httpOnly 会把 HttpOnly 会话 cookie 降级成 JS 可读，
+ * 漏掉 expirationDate 会把持久 cookie 变成会话 cookie（关窗就掉登录态）。
  */
-export interface StorageItem {
-    /** 存储键名 */
-    key: string;
-    /** 存储内容值 */
+export interface CookieItem {
+    name: string;
     value: string;
-    /** 存储载体类型 ('cookie' | 'local' | 'session') */
-    type: StorageType;
+    domain?: string;
+    path?: string;
+    secure?: boolean;
+    httpOnly?: boolean;
+    /** 是否为会话 cookie（无过期时间） */
+    session?: boolean;
+    /** Unix 秒级过期时间 */
+    expirationDate?: number;
+    sameSite?: string;
 }
 
 /**
@@ -987,49 +1139,118 @@ export interface ElectronAcgmhoAPI {
 }
 
 /**
- * Sukebei / Nyaa 搜索结果条目（与主进程 sukebeiService 对齐）
+ * 通用搜索结果条目。
+ *
+ * 各站点字段名、单位、日期格式互不相同（"709.4 MiB" / 字节数 / 秒级时间戳 /
+ * "2024-01-02 03:04"），引擎在 provider 里就地归一化，UI 只认这一种结构。
+ * 这样"加一个站点"不需要动结果列表一行代码。
  */
-export interface SukebeiItem {
-    /** 详情页数字 ID */
+export interface SearchHit {
+    /** 站点内唯一 ID（provider 自定，只需在本站内唯一） */
     id: string;
+    /** 来源 provider id，如 'apibay' */
+    site: string;
+    /** 来源站点显示名 */
+    siteLabel: string;
     /** 资源标题 */
     title: string;
-    /** 详情页相对路径，如 /view/4712759 */
-    view: string;
-    /** 详情页完整地址 */
-    viewUrl: string;
-    /** .torrent 直链 */
-    torrent: string;
     /** magnet 链接（可能为空） */
     magnet: string;
-    /** 体积文本，如 709.4 MiB */
-    size: string;
-    /** 发布日期 */
-    date: string;
-    /** 做种数（未知为 -1） */
+    /** .torrent 直链（可能为空） */
+    torrent: string;
+    /** 详情页地址（可能为空） */
+    viewUrl: string;
+    /**
+     * 归一化后的字节数，-1 表示站点未提供。
+     * 跨站排序/筛选只能用这个——各站原始文本单位不统一，按字符串排毫无意义。
+     */
+    sizeBytes: number;
+    /** 原始体积文本，保留站点原样用于展示 */
+    sizeText: string;
+    /** 做种数（站点未公布为 -1） */
     seeders: number;
-    /** 吸血数（未知为 -1） */
+    /** 吸血数（站点未公布为 -1） */
     leechers: number;
-    /** 完成数（未知为 -1） */
+    /** 完成数（站点未公布为 -1） */
     completed: number;
+    /** 发布时间（epoch 毫秒，未知为 -1） */
+    publishedAt: number;
     /** 分类文本 */
     category: string;
-    /** 来源站点 sukebei | nyaa */
-    site: string;
-}
-
-export interface SukebeiSearchOptions {
-    site?: string;
-    q: string;
-    category?: string;
-    filter?: string;
-    sort?: string;
-    pages?: number;
-    minSeeders?: number;
+    /** info hash（小写 hex，未知为空串）——跨站去重键 */
+    infoHash: string;
 }
 
 /**
- * 内置 BT 任务快照（与主进程 torrentService 对齐）
+ * 站点插口描述。引擎与 UI 都只通过它认识站点，不感知任何站点细节。
+ */
+export interface SiteDescriptor {
+    /** provider 唯一 id */
+    id: string;
+    /** 显示名 */
+    label: string;
+    /** 站点主页（作 referer 与「详情」兜底） */
+    homepage: string;
+    /** 是否成人内容：UI 可据此默认收起，避免默认把里区结果混进表区 */
+    adult: boolean;
+    /** 站点擅长的内容类型，仅用于 UI 提示 */
+    kinds: string[];
+}
+
+/** 单站搜索状态：扇出后哪几站成功、哪几站失败及原因 */
+export interface SearchSiteStatus {
+    site: string;
+    label: string;
+    ok: boolean;
+    /** 该站返回条目数 */
+    count: number;
+    elapsedMs: number;
+    /** 失败原因（ok 为 false 时有值） */
+    error?: string;
+}
+
+/** 搜索请求 */
+export interface SearchQuery {
+    /** 关键词 */
+    q: string;
+    /** 限定站点 id 列表；留空/不传 = 搜索全部已注册站点 */
+    sites?: string[];
+    /** 单站结果上限 */
+    limitPerSite?: number;
+    /** 汇总排序方式 */
+    sort?: SearchSort;
+    /** 过滤掉做种数低于该值的条目（0 = 不过滤） */
+    minSeeders?: number;
+    /** 是否包含成人站点结果 */
+    includeAdult?: boolean;
+}
+
+export type SearchSort = 'seeders' | 'size' | 'date' | 'site';
+
+/** 搜索汇总结果 */
+export interface SearchResult {
+    success: boolean;
+    message?: string;
+    /** 归一化并去重后的汇总条目 */
+    hits: SearchHit[];
+    /** 每站明细（含失败原因） */
+    sites: SearchSiteStatus[];
+    /** 总耗时 */
+    elapsedMs: number;
+}
+
+/** 主进程出网层代取文本的返回 */
+export interface NetFetchTextResult {
+    ok: boolean;
+    status: number;
+    body: string;
+    /** 最终地址（跟随重定向后） */
+    finalUrl?: string;
+    error?: string;
+}
+
+/**
+ * 内置 BT 任务快照（与主进程 electron/main.js 里的 btSnapshot 对齐）
  */
 export type TorrentTaskStatus = 'metadata' | 'downloading' | 'seeding' | 'paused' | 'error';
 
@@ -1071,13 +1292,22 @@ export interface TorrentStartOptions {
 }
 
 /**
- * Electron 注入到渲染层的 Sukebei 搜索与种子 API
+ * Electron 注入到渲染层的种子文件获取 API。
+ *
+ * 搜索本身不再需要 IPC —— 搜索引擎完整地待在 services/SearchService，
+ * 用渲染层 fetch 直接请求各站点（代理配在 Chromium 会话上，自动生效）。
+ * 只有"把 .torrent 落到磁盘"必须由主进程做（需要文件系统权限）。
  */
-export interface ElectronSukebeiAPI {
-    /** 关键词搜索，返回条目列表 */
-    search: (options: SukebeiSearchOptions) => Promise<{ success: boolean; message?: string; items: SukebeiItem[] }>;
-    /** 只下载 .torrent 种子文件（不下正片） */
-    getTorrent: (options: { site?: string; id?: string; torrentUrl?: string; title?: string; outDir?: string }) => Promise<{ success: boolean; message?: string; path?: string; bytes?: number }>;
+export interface ElectronTorrentFileAPI {
+    /**
+     * 下载 .torrent 种子文件并存盘。
+     * 主进程持有站点白名单，渲染层传来的任意地址不会被无条件抓取（防 SSRF）。
+     */
+    fetchFile: (options: {
+        url: string;
+        title?: string;
+        outDir?: string;
+    }) => Promise<{ success: boolean; message?: string; path?: string; bytes?: number }>;
 }
 
 /**
@@ -1089,6 +1319,12 @@ export interface AppSettingsSnapshot {
     proxyPort: string;
     /** 当前实际生效的代理端点（'' 表示直连）；配了端口但连不上时这里为空 */
     applied: string;
+    /**
+     * 实际生效的隧道协议：'http' | 'socks5' | ''（直连时为空）。
+     * 用户只填裸端口时由主进程探测得出，界面据此显示「经 …:10808（SOCKS5）」，
+     * 让"填了 SOCKS 端口还是连不上"这类问题一眼可辨。
+     */
+    proxyProtocol?: string;
     /** AI 服务配置（OpenAI 兼容协议） */
     ai: AiConfig;
     message?: string;
@@ -1121,8 +1357,13 @@ export interface ElectronSettingsAPI {
     setProxyPort: (value: string) => Promise<SaveProxyPortResult>;
     /** 保存 AI 配置；字段非法会被拒绝并回传 message */
     setAiConfig: (value: AiConfig) => Promise<SaveAiConfigResult>;
-    /** 用给定配置发一次真实请求探活（不落盘），验证地址/密钥/模型是否可用 */
-    testAiConfig: (value: AiConfig) => Promise<AiTestResult>;
+    /**
+     * 用给定配置发一次真实请求探活（不落盘），验证地址/密钥/模型是否可用。
+     *
+     * `reasoningEffort` 是映射后的下发取值：映射表在 AiService，
+     * 主进程没有也不做映射，由渲染层算好传进来。
+     */
+    testAiConfig: (value: AiConfig, reasoningEffort?: string) => Promise<AiTestResult>;
 }
 
 /**
@@ -1149,16 +1390,18 @@ export interface ElectronTorrentAPI {
  * Electron 主进程与渲染进程桥接暴露的统一 API (preload 注入)
  */
 export interface ElectronAPI {
-    /** 监听全局导航事件跳转 */
+    /** 监听全局导航事件跳转，返回取消订阅函数 */
     onNavigateToUrl: (callback: (url: string) => void) => () => void;
-    /** 注销导航事件监听器 */
-    removeNavigateListener: () => void;
     /** 监听网络层嗅探到的媒体流或文件 */
     onSniffedMedia: (callback: (media: FoundLink) => void) => () => void;
     /** 获取当前宿主转码与下载能力 (如 FFmpeg) */
     getDownloadCapabilities: () => Promise<DownloadCapabilities>;
     /** 调用原生下载引擎保存媒体文件 */
     downloadMedia: (payload: DownloadMediaParams) => Promise<DownloadMediaResult>;
+    /** 取消正在进行的媒体下载（kill 子进程/请求，并删掉半成品文件） */
+    cancelMediaDownload: (url: string) => Promise<{ success: boolean; message?: string }>;
+    /** 媒体下载实时进度，返回取消订阅函数 */
+    onMediaDownloadProgress: (callback: (progress: MediaDownloadProgress) => void) => () => void;
     /** 读取指定域名的 Cookie */
     getCookies: (url: string) => Promise<any[]>;
     /** 设置 Cookie 项 */
@@ -1170,7 +1413,7 @@ export interface ElectronAPI {
     /** 应用设置 API (可选模块，纯浏览器环境不存在) */
     settings?: ElectronSettingsAPI;
     /** Sukebei / Nyaa 资源搜索与种子 API (可选模块) */
-    sukebei?: ElectronSukebeiAPI;
+    torrentFile?: ElectronTorrentFileAPI;
     /** 内置 BT 下载引擎 API (可选模块) */
     torrent?: ElectronTorrentAPI;
     /** 单文件 .gallery 打包保存 API (可选模块，纯浏览器环境不存在) */
@@ -1403,17 +1646,17 @@ export interface GallerySaveProgress {
 }
 
 /**
- * 单文件 .gallery（ZIP 改后缀）保存请求
+ * 单文件包（.gallery 画廊 ZIP / .aibook 绘本 JSON）保存请求
  */
 export interface GalleryPackSaveOptions {
-    /** 建议文件名（不带路径，如 `我的画廊.gallery`） */
+    /** 建议文件名（不带路径，如 `我的画廊.gallery`）。后缀决定落盘类型与对话框过滤器 */
     fileName: string;
-    /** ZIP 包字节 */
+    /** 包字节 */
     data: ArrayBuffer;
 }
 
 /**
- * 单文件 .gallery 保存结果
+ * 单文件包保存结果
  */
 export interface GalleryPackSaveResult {
     success: boolean;
@@ -1426,7 +1669,8 @@ export interface GalleryPackSaveResult {
 }
 
 /**
- * Electron 注入的单文件 .gallery 打包保存 API
+ * Electron 注入的单文件包保存 API
+ * （画廊 .gallery 与 AI 绘本 .aibook 共用，按 fileName 后缀区分类型）
  */
 export interface ElectronGalleryPackAPI {
     /** 弹另存为对话框（默认下载目录 + 建议文件名），用户确认后写入 */

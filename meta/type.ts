@@ -216,13 +216,14 @@ export type MessageRole = 'user' | 'model' | 'system';
  */
 
 /**
- * AI 思考（推理）强度档位
- * 直接对应 OpenAI 兼容接口的 `reasoning_effort` 字段。
- * 注意：服务端对该字段做白名单校验，传入其它值会直接返回 503，
- * 因此这里是闭合联合而非 string。
- * - `low`: 最快、最省 token，适合格式转换类任务
+ * AI 思考（推理）强度档位：界面与配置里只有这三档
+ *
+ * 各服务商的 reasoning_effort 取值不同（OFM 用 light / balanced / deep），
+ * 下发前由 AiService.resolveReasoningEffort 按服务商、模型映射。
+ *
+ * - `low`: 最快、最省 token
  * - `high`: 平衡档，适合常规生成
- * - `max`: 最强推理，适合复杂修复与长链推理
+ * - `max`: 最强推理，最慢
  */
 export type ReasoningEffort = 'low' | 'high' | 'max';
 
@@ -242,11 +243,34 @@ export interface AiConfig {
 }
 
 /**
+ * 多模态消息内容块（OpenAI /chat/completions 的 content 数组形态）
+ *
+ * 纯文本消息仍可直接用字符串，只有需要带图（AI 绘本读图、OCR）时才用数组。
+ */
+export type AiContentPart =
+    | { type: 'text'; text: string }
+    | { type: 'image_url'; image_url: { url: string } };
+
+/**
  * 单轮对话消息
  */
 export interface AiChatMessage {
     role: 'system' | 'user' | 'assistant';
-    content: string;
+    /** 纯文本用 string；带图消息用 AiContentPart[] */
+    content: string | AiContentPart[];
+}
+
+/**
+ * 流式增量。
+ *
+ * content 与 reasoning 分开：推理模型的思考过程与最终答复是两条独立的流，
+ * 混在一起会让"已经想完了吗"完全看不出来。
+ */
+export interface AiStreamDelta {
+    /** 正文增量 */
+    content?: string;
+    /** 推理过程增量（推理模型才有，字段名各家不一，服务层已归一化） */
+    reasoning?: string;
 }
 
 /**
@@ -265,6 +289,15 @@ export interface AiChatOptions {
     jsonMode?: boolean;
     /** 覆盖默认思考强度（不传则用配置里的档位） */
     reasoningEffort?: ReasoningEffort;
+    /**
+     * 流式回调。传入即请求 stream:true，并在每个增量到达时调用；
+     * **返回值仍是完整文本**，调用方无需自己拼接。
+     *
+     * 服务端不认 stream 时会自动回落成一次性请求（见 AiService.chat）。
+     */
+    onDelta?: (delta: AiStreamDelta) => void;
+    /** 中断信号。中止后 fetch 抛 AbortError，调用方据此区分"用户停止"与"真失败" */
+    signal?: AbortSignal;
 }
 
 /**
@@ -283,17 +316,161 @@ export interface AiTestResult {
 
 /**
  * ============================================================================
- * 4. 网络劫持与存储类型
+ * 3.5 AI 绘本（读图成书）
  * ============================================================================
  */
 
 /**
- * 浏览器存储类型标识
- * - `cookie`: HTTP Cookie
- * - `local`: localStorage 本地持久化存储
- * - `session`: sessionStorage 会话级存储
+ * 送入模型的一张图片。
+ * base64 不含 `data:...;base64,` 前缀，由调用方拆好。
  */
-export type StorageType = 'cookie' | 'local' | 'session';
+export interface AiImageInput {
+    /** Base64 编码的图片数据（不含 data URL 前缀） */
+    base64: string;
+    /** MIME 类型，如 image/png；缺失时按 image/png 处理 */
+    mimeType?: string;
+}
+
+/**
+ * AI 根据一组图片创作出的故事
+ */
+export interface AiStory {
+    /** 故事标题 */
+    title: string;
+    /** 与输入图片一一对应的分页文案 */
+    pages: string[];
+}
+
+/**
+ * .aibook 单文件（JSON）结构
+ *
+ * 与播放列表的 VideoFile 是两套东西：VideoFile 是运行时条目，
+ * .aibook 是可落盘/可分享的归档格式，图片内联为 data URL。
+ */
+export interface AiBookPage {
+    /** 图片的 data URL（或远程 URL） */
+    image: string;
+    /** 该页文案 */
+    text: string;
+    /** 该页语音（Base64 PCM，可选，朗读后缓存） */
+    audio?: string;
+}
+
+export interface AiBookFile {
+    /** 格式版本，便于以后演进 */
+    version: string;
+    /** 书名 */
+    title: string;
+    pages: AiBookPage[];
+}
+
+/**
+ * ============================================================================
+ * 3.7 Agent 工作空间（在已登录页面里执行脚本）
+ * ============================================================================
+ *
+ * 形状是「代码执行器」而不是「点击驱动器」：
+ * 工具只有"在页面主世界跑一段脚本"和"导航"，点击/输入/取数全部塌缩成脚本里的一行。
+ * 原因是上下文经济学 —— 每次观察都要序列化进模型上下文，
+ * 而 DOM 快照动辄数万 token；脚本的返回值可以截断，代码本身高度可压缩。
+ */
+
+/**
+ * Agent 可调用的工具名。
+ *
+ * `S` 是脚本工具，用 args.action 选四件事：R 运行 / L 列出 / S 保存 / D 删除。
+ * 四者合并成一个工具是**上下文成本**的取舍：工具说明每步随请求重发一次，
+ * 拆成四个条目要多花约 400 字节 × 步数，而它们本就共享同一份状态（脚本清单）。
+ *
+ * 后三个是把**用户手动面板里的能力**开放给模型：拦截规则、存储、令牌。
+ * 它们不是 `S` 的替代 —— 规则类能力必须在引擎层生效（钩子装在页面主世界，
+ * 脚本只能影响自己那一次调用），存储类能力必须走原生 API
+ * （Cookie 在渲染进程里读不到 HttpOnly）。
+ */
+export type AgentToolName =
+    | 'S'
+    | 'navigate'
+    | 'tamper_rules'
+    | 'storage'
+    | 'tokens';
+
+/**
+ * 对话流里的一条消息。
+ *
+ * 这里不复用 AiChatMessage：那条是发给模型的协议消息，
+ * 这条是界面上的记录，多了脚本源码、成功标记、时间戳等仅供展示的字段。
+ */
+export interface AgentMessage {
+    id: string;
+    role: 'user' | 'assistant' | 'tool';
+    /** 助手轮次的说明文字；工具消息为结果摘要 */
+    content: string;
+    /**
+     * 界面自己生成的提示，**不是模型说的话**。
+     *
+     * 中断、空回复、步数耗尽这三种结束方式都要给用户一个交代，于是这里补一条
+     * assistant 消息。但它进不了模型上下文：重建历史时若原样当作模型的输出回放，
+     * 模型会读到一句自己从未写过的"（模型本轮没有返回内容…）"，
+     * 进而把界面文案当成自己的承诺。重建时按环境提示写回（见 buildTranscript）。
+     */
+    notice?: boolean;
+    /**
+     * 这一轮的推理过程（推理模型才有，可空）。
+     *
+     * 必须落进消息本身：它原先只活在流式气泡上，而气泡在每步结束时就被
+     * `setStreaming(null)` 收掉了 —— 于是这轮交互一结束，用户再也找不到
+     * 模型当时的判断依据。事后想复盘"它为什么改了这个字段"时，
+     * 唯一能回答的就是这段文字，所以它得跟消息一起进列表、一起落盘。
+     */
+    reasoning?: string;
+    /** 工具消息：调用的工具名 */
+    tool?: AgentToolName;
+    /**
+     * 工具消息：工具名 + 动作（如 S·R）。
+     *
+     * 重建模型上下文时要用它：只写 "S" 的话，「跑脚本 / 列清单 / 存脚本 / 删脚本」
+     * 在历史里长得一模一样，模型看不出自己上一轮到底做过哪一件。
+     */
+    label?: string;
+    /**
+     * 工具消息：由 urlPattern 自动触发，不属于任何一次模型调用。
+     *
+     * 必须与模型自己发起的调用区分开 —— 重建上下文时若把自动执行的结果写成
+     * 「工具 X 的执行结果」，等于凭空捏造一次模型从未发出的调用。
+     */
+    auto?: boolean;
+    /** 工具消息：执行的脚本源码（供界面展开查看） */
+    script?: string;
+    /** 工具消息：是否执行成功 */
+    ok?: boolean;
+    /** 工具消息：回传给模型的完整观察结果（已截断） */
+    result?: string;
+    at: number;
+}
+
+/**
+ * 保存下来的脚本。
+ *
+ * `urlPattern` 非空时，页面 dom-ready 且 URL 命中即自动执行 ——
+ * 这一步复用 useBrowse 的 onPageReady 广播，不需要另挂监听。
+ */
+export interface AgentScript {
+    id: string;
+    name: string;
+    /** 用途说明，会进系统提示词帮模型挑选 */
+    description: string;
+    code: string;
+    /** URL 子串匹配；空串表示只在对话中被显式调用 */
+    urlPattern: string;
+    enabled: boolean;
+    /** 最近一次执行时间（含自动执行） */
+    lastRunAt?: number;
+    /** 最近一次执行结果（已截断，供界面显示） */
+    lastResult?: string;
+}
+
+/** Agent 循环的运行状态 */
+export type AgentRunStatus = 'idle' | 'thinking' | 'acting';
 
 /**
  * ============================================================================

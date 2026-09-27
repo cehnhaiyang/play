@@ -17,6 +17,9 @@ const CodeEditor: React.FC<CodeEditorProps> = ({ code, onChange, error }) => {
   
   const [lineCount, setLineCount] = useState(1);
   const [currentLine, setCurrentLine] = useState(1);
+  // 列号此前是写死的 `Col 0`：光标位置只算了行、没算列，状态栏却在宣称列号，
+  // 于是无论把光标移到哪里都显示 0。这里把列一并算出来（1 起，与编辑器惯例一致）。
+  const [currentCol, setCurrentCol] = useState(1);
 
   // 同步滚动
   const handleScroll = () => {
@@ -34,6 +37,9 @@ const CodeEditor: React.FC<CodeEditorProps> = ({ code, onChange, error }) => {
           const textBeforeCursor = textareaRef.current.value.substring(0, cursorPos);
           const line = textBeforeCursor.split('\n').length;
           setCurrentLine(line);
+          // 列 = 光标距本行行首的字符数 + 1（1 起）
+          const lastNewline = textBeforeCursor.lastIndexOf('\n');
+          setCurrentCol(cursorPos - lastNewline);
       }
   };
 
@@ -72,9 +78,9 @@ const CodeEditor: React.FC<CodeEditorProps> = ({ code, onChange, error }) => {
         { type: 'number', regex: /-?\d+(?:\.\d+)?(?:ms|s|n)?\b/ },
         { type: 'keyword', regex: /\b(?:config|define_instrument|sequence|mix|effect_chain|track)\b/ },
         // 指令与效果器
-        { type: 'function', regex: /\b(?:note|chord|arp|hit|rest|delay|pingpong|reverb|distortion|overdrive|bitcrush|chorus|flanger|phaser|tremolo|compressor|filter|eq|lowpass|highpass|bandpass|notch|lowshelf|highshelf|peaking|allpass|adsr|ad|ar|perc|sine|square|sawtooth|triangle)\b/ },
+        { type: 'function', regex: /\b(?:note|chord|arp|hit|rest|progression|run|delay|pingpong|reverb|distortion|overdrive|bitcrush|chorus|flanger|phaser|tremolo|compressor|filter|eq|lowpass|highpass|bandpass|notch|lowshelf|highshelf|peaking|allpass|adsr|ad|ar|perc|sine|square|sawtooth|triangle)\b/ },
         // 乐器 / 音序 / 效果器的参数名
-        { type: 'property', regex: /\b(?:name|tempo|master_gain|instrument|wave|envelope|filter|filter_envelope|filter_env_amount|lfo|pan|gain|source|time|loop|stagger|feedback|mix|attack|decay|sustain|release|frequency|Q|amount|target|pattern|rate|duration|strum|gate|velocity|transpose|glide|glide_from|detune|humanize|harmonics|voices|unison_spread|spread|pitch_env_amount|pitch_decay|attack_noise|velocity_sensitivity|velocity_to_filter|fm_wave|fm_index|fm_ratio|preset|curve|delay|ramp|swell|sweep_to|damping|pre_delay|pingpong|bits|depth|threshold|ratio|kind|from|to|octaves|low|mid|high|min|max)\b/ }
+        { type: 'property', regex: /\b(?:name|tempo|bpm|master_gain|key|scale|swing|instrument|wave|envelope|env|filter|filter_envelope|filter_env_amount|lfo|pan|gain|source|time|at|loop|repeat|stagger|feedback|mix|attack|decay|sustain|release|frequency|freq|Q|amount|target|pattern|rate|duration|dur|strum|voicing|octaves|octave|gate|velocity|vel|accent|transpose|glide|glide_from|detune|humanize|harmonics|voices|unison_spread|spread|pitch_env_amount|pitch_decay|attack_noise|velocity_sensitivity|velocity_to_filter|fm_wave|fm_index|fm_ratio|preset|curve|delay|ramp|swell|sweep|sweep_to|damping|pre_delay|pingpong|bits|depth|threshold|ratio|kind|from|to|low|mid|high|min|max|tune|tone|snap|direction|pitches|chords|notes|beats|beat|times|step|len)\b/ }
     ];
 
     // 2. 组合正则
@@ -93,14 +99,19 @@ const CodeEditor: React.FC<CodeEditorProps> = ({ code, onChange, error }) => {
         html += escape(input.slice(lastIndex, match.index));
         
         const fullMatch = match[0];
-        
-        // 根据捕获组判断类型
+
+        // 根据捕获组判断类型。
+        // 每个分支都对 fullMatch 走 escape()：目前 3~6 组（数字/关键字/函数/属性）
+        // 的正则都是固定字面量或纯数字，匹配不到 < > &，所以"不转义"当下不会出事。
+        // 但这段 HTML 最终走 dangerouslySetInnerHTML，一旦以后有人往 tokens 里加了
+        // 能匹配 '<' 的规则（比如标签高亮、泛型符号），未转义的分支立刻变成注入点，
+        // 而且不会有任何测试报警。统一转义把这个隐患消掉，代价为零。
         if (match[1]) html += `<span class="token-comment">${escape(fullMatch)}</span>`;
         else if (match[2]) html += `<span class="token-string">${escape(fullMatch)}</span>`;
-        else if (match[3]) html += `<span class="token-number">${fullMatch}</span>`;
-        else if (match[4]) html += `<span class="token-keyword">${fullMatch}</span>`;
-        else if (match[5]) html += `<span class="token-function">${fullMatch}</span>`;
-        else if (match[6]) html += `<span class="token-property">${fullMatch}</span>`;
+        else if (match[3]) html += `<span class="token-number">${escape(fullMatch)}</span>`;
+        else if (match[4]) html += `<span class="token-keyword">${escape(fullMatch)}</span>`;
+        else if (match[5]) html += `<span class="token-function">${escape(fullMatch)}</span>`;
+        else if (match[6]) html += `<span class="token-property">${escape(fullMatch)}</span>`;
         else html += escape(fullMatch); // 兜底
 
         lastIndex = combinedRegex.lastIndex;
@@ -236,7 +247,7 @@ const CodeEditor: React.FC<CodeEditorProps> = ({ code, onChange, error }) => {
       
       {/* Footer Info */}
       <div className="px-4 py-1.5 bg-[#0d1117] border-t border-zinc-800 flex justify-between items-center text-xs text-zinc-500 z-10 select-none">
-         <span>Ln {currentLine}, Col 0</span>
+         <span>Ln {currentLine}, Col {currentCol}</span>
          <span>SPG 1.0</span>
       </div>
     </div>

@@ -32,7 +32,7 @@ import {
 } from '../../hooks';
 import type { AcgSaveTask } from '../../hooks';
 import type { AcgmhoGalleryItem, GalleryPageItem, MediaType } from '../../meta';
-import { isAcgUrl, resolveProbeMedia } from '../../utils';
+import { isAcgUrl, resolveProbeMedia } from '../../utils/utils';
 
 /* -------------------------------------------------------------------------- */
 /*                                Types & Props                               */
@@ -183,9 +183,8 @@ const SaveTaskRow = memo<{
                         <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
                     ) : (
                         <AlertCircle
-                            className={`h-3.5 w-3.5 shrink-0 ${
-                                task.status === 'error' ? 'text-rose-400' : 'text-amber-400'
-                            }`}
+                            className={`h-3.5 w-3.5 shrink-0 ${task.status === 'error' ? 'text-rose-400' : 'text-amber-400'
+                                }`}
                         />
                     )}
                     <span className="truncate font-semibold text-slate-200" title={task.title}>
@@ -232,13 +231,12 @@ const SaveTaskRow = memo<{
             </div>
             <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
                 <div
-                    className={`h-full transition-all duration-300 ${
-                        task.status === 'completed'
+                    className={`h-full transition-all duration-300 ${task.status === 'completed'
                             ? 'bg-gradient-to-r from-emerald-500 to-teal-400'
                             : task.status === 'error'
-                            ? 'bg-rose-600'
-                            : 'bg-gradient-to-r from-rose-500 via-pink-500 to-amber-400'
-                    }`}
+                                ? 'bg-rose-600'
+                                : 'bg-gradient-to-r from-rose-500 via-pink-500 to-amber-400'
+                        }`}
                     style={{ width: `${Math.min(100, Math.max(0, task.percent))}%` }}
                 />
             </div>
@@ -610,11 +608,10 @@ const BrowseSection: React.FC<BrowseSectionProps> = ({
                             key={ch.id}
                             type="button"
                             onClick={() => galleryActions.selectChannel(ch.id)}
-                            className={`flex shrink-0 items-center gap-2 rounded-xl px-4 py-2 text-xs font-semibold transition-all ${
-                                active
+                            className={`flex shrink-0 items-center gap-2 rounded-xl px-4 py-2 text-xs font-semibold transition-all ${active
                                     ? 'bg-gradient-to-r from-rose-500 to-amber-500 text-white shadow-lg shadow-rose-500/25'
                                     : 'border border-white/10 bg-white/5 text-zinc-400 hover:border-white/20 hover:bg-white/10 hover:text-white'
-                            }`}
+                                }`}
                         >
                             <Icon className="h-4 w-4" />
                             {ch.label}
@@ -906,14 +903,13 @@ const DetailSection: React.FC<DetailSectionProps> = ({
                         <div
                             className="h-full bg-gradient-to-r from-indigo-500 via-sky-400 to-cyan-300 transition-all duration-200"
                             style={{
-                                width: `${
-                                    fetchProgress.total > 0
+                                width: `${fetchProgress.total > 0
                                         ? Math.min(
-                                              100,
-                                              Math.round((fetchProgress.current / fetchProgress.total) * 100)
-                                          )
+                                            100,
+                                            Math.round((fetchProgress.current / fetchProgress.total) * 100)
+                                        )
                                         : 0
-                                }%`,
+                                    }%`,
                             }}
                         />
                     </div>

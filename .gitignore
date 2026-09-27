@@ -1,11 +1,14 @@
 node_modules
-.md
 
 # 构建产物（本地 vite build / electron-builder 生成，不进仓库）
 dist
 dist-electron
 release
 *.tsbuildinfo
+# SPG 引擎测试的临时编译输出（npm run test:spg 每次重新生成）
+scripts/test/build
+# ui-check.js 的截图输出（每次跑 UI 回归都会重新生成，属于产物不是源码）
+scripts/shots
 
 # 备份文件
 *.bak
@@ -26,5 +29,3 @@ npm-debug.log*
 *.dmg
 *.exe
 *.AppImage
-
-.tmp

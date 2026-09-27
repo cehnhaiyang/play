@@ -1,9 +1,10 @@
 
 import {
     InstrumentDef, SequenceDef, ScheduledEvent, ArpCommand, ChordCommand,
-    NoteExpression, MixTrack, FilterDef,
+    NoteExpression, MixTrack, FilterDef, ProgressionCommand, RunCommand, DrumName, ArpPattern,
 } from '../../../meta';
 import { getMidi, midiToFreq, parseDuration, clamp, createRandom } from '../utils';
+import { DRUM_SPECS } from './drums';
 
 /** 每音符最大声部数，防止 `voices` 与 `arp` 组合时爆炸 */
 const MAX_VOICES = 7;
@@ -23,11 +24,41 @@ export class EventScheduler {
         sequences: Map<string, SequenceDef>,
         instruments: Map<string, InstrumentDef>,
         mixTracks: MixTrack[],
-        tempo: number
+        tempo: number,
+        swing = 0
     ): { events: ScheduledEvent[], totalDuration: number } {
 
         const scheduledEvents: ScheduledEvent[] = [];
         let maxTime = 0;
+        const swingAmount = clamp(swing, 0, 1, 0);
+
+        /**
+         * 摇摆：把"后半拍"往后推，推到三连音该在的位置。
+         *
+         * 爵士/放克/Lo-fi 的律动感几乎全部来自这里 —— 用均匀的时值网格
+         * 演奏切分节奏，听感必然是"机器在打拍子"。
+         *
+         * 规则统一为「把后半拍挪到最近的八分三连音位置上」，分两层：
+         *  - 十六分音符网格里落在**奇数步**的（第 2、4 个十六分）→ 推到 1/3 拍，偏移 1/3 grid
+         *  - 落在 **step % 4 === 2** 的（第 2 个八分，即"后半拍"）→ 推到 2/3 拍，偏移 2/3 grid
+         * `swing=1` 即完全三连音化（标准 shuffle），`swing=0` 为平均八分。
+         *
+         * **两层都必须处理**：此前只处理了奇数步，于是 `8n` 写法的音符落在
+         * step 0/2/4/6 全是偶数，**一个都不会被推动** —— 而 `8n` 恰恰是
+         * 爵士鼓组（ride 的 ding-ding-a-ding）和 Lo-fi 最常用的写法，
+         * 提示词也正是让模型给这两类风格开 swing。结果是设了 swing 却完全听不出变化。
+         * 偏移量 2/3 grid < grid，不会越过下一个音，单调性有测试保证。
+         */
+        const swingOffset = (time: number): number => {
+            if (swingAmount <= 0) return time;
+            const grid = 60 / tempo / 4; // 十六分音符
+            const step = Math.round(time / grid);
+            let shift = 0;
+            if (step % 2 === 1) shift = grid * (1 / 3);       // 后半拍十六分 → 1/3 拍
+            if (step % 4 === 2) shift = grid * (2 / 3);       // 后半拍八分   → 2/3 拍
+            if (shift === 0) return time;
+            return time + shift * swingAmount;
+        };
 
         /**
          * 调度单个音序，返回其净时长。
@@ -83,7 +114,20 @@ export class EventScheduler {
                 const sens = inst?.velocitySensitivity ?? 0.7;
                 const velScale = clamp((1 - sens) + sens * (velocity / 0.8), 0, 1.6, 1);
 
-                const baseGain = expr.gain ?? inst?.gain ?? 0.8;
+                /**
+                 * 增益基线的选择。
+                 *
+                 * 鼓组事件绝不能沿用"当前乐器"的增益：鼓组音色自带 `DRUM_SPECS.gain`
+                 * 标定（kick 1.0、hat 0.45、shaker 0.4…），而 `instruments.get('default')`
+                 * 的增益是 0.5。旧实现无条件套用乐器增益，于是**整条鼓组被压掉一半**，
+                 * 且压缩程度取决于文件里恰好定义了哪些乐器 —— 加一个 `gain: 0.2`
+                 * 的铺底音色会让底鼓一起变轻，用户完全无从理解。
+                 * 这里让鼓组以 1.0 为基线（音色自身的标定即最终电平），
+                 * 只受力度、轨道增益与人性化影响。
+                 */
+                const baseGain = isDrum
+                    ? (expr.gain ?? 1)
+                    : (expr.gain ?? inst?.gain ?? 0.8);
                 const gain = clamp(
                     baseGain * velScale * seqGain * trackGain * jitterGain,
                     0, 2, 0.8
@@ -102,8 +146,11 @@ export class EventScheduler {
                     };
                 }
 
-                const finalTime = Math.max(0, time + jitterTime);
+                const finalTime = Math.max(0, swingOffset(time) + jitterTime);
                 const detune = (expr.detune ?? inst?.detune ?? 0) + jitterPitch;
+
+                // 起音噪声不应在鼓组上叠加：鼓组本身已有独立的噪声层
+                const attackNoise = isDrum ? 0 : (inst?.attackNoise ?? 0);
 
                 scheduledEvents.push({
                     time: finalTime,
@@ -132,13 +179,32 @@ export class EventScheduler {
                     voices: inst?.voices ?? 1,
                     unisonSpread: inst?.unisonSpread ?? 12,
                     harmonics: inst?.harmonics,
-                    attackNoise: inst?.attackNoise ?? 0,
+                    attackNoise,
                     effects: inst?.effects,
                     loopPoint: inst?.loopPoint ?? 0,
                     ...overrides,
                 });
 
-                const end = finalTime + duration + (inst?.envelope?.release ?? 0.2);
+                /**
+                 * 尾音长度必须与合成器的实际发声长度一致。
+                 *
+                 * 合成器把振荡器停在 `t + duration + release + 0.1`，鼓组则停在
+                 * `t + decay + 0.15`（其中 decay 可被 hit 的时值或 decay 参数改变）。
+                 * 旧实现只按 `duration + release` 累加，于是**所有鼓组尾音都被漏算**：
+                 * 一段只有 `hit("crash","4n")` 的曲子总时长不到 1 秒，
+                 * 而 crash 的音色衰减有 1.9 秒 —— 离线导出会把镲片硬生生切掉。
+                 */
+                let tail: number;
+                if (isDrum) {
+                    const spec = DRUM_SPECS[overrides?.drum as DrumName];
+                    const natural = spec ? spec.decay : 0.3;
+                    const scaled = natural * (overrides?.drumDecay ?? 1);
+                    const gated = duration > 0 ? Math.min(scaled, Math.max(duration, 0.01)) : scaled;
+                    tail = gated + 0.15;
+                } else {
+                    tail = (inst?.envelope?.delay ?? 0) + duration + (inst?.envelope?.release ?? 0.2) + 0.1;
+                }
+                const end = finalTime + tail;
                 if (end > maxTime) maxTime = end;
             };
 
@@ -236,9 +302,106 @@ export class EventScheduler {
                             0,
                             dur * gate,
                             cmd,
-                            { drum: cmd.drum, wave: 'sine', effects: undefined }
+                            {
+                                drum: cmd.drum, wave: 'sine', effects: undefined,
+                                // 鼓组不走滤波/LFO 链路，这些参数会污染音色
+                                filter: undefined,
+                                filterEnvelope: undefined,
+                                filterEnvAmount: undefined,
+                                lfo: undefined,
+                                drumTune: cmd.drumTune,
+                                drumDecay: cmd.drumDecay,
+                                drumTone: cmd.drumTone,
+                                drumSnap: cmd.drumSnap,
+                            }
                         );
                         currentTime += dur;
+                        break;
+                    }
+
+                    case 'progression': {
+                        const p = cmd as ProgressionCommand;
+                        const octaves = clamp(p.octaves ?? 1, 1, 4, 1);
+                        const gate = clamp(p.gate ?? 1, 0, 4, 1);
+                        const strum = clamp(p.strum ?? 0, 0, 1, 0);
+                        const perNote = strum * 0.055;
+
+                        p.chords.forEach((chord, ci) => {
+                            const beat = p.beats[ci] ?? p.beats[p.beats.length - 1] ?? '1n';
+                            const dur = parseDuration(beat, tempo);
+
+                            // 跨八度复制，音域更宽
+                            let pool: string[] = [];
+                            for (let o = 0; o < octaves; o++) {
+                                for (const pitch of chord) {
+                                    pool.push(o === 0 ? pitch : this.transposeName(pitch, o * 12));
+                                }
+                            }
+
+                            /**
+                             * 和弦符号写出来的和弦默认是"齐奏"，`pattern` 一旦不是
+                             * asPlayed 就按琶音方式把和弦音依次奏出 ——
+                             * 这让 `progression(..., pattern="up")` 直接得到分解和弦伴奏，
+                             * 不必再手写一长串 note。
+                             */
+                            if (p.pattern === 'asPlayed') {
+                                pool.forEach((pitch, i) => {
+                                    pushEvent(
+                                        currentTime + i * perNote,
+                                        freqOf(pitch, p),
+                                        dur * gate,
+                                        p
+                                    );
+                                });
+                            } else {
+                                const sorted = p.pattern === 'random'
+                                    ? pool
+                                    : [...pool].sort((x, y) => getMidi(x) - getMidi(y));
+                                const order = this.arpOrder(sorted.length, p.pattern);
+                                const stepDur = dur / Math.max(1, order.length);
+                                for (let i = 0; i < order.length; i++) {
+                                    const idx = p.pattern === 'random'
+                                        ? Math.floor(rand() * sorted.length)
+                                        : order[i];
+                                    const pitch = sorted[idx % sorted.length];
+                                    if (!pitch) continue;
+                                    pushEvent(
+                                        currentTime + i * stepDur,
+                                        freqOf(pitch, p),
+                                        stepDur * gate,
+                                        p
+                                    );
+                                }
+                            }
+                            currentTime += dur;
+                        });
+                        break;
+                    }
+
+                    case 'run': {
+                        const r = cmd as RunCommand;
+                        const stepDur = parseDuration(r.rate, tempo);
+                        if (!(stepDur > 0)) throw new Error(`run 的 rate 必须为正时值`);
+                        const gate = clamp(r.gate ?? 1, 0, 4, 1);
+                        const repeat = Math.max(1, r.repeat ?? 1);
+
+                        let sequence = [...r.pitches];
+                        if (r.direction === 'down') sequence.reverse();
+                        else if (r.direction === 'updown' && sequence.length > 2) {
+                            sequence = sequence.concat(sequence.slice(1, -1).reverse());
+                        }
+
+                        for (let rep = 0; rep < repeat; rep++) {
+                            sequence.forEach((pitch, i) => {
+                                pushEvent(
+                                    currentTime + (rep * sequence.length + i) * stepDur,
+                                    freqOf(pitch, r),
+                                    stepDur * gate,
+                                    r
+                                );
+                            });
+                        }
+                        currentTime += sequence.length * stepDur * repeat;
                         break;
                     }
 
@@ -288,7 +451,7 @@ export class EventScheduler {
     }
 
     /** 生成琶音索引序列 */
-    private arpOrder(len: number, pattern: ArpCommand['pattern']): number[] {
+    private arpOrder(len: number, pattern: ArpPattern): number[] {
         const idx = Array.from({ length: len }, (_, i) => i);
         switch (pattern) {
             case 'down':

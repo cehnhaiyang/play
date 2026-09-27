@@ -8,48 +8,24 @@
         content="default-src 'self' data: blob: http://localhost:5173 https://esm.sh https:; script-src 'self' 'unsafe-inline' http://localhost:5173 https://esm.sh; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: file:; media-src 'self' data: blob: https: file:; connect-src 'self' data: blob: ws://localhost:5173 http://localhost:5173 http://127.0.0.1:* http://localhost:* https://esm.sh https: file:; font-src 'self' data: https:; frame-src 'self' https:; worker-src 'self' blob:;" />
     <!-- 注意：img/media/connect 必须放行 file: —— 画廊“边下边播”落盘后，条目 URL 会由远端 https 原位替换为本地 file://（见 bindSaveFileSync → mergeOrderedStreams）；没有 file: 会报 CSP 拦截，表现为“放一会图全裂、本地文件好好的”。Electron 的 webSecurity:false 只关同源策略，不管 CSP，不要删这三处 file: -->
     <!-- connect-src 必须显式放行 http://127.0.0.1:* 与 http://localhost:* —— AI 服务（OpenAI 兼容接口）跑在本机，而 CSP 里的 https: 只匹配 https 源，http://127.0.0.1:7863 不在其中。webSecurity:false 同样不管 CSP，漏了这行表现为所有 AI 调用静默失败。端口可配置，故用通配符覆盖整段本地回环 -->
-    <title>高级播放器</title>
-    <style>
-        .scrollbar-thin::-webkit-scrollbar {
-            width: 8px;
-        }
-
-        .scrollbar-thin::-webkit-scrollbar-track {
-            background: #1e293b;
-        }
-
-        .scrollbar-thin::-webkit-scrollbar-thumb {
-            background-color: #475569;
-            border-radius: 4px;
-        }
-
-        input[type='range'] {
-            -webkit-appearance: none;
-            background: transparent;
-        }
-
-        input[type='range']::-webkit-slider-thumb {
-            -webkit-appearance: none;
-        }
-
-        input[type='range']:focus {
-            outline: none;
-        }
-    </style>
+    <title>聚合</title>
+    <!-- 自定义滚动条（scrollbar-thin / custom-scrollbar）与 range 控件样式统一在
+         index.css，不要在这里重复定义：此前这里的 .scrollbar-thin 与 index.css
+         各写一套（8px/#475569 vs 6px/rgba(255,255,255,.14)），谁生效取决于加载顺序。 -->
     <script type="importmap">
       {
         "imports": {
-          "react": "https://esm.sh/react@^19.2.3",
-          "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
-          "react/": "https://esm.sh/react@^19.2.3/",
-          "lucide-react": "https://esm.sh/lucide-react@^0.561.0",
-          "hls.js": "https://esm.sh/hls.js@^1.6.15",
-          "vite": "https://esm.sh/vite@^7.2.7",
+          "react": "https://esm.sh/react@^19.3.0",
+          "react-dom/": "https://esm.sh/react-dom@^19.3.0/",
+          "react/": "https://esm.sh/react@^19.3.0/",
+          "lucide-react": "https://esm.sh/lucide-react@^1.48.0",
+          "hls.js": "https://esm.sh/hls.js@^1.7.3",
+          "vite": "https://esm.sh/vite@^8.3.0",
           "path": "https://esm.sh/path@^0.12.7",
-          "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2",
+          "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^6.1.1",
           "url": "https://esm.sh/url@^0.11.4",
-          "electron": "https://esm.sh/electron@^39.2.7",
-          "jszip": "https://esm.sh/jszip@^3.10.1",
+          "electron": "https://esm.sh/electron@^44.4.5",
+          "jszip": "https://esm.sh/jszip@^3.10.2",
           "@heroicons/react/": "https://esm.sh/@heroicons/react@^2.2.0/",
           "dom": "https://esm.sh/dom@^0.0.3"
         }

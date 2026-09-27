@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import Hls from 'hls.js';
 import { PlayerState, PlaylistState, PlaybackMode, ObjectFitMode, VideoFile, MediaType } from '../meta';
-import { createVideoFile, createStreamFile, revokeVideoFile, STORAGE_KEYS, generateId, detectGalleryFolders, dirOfFile, galleryNameFromMarker, signAcgHlsUrl } from '../utils';
+import { createVideoFile, createStreamFile, revokeVideoFile, STORAGE_KEYS, generateId, detectGalleryFolders, dirOfFile, galleryNameFromMarker, signAcgHlsUrl } from '../utils/utils';
 import { loadJSON, saveJSON, loadStr, saveStr } from '../utils/persist';
 
 /* -------------------------------------------------------------------------- */
@@ -25,6 +25,23 @@ interface StoredPlaylistItem {
 interface StoredPlaylist {
     items: StoredPlaylistItem[];
     currentIndex: number;
+}
+
+/**
+ * AI 绘本入列的一页。
+ *
+ * `file` 与 `url` 二选一：生成器直接产出 File；从 .aibook 导入时图片是
+ * 内联 data URL，调用方先转成 Blob URL 再传 url。
+ */
+export interface AiBookEntryPage {
+    /** 该页图片（生成器路径），有 file 时优先用它建条目 */
+    file?: File | null;
+    /** 该页图片地址（导入路径：blob: 或 http(s)） */
+    url?: string;
+    /** 该页文案 */
+    text: string;
+    /** 该页已缓存的语音（Base64 PCM，可选） */
+    audio?: string;
 }
 
 const PLAYLIST_STORE_KEY = 'theplay.playlist.v1';
@@ -136,6 +153,12 @@ export interface UsePlayReturn {
     videoRef: React.RefObject<HTMLVideoElement | null>;
     currentFile: VideoFile | null;
     mediaError: string | null;
+    /**
+     * 非致命警告：播放继续，但内容有缺失（如 HLS 源站丢了分片，已跳过）。
+     * 与 mediaError 分开：错误是"播不了"，需要用户手动关掉；
+     * 警告是"能播但少了点东西"，会自动消失，不该用红色错误横幅吓人。
+     */
+    mediaWarning: string | null;
     /** 当前项的组内页码位置（非分组项按整列表计算） */
     pageInfo: PagePosition;
     methods: {
@@ -153,6 +176,13 @@ export interface UsePlayReturn {
         addFiles: (files: FileList | File[]) => void;
         /** 单文件 .gallery（ZIP 包）解包后成组入列：与文件夹画廊同展示，跳到本组第一页 */
         addUnpackedGallery: (name: string, pages: { file: File; page: number }[]) => void;
+        /**
+         * AI 绘本成组入列：每页一张图 + 一段文案，groupType='ai-book'。
+         * 播放器识别到该组会切到「绘本阅读器」版式（左图右文），而不是普通图片浏览。
+         */
+        addAiBook: (name: string, pages: AiBookEntryPage[]) => void;
+        /** 绘本朗读语音缓存写回（按条目 id） */
+        cacheAudioData: (fileId: string, base64: string) => void;
         addStream: (url: string, name?: string, autoPlay?: boolean, mediaType?: MediaType) => void;
         addMultipleStreams: (streams: (Partial<VideoFile> & { url: string; title?: string })[], autoPlayFirst?: boolean, clearPrevious?: boolean) => void;
         appendStreams: (streams: (Partial<VideoFile> & { url: string; title?: string })[]) => void;
@@ -168,6 +198,8 @@ export interface UsePlayReturn {
         removeTracks: (indexes: number[]) => void;
         clearPlaylist: () => void;
         clearError: () => void;
+        /** 关掉非致命警告横幅（如"已跳过 N 个失效分片"） */
+        clearWarning: () => void;
     };
 }
 
@@ -191,6 +223,7 @@ export const usePlay = (): UsePlayReturn => {
     }, [playlist]);
 
     const [mediaError, setMediaError] = useState<string | null>(null);
+    const [mediaWarning, setMediaWarning] = useState<string | null>(null);
 
     const [state, setState] = useState<PlayerState>(() => {
         // 初始化读盘全程防爆：隐私模式/坏值都回落默认值，不崩首屏
@@ -422,6 +455,7 @@ export const usePlay = (): UsePlayReturn => {
     }, []);
 
     const clearError = useCallback(() => setMediaError(null), []);
+    const clearWarning = useCallback(() => setMediaWarning(null), []);
 
     // 下一首/曲目切换（纯计算 + 副作用外置，避免 updater 内副作用与 StrictMode 双调用）
     const nextTrack = useCallback((manual = false) => {
@@ -665,6 +699,38 @@ export const usePlay = (): UsePlayReturn => {
         setPlaylist({ files: updated, currentIndex: prev.files.length });
     }, []);
 
+    // AI 绘本成组入列：与画廊同构（成组 + 页码），差别在每页带 description 文案
+    // 且 groupType='ai-book'——播放器据此切到左图右文的阅读器版式。
+    const addAiBook = useCallback((name: string, pages: AiBookEntryPage[]) => {
+        const list = (pages || []).filter((p) => p && (p.file || p.url));
+        if (list.length === 0) return;
+        const bookName = (name || '').trim() || '未命名故事';
+        // 用 generateId 而非书名做 key：同名绘本可以同时存在两本，书名做 key 会串台
+        const groupId = `aibook:${generateId()}`;
+        const newVideoFiles: VideoFile[] = list.map((p, i) => {
+            // 调用方已建好 blob:（生成器网格里显示用的那个）时必须复用：
+            // 走 createVideoFile 会再造一个，前一个就成了没人回收的孤儿。
+            // 条目仍保留 file 引用，导出 .aibook 时可直读字节、省一次解码。
+            const url = p.url || (p.file ? URL.createObjectURL(p.file) : '');
+            const vf: VideoFile = p.file
+                ? { id: generateId(), file: p.file, url, name: `${i + 1}`, type: 'file', mediaType: 'image' }
+                : createStreamFile(url, `${i + 1}`, 'image');
+            vf.name = `${i + 1}`;
+            vf.mediaType = 'image';
+            vf.description = p.text || '';
+            vf.audioData = p.audio;
+            vf.groupId = groupId;
+            vf.groupName = bookName;
+            vf.groupType = 'ai-book';
+            vf.page = i + 1;
+            return vf;
+        });
+        setMediaError(null);
+        const prev = playlistRef.current;
+        const updated = [...prev.files, ...newVideoFiles];
+        setPlaylist({ files: updated, currentIndex: prev.files.length });
+    }, []);
+
     // 添加网络流
     const addStream = useCallback((url: string, name?: string, autoPlay = true, mediaType?: MediaType) => {
         const trimmed = url.trim();
@@ -707,6 +773,21 @@ export const usePlay = (): UsePlayReturn => {
             setPlaylist({ files: updated, currentIndex: nextIdx });
         }
     }, [destroyHls]);
+
+    // 绘本朗读的语音缓存写回：同一页重复点「朗读」不再重新合成
+    const cacheAudioData = useCallback((fileId: string, base64: string) => {
+        if (!fileId || !base64) return;
+        const prev = playlistRef.current;
+        let changed = false;
+        const files = prev.files.map((f) => {
+            if (f.id !== fileId || f.audioData === base64) return f;
+            changed = true;
+            return { ...f, audioData: base64 };
+        });
+        // 无变化就不 setState：朗读缓存命中时会走到这里，白白触发一次全列表重渲染
+        if (!changed) return;
+        setPlaylist({ files, currentIndex: prev.currentIndex });
+    }, []);
 
     // 追加更多流/图集后续页（不打扰当前播放/阅读索引）
     const appendStreams = useCallback((streams: (Partial<VideoFile> & { url: string; title?: string })[]) => {
@@ -902,6 +983,8 @@ export const usePlay = (): UsePlayReturn => {
 
         destroyHls();
         setMediaError(null);
+        // 警告跟着媒体走：换源后上一部的"已跳过 N 段"不该留在新片上
+        setMediaWarning(null);
         setState(prev => ({ ...prev, isBuffering: true, currentTime: 0, duration: 0 }));
 
         const isM3U8 =
@@ -930,7 +1013,50 @@ export const usePlay = (): UsePlayReturn => {
                 attemptAutoplay(video);
             });
             let recoverAttempts = 0;
+            // 已跳过的失效分片数：只用于汇总提示，不设上限——
+            // 用户明确要求"确定坏掉的就跳过"，哪怕整片都缺也照跳，
+            // 由播放器自然播到末尾结束，而不是替用户判定"这资源没救了"。
+            let skippedFrags = 0;
             hls.on(Hls.Events.ERROR, (_, data) => {
+                // 分片 4xx：源站已经确认这个文件不存在，重试永远不会成功。
+                // 必须**在致命判断之前**拦下——hls.js 对 4xx 一次都不重试
+                // （error-helper 的 retryForHttpStatus 对 400~499 返回 false），
+                // 于是直接转 penalty box 并置 fatal，整个视频就崩了。
+                // 而它自带的"当作空洞跳过"路径（treatAsGap）只在直播流上生效，
+                // VOD 的 #EXT-X-ENDLIST 清单走不到那里，所以这里自己跳。
+                const httpCode = data.response?.code;
+                const frag = data.frag;
+                if (
+                    frag &&
+                    typeof httpCode === 'number' &&
+                    httpCode >= 400 &&
+                    httpCode < 500
+                ) {
+                    skippedFrags += 1;
+                    // 从这一段的**结束时刻**继续。startLoad 无参数等于从当前位置重来，
+                    // 会再次撞上同一个坏分片，那正是原来三次重试后放弃的原因。
+                    const resumeAt = frag.start + frag.duration;
+                    // 缓冲区会因此留下一个空洞。VOD 下 gap-controller 只自动跳
+                    // ≤2 秒的起始空洞（MAX_START_GAP_JUMP），更长的洞需要把播放头
+                    // 主动挪过去，否则画面会卡在洞口一直转圈。
+                    try {
+                        if (Number.isFinite(resumeAt)) {
+                            video.currentTime = resumeAt;
+                            hls.startLoad(resumeAt, true);
+                        } else {
+                            hls.startLoad();
+                        }
+                    } catch {
+                        hls.startLoad();
+                    }
+                    setMediaWarning(
+                        skippedFrags === 1
+                            ? `第 ${frag.sn} 段在源站已失效（HTTP ${httpCode}），已跳过该段继续播放。`
+                            : `源站有 ${skippedFrags} 段已失效（最新一段 HTTP ${httpCode}），已逐段跳过继续播放。`
+                    );
+                    return;
+                }
+
                 if (!data.fatal) return;
                 if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
                     if (recoverAttempts < 3) {
@@ -1068,6 +1194,8 @@ export const usePlay = (): UsePlayReturn => {
         togglePip,
         addFiles,
         addUnpackedGallery,
+        addAiBook,
+        cacheAudioData,
         addStream,
         addMultipleStreams,
         appendStreams,
@@ -1081,7 +1209,8 @@ export const usePlay = (): UsePlayReturn => {
         removeTracks,
         clearPlaylist,
         clearError,
-    }), [play, pause, togglePlay, seek, setVolume, setPlaybackRate, setPlaybackMode, setObjectFit, toggleMute, toggleFullscreen, togglePip, addFiles, addUnpackedGallery, addStream, addMultipleStreams, appendStreams, mergeOrderedStreams, selectTrack, nextTrack, prevTrack, nextPage, prevPage, removeTrack, removeTracks, clearPlaylist, clearError]);
+        clearWarning,
+    }), [play, pause, togglePlay, seek, setVolume, setPlaybackRate, setPlaybackMode, setObjectFit, toggleMute, toggleFullscreen, togglePip, addFiles, addUnpackedGallery, addAiBook, cacheAudioData, addStream, addMultipleStreams, appendStreams, mergeOrderedStreams, selectTrack, nextTrack, prevTrack, nextPage, prevPage, removeTrack, removeTracks, clearPlaylist, clearError, clearWarning]);
 
     return {
         state,
@@ -1089,6 +1218,7 @@ export const usePlay = (): UsePlayReturn => {
         videoRef,
         currentFile,
         mediaError,
+        mediaWarning,
         pageInfo,
         methods
     };

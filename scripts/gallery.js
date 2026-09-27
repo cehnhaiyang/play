@@ -63,6 +63,15 @@ async function main() {
     process.exit(1);
   }
 
+  // --delay 必须校验：`--delay abc` 会让 parseFloat 得到 NaN，而下游判据是
+  // `delayMs > 0`（NaN > 0 为 false），于是**静默变成完全不限速** ——
+  // 用户以为自己设了间隔，实际每页连发，很容易触发站点限流后整轮失败。
+  // 打错一个参数不该把限速悄悄关掉，直接报错退出更清楚。
+  if (!Number.isFinite(delay) || delay < 0) {
+    console.error(`[!] --delay 需要一个非负数字（秒），收到 "${args[args.indexOf('--delay') + 1]}"`);
+    process.exit(1);
+  }
+
   console.log(`[*] 探测作品: ${gidOrUrl}`);
   let probe = null;
   try {

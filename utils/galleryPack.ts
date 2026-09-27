@@ -12,7 +12,7 @@
  * 导入时按魔数 `PK` 识别单文件包；旧式 JSON 徽标（`{"format":...}`）走原逻辑。
  */
 import JSZip from 'jszip';
-import { galleryPageNumber } from '../utils';
+import { galleryPageNumber } from './utils';
 
 export const GALLERY_PACK_NAME_FILE = '.name';
 export const GALLERY_PACK_MAX_PAGES = 2000;

@@ -6,200 +6,40 @@ const http = require('http');
 const net = require('net');
 const tls = require('tls');
 
-const BASE = 'https://www.acgmho.com';
-const UA =
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+// 本文件只负责 ACG 站点的解析与抓取，**不维护出网逻辑**：
+// 代理、隧道、agent 由 main.js 的全局网络层接管——这里照常写 https.get 就是走代理的，
+// 不需要传 agent，也不需要知道代理存在。
+/* -------------------------------------------------------------------------- */
+/*                              站点请求身份                                    */
+/* -------------------------------------------------------------------------- */
+// 抓取该站时使用的 UA 与默认请求头。
+//
+// UA 的真值在这里，因为抓页面的是本模块。main.js 拿到浏览器会话的真实 UA 后
+// 会调 setUserAgent 覆盖它——cf_clearance 与 UA 绑定，Node 直抓必须与
+// "拿到凭证的那个浏览器"完全一致，否则表现为"验证过了但搜索仍 403"。
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
     '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
-
 const HEADERS = {
     'User-Agent': UA,
     Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
 };
 
-// 出站代理：Node 的 https.get 不读系统代理设置，需要显式注入。
-// 走不走、走哪个端口，由用户在设置里填的「代理端口」决定（见 electron/settings.js），
-// main.js 读配置后调用 setProxy()：有值走 HTTP CONNECT 隧道，留空则一律直连。
-//
-// 端口存活探测：即便用户填了端口，端口也可能没在监听（代理软件没开、填错端口）。
-// 一旦认定走代理，每条请求都会 CONNECT 失败——表现为"浏览器能开、app 全挂"。
-// 因此以"端口真的能连上"为准：连得上才建隧道，连不上就回落直连并上报 probeFailed，
-// 由调用方在界面上提示用户去检查端口，而不是让所有请求静默失败。
-let proxyEndpoint = null;
-
-function parseProxyAddress(value) {
-    if (!value) return null;
-    let s = String(value).trim().replace(/^[a-z0-9]+:\/\//i, '');
-    const idx = s.lastIndexOf(':');
-    if (idx <= 0) return null;
-    const host = s.slice(0, idx).replace(/^\[|\]$/g, '');
-    const port = Number(s.slice(idx + 1));
-    if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) return null;
-    return { host, port };
-}
-
-// 端口存活探测：TCP 握上手即算可用。短超时（本地端口要么立刻 accept，
-// 要么立刻 ECONNREFUSED），避免拖慢每次 setProxy。
-function probeProxyPort(endpoint, timeout = 1500) {
-    if (!endpoint) return Promise.resolve(false);
-    return new Promise((resolve) => {
-        let socket;
-        let settled = false;
-        const done = (ok) => {
-            if (settled) return;
-            settled = true;
-            if (socket) socket.destroy();
-            resolve(ok);
-        };
-        try {
-            socket = net.connect({ host: endpoint.host, port: endpoint.port });
-        } catch (_e) {
-            done(false);
-            return;
-        }
-        socket.setNoDelay(true);
-        socket.once('connect', () => done(true));
-        socket.once('error', () => done(false));
-        socket.setTimeout(timeout, () => done(false));
-    });
-}
-
-function tunnelThroughProxy(targetHost, targetPort, cb) {
-    const req = http.request({
-        host: proxyEndpoint.host,
-        port: proxyEndpoint.port,
-        method: 'CONNECT',
-        path: `${targetHost}:${targetPort}`,
-        headers: { Host: `${targetHost}:${targetPort}` },
-        agent: false,
-    });
-    let settled = false;
-    const done = (err, socket) => {
-        if (settled) return;
-        settled = true;
-        cb(err, socket);
-    };
-    req.once('connect', (res, socket) => {
-        if (res.statusCode !== 200) {
-            socket.destroy();
-            done(new Error(`代理 CONNECT 被拒（HTTP ${res.statusCode}）`));
-            return;
-        }
-        socket.setTimeout(0);
-        socket.setNoDelay(true);
-        done(null, socket);
-    });
-    req.once('error', (err) => done(err));
-    req.setTimeout(15000, () => req.destroy(new Error('代理 CONNECT 超时')));
-    req.end();
-}
-
-class ProxiedHttpsAgent extends https.Agent {
-    createConnection(options, cb) {
-        if (!proxyEndpoint) return super.createConnection(options, cb);
-        const host = options.host;
-        const port = options.port || 443;
-        tunnelThroughProxy(host, port, (err, socket) => {
-            if (err) {
-                cb(err);
-                return;
-            }
-            const tlsSocket = tls.connect({
-                ...options,
-                socket,
-                servername: options.servername || host,
-            });
-            // 握手必须自带超时：隧道建好后若握手卡死（代理半死连接/对端不回），
-            // 这个 socket 永远不会交给 request，req 的 timeout 无从启动 →
-            // 搜索会永久挂起（用户看到"验证窗口不弹出 + 一直转圈"，且没有任何报错）。
-            const handshakeTimer = setTimeout(() => {
-                tlsSocket.destroy(new Error('TLS 握手超时（代理隧道异常）'));
-            }, 10000);
-            const onSecure = () => {
-                clearTimeout(handshakeTimer);
-                tlsSocket.removeListener('error', onError);
-                cb(null, tlsSocket);
-            };
-            const onError = (tlsErr) => {
-                clearTimeout(handshakeTimer);
-                tlsSocket.removeListener('secureConnect', onSecure);
-                cb(tlsErr);
-            };
-            tlsSocket.once('secureConnect', onSecure);
-            tlsSocket.once('error', onError);
-        });
-        return undefined;
-    }
-}
-
-class ProxiedHttpAgent extends http.Agent {
-    createConnection(options, cb) {
-        if (!proxyEndpoint) return super.createConnection(options, cb);
-        tunnelThroughProxy(options.host, options.port || 80, (err, socket) => {
-            if (err) {
-                cb(err);
-                return;
-            }
-            cb(null, socket);
-        });
-        return undefined;
-    }
-}
-
-function buildAgents() {
-    return {
-        httpAgent: new ProxiedHttpAgent({ keepAlive: true, maxSockets: 10 }),
-        httpsAgent: new ProxiedHttpsAgent({ keepAlive: true, maxSockets: 10 }),
-    };
-}
-
-// 连接复用：详情/列表/图片全走 keep-alive，200 页连抓不再每页重建 TCP+TLS。
-// maxSockets  cap 并发上限，配合业务层并发池使用，避免打满服务端。
-const initialAgents = buildAgents();
-let httpAgent = initialAgents.httpAgent;
-let httpsAgent = initialAgents.httpsAgent;
-
-// 端口存活判定后再落地：连得上才走隧道，连不上就当直连（交给 VPN/系统网络）。
-// 返回 { changed, applied } —— changed 表示代理端点是否变化（决定要不要重建 agent），
-// applied 表示本次是否真的启用了隧道，供调用方记日志分辨"直连"与"代理端口不可用"。
-async function setProxy(address) {
-    const parsed = parseProxyAddress(address);
-    const alive = parsed ? await probeProxyPort(parsed) : false;
-    const next = alive ? parsed : null;
-    const before = proxyEndpoint ? `${proxyEndpoint.host}:${proxyEndpoint.port}` : '';
-    const after = next ? `${next.host}:${next.port}` : '';
-    if (before === after) return { changed: false, applied: !!next, probeFailed: !!parsed && !alive };
-    proxyEndpoint = next;
-    const oldHttp = httpAgent;
-    const oldHttps = httpsAgent;
-    const agents = buildAgents();
-    httpAgent = agents.httpAgent;
-    httpsAgent = agents.httpsAgent;
-    try { oldHttp.destroy(); } catch (_e) { /* ignore */ }
-    try { oldHttps.destroy(); } catch (_e) { /* ignore */ }
-    return { changed: true, applied: !!next, probeFailed: !!parsed && !alive };
-}
-
-function getProxy() {
-    return proxyEndpoint ? `${proxyEndpoint.host}:${proxyEndpoint.port}` : null;
-}
-
-// UA 动态化：cf_clearance 与 UA 绑定，Node 直抓必须用"拿到凭证的那个浏览器的真实 UA"，
-// 不能再硬编码——之前 Node 用 Chrome/126 而应用内浏览器是 Chromium 120，
-// 出现 UA 与内核/Client Hints 三处互相矛盾，Cloudflare 校验直接判失败。
-let currentUA = UA;
+/** 把 UA 换成浏览器会话的真实值（由 main.js 在拿到会话 UA 后调用） */
 function setUserAgent(value) {
     const next = String(value || '').trim();
-    if (!next || next === currentUA) return false;
-    currentUA = next;
-    HEADERS['User-Agent'] = currentUA;
+    if (!next || next === HEADERS['User-Agent']) return false;
+    HEADERS['User-Agent'] = next;
     return true;
 }
 
 function getUserAgent() {
-    return currentUA;
+    return HEADERS['User-Agent'];
 }
 
+/* -------------------------------------------------------------------------- */
+/*                                  工具                                       */
+/* -------------------------------------------------------------------------- */
 // 有限并发 worker 池：结果按输入顺序回填，调用方自行在 worker 内吞掉单项错误。
 // 用途：fetch/download/save 的多页并发，进度由 worker 完成时各自上报。
 function mapWithConcurrency(list, concurrency, worker) {
@@ -211,12 +51,167 @@ function mapWithConcurrency(list, concurrency, worker) {
         while (true) {
             const i = cursor;
             cursor += 1;
-            if (i >= n) return;
+            if (i >= n)
+                return;
             out[i] = await worker(list[i], i);
         }
     });
     return Promise.all(runners).then(() => out);
 }
+function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+}
+/* -------------------------------------------------------------------------- */
+/*                                  HTTP GET                                   */
+/* -------------------------------------------------------------------------- */
+/**
+ * 抓取 HTML 并跟踪 302 最终地址：站内搜索 /q/xxx-N.html 会 302 到规范页
+ * （如 /tags/sister.html），后续翻页必须基于规范地址，否则服务端永远回第 1 页。
+ * extraHeaders：调用方可注入 Cookie（如 Electron 会话里的 Cloudflare 放行凭证），
+ * 键与 HEADERS 冲突时调用方优先。
+ */
+function httpGetFinal(url, referer = null, timeout = 30000, retries = 3, redirects = 5, extraHeaders = null) {
+    return new Promise((resolve, reject) => {
+        // 链内 cookie jar：跳转链中途种下的 cookie（如 www 的会话标识）后续跳要带上，
+        // 否则跨子域（www → search.acgmho.com）直接裸访，容易被风控 403。
+        const jar = [];
+        const rememberCookies = (setCookie) => {
+            for (const c of setCookie || []) {
+                const pair = String(c).split(';')[0].trim();
+                if (!pair || !pair.includes('='))
+                    continue;
+                const name = pair.slice(0, pair.indexOf('='));
+                const idx = jar.findIndex((j) => j.slice(0, j.indexOf('=')) === name);
+                if (idx >= 0)
+                    jar[idx] = pair;
+                else
+                    jar.push(pair);
+            }
+        };
+        if (extraHeaders && extraHeaders.Cookie) {
+            // Cookie 头是 "a=1; b=2" 拼串：必须按 ';' 拆成多项再记。
+            // 之前整个串当一项塞进去，split(';')[0] 只留下第一个 cookie，
+            // 主进程拼好的多凭证（cf_clearance + 会话）到链里只剩一个，搜索 403 雪上加霜。
+            rememberCookies(String(extraHeaders.Cookie).split(';'));
+        }
+        function attempt(n, currentUrl, remaining) {
+            const headers = { ...HEADERS, ...(extraHeaders || {}) };
+            delete headers.Cookie;
+            if (referer) {
+                headers.Referer = referer;
+            }
+            if (jar.length) {
+                headers.Cookie = jar.join('; ');
+            }
+            // 单次尝试的收尾守卫：超时、连接错误、响应中断会在同一毫秒内接连触发多个事件
+            // （实测 truncate: res.aborted + res.error + res.close 同帧到达；slow: req.timeout
+            // 紧跟 req.error）。此前每个事件各自排一次重试，请求数按 2^n 放大——retries=3
+            // 实测打出 7 个请求，站点限流正是被自己触发的，用户看到 429/"搜索过于频繁"。
+            // settled 保证一次尝试只结算一次：要么成功、要么排一次重试、要么报错。
+            let settled = false;
+            const fail = (err) => {
+                if (settled)
+                    return;
+                settled = true;
+                // 代理配置类错误（端口不是 SOCKS5、要求认证、密码错）重试多少次结果都一样，
+                // 只会把一句明确的话拖成 15 秒 ×3 的干等。直接给结论，让用户去改配置。
+                if (err && err.proxyConfigError) {
+                    reject(err);
+                    return;
+                }
+                if (n < retries) {
+                    setTimeout(() => attempt(n + 1, currentUrl, remaining), 1000 * n);
+                }
+                else {
+                    reject(err);
+                }
+            };
+            const giveUp = (err) => {
+                if (settled)
+                    return;
+                settled = true;
+                reject(err);
+            };
+            const client = currentUrl.startsWith('https:') ? https : http;
+            // 不传 agent：main.js 的全局网络层已把 http/https 的 globalAgent
+            // 换成隧道 agent，这里照常写就自动走代理。
+            const req = client.get(currentUrl, { headers, timeout }, (res) => {
+                rememberCookies(res.headers['set-cookie']);
+                if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+                    if (remaining <= 0) {
+                        res.resume();
+                        giveUp(new Error(`重定向次数过多: ${currentUrl}`));
+                        return;
+                    }
+                    // 中文站 Location 常带未编码的原始 UTF-8（如 /q/汤…-1-<md5>.html）：
+                    // Node http 头按 latin1 给字符串，直接 new URL 会把"UTF-8 字节误读成 latin1 字符"
+                    // 再百分编码一次（%E6%B9%AF → %C3%A6…），搜索子域对这类坏 URL 直接 403。
+                    // 先按 latin1 还原字节、按 UTF-8 解码；已编码的纯 ASCII 路径不受影响。
+                    const location = Buffer.from(String(res.headers.location), 'latin1').toString('utf-8');
+                    const redirectUrl = new URL(location, currentUrl).toString();
+                    res.resume();
+                    // 已交接给下一跳：本跳任何后到事件都不再结算，避免与跳转链抢 resolve/reject
+                    settled = true;
+                    attempt(n, redirectUrl, remaining - 1);
+                    return;
+                }
+                if (res.statusCode && res.statusCode >= 400) {
+                    res.resume();
+                    // 4xx 不重试：404 是资源不存在、403 是风控/挑战拦路，重试只会白等退避时间。
+                    // 之前全状态都重试：auto 探测 8 候选 × 3 次 × 退避，死 gid 一次探测被拖慢数十秒。
+                    // 408（超时）/429（限流）与 5xx 例外，仍按退避重试。
+                    const retryable = res.statusCode === 408 || res.statusCode === 429 || res.statusCode >= 500;
+                    if (retryable)
+                        fail(new Error(`HTTP ${res.statusCode} for ${currentUrl}`));
+                    else
+                        giveUp(new Error(`HTTP ${res.statusCode} for ${currentUrl}`));
+                    return;
+                }
+                const chunks = [];
+                let received = 0;
+                const MAX_BODY = 10 * 1024 * 1024;
+                res.on('data', (c) => {
+                    received += c.length;
+                    if (received > MAX_BODY) {
+                        req.destroy();
+                        giveUp(new Error(`响应过大，已中断: ${currentUrl}`));
+                        return;
+                    }
+                    chunks.push(c);
+                });
+                res.on('end', () => {
+                    if (settled)
+                        return;
+                    settled = true;
+                    resolve({ html: Buffer.concat(chunks).toString('utf-8'), url: currentUrl });
+                });
+                // 响应中途断流（代理/VPN 掉线、服务端提前关闭）：req 不报错，只在 res 上体现。
+                // 此前没有任何 res 级错误监听，promise 永不结算 → 频道列表/探测/抓页整个挂死，
+                // UI 一直转圈且没有任何报错（搜索路径 20s 竞速兜底也救不了非搜索频道）。
+                res.on('error', (err) => fail(err));
+                // close 是必然事件：complete=false 说明响应被截断，用它兜住 aborted/未捕获的断流
+                res.on('close', () => {
+                    if (!res.complete)
+                        fail(new Error(`响应被中断（连接提前关闭）: ${currentUrl}`));
+                });
+            });
+            req.on('timeout', () => {
+                req.destroy();
+                fail(new Error(`Timeout fetching ${currentUrl}`));
+            });
+            req.on('error', (err) => {
+                fail(err);
+            });
+        }
+        attempt(1, url, redirects);
+    });
+}
+function httpGet(url, referer = null, timeout = 30000, retries = 3, redirects = 5) {
+    return httpGetFinal(url, referer, timeout, retries, redirects).then((r) => r.html);
+}
+
+const BASE = 'https://www.acgmho.com';
+
 
 function unescapeHtml(html) {
     return html
@@ -277,140 +272,6 @@ function extractSiteTip(html) {
     return m ? stripTags(m[1]) : '';
 }
 
-// 抓取 HTML 并跟踪 302 最终地址：站内搜索 /q/xxx-N.html 会 302 到规范页
-// （如 /tags/sister.html），后续翻页必须基于规范地址，否则服务端永远回第 1 页。
-// extraHeaders：调用方可注入 Cookie（如 Electron 会话里的 Cloudflare 放行凭证），
-// 键与 HEADERS 冲突时调用方优先。
-function httpGetFinal(url, referer = null, timeout = 30000, retries = 3, redirects = 5, extraHeaders = null) {
-    return new Promise((resolve, reject) => {
-        // 链内 cookie jar：跳转链中途种下的 cookie（如 www 的会话标识）后续跳要带上，
-        // 否则跨子域（www → search.acgmho.com）直接裸访，容易被风控 403。
-        const jar = [];
-        const rememberCookies = (setCookie) => {
-            for (const c of setCookie || []) {
-                const pair = String(c).split(';')[0].trim();
-                if (!pair || !pair.includes('=')) continue;
-                const name = pair.slice(0, pair.indexOf('='));
-                const idx = jar.findIndex((j) => j.slice(0, j.indexOf('=')) === name);
-                if (idx >= 0) jar[idx] = pair;
-                else jar.push(pair);
-            }
-        };
-        if (extraHeaders && extraHeaders.Cookie) {
-            // Cookie 头是 "a=1; b=2" 拼串：必须按 ';' 拆成多项再记。
-            // 之前整个串当一项塞进去，split(';')[0] 只留下第一个 cookie，
-            // 主进程拼好的多凭证（cf_clearance + 会话）到链里只剩一个，搜索 403 雪上加霜。
-            rememberCookies(String(extraHeaders.Cookie).split(';'));
-        }
-        function attempt(n, currentUrl, remaining) {
-            const headers = { ...HEADERS, ...(extraHeaders || {}) };
-            delete headers.Cookie;
-            if (referer) {
-                headers.Referer = referer;
-            }
-            if (jar.length) {
-                headers.Cookie = jar.join('; ');
-            }
-
-            // 单次尝试的收尾守卫：超时、连接错误、响应中断会在同一毫秒内接连触发多个事件
-            // （实测 truncate: res.aborted + res.error + res.close 同帧到达；slow: req.timeout
-            // 紧跟 req.error）。此前每个事件各自排一次重试，请求数按 2^n 放大——retries=3
-            // 实测打出 7 个请求，站点限流正是被自己触发的，用户看到 429/"搜索过于频繁"。
-            // settled 保证一次尝试只结算一次：要么成功、要么排一次重试、要么报错。
-            let settled = false;
-            const fail = (err) => {
-                if (settled) return;
-                settled = true;
-                if (n < retries) {
-                    setTimeout(() => attempt(n + 1, currentUrl, remaining), 1000 * n);
-                } else {
-                    reject(err);
-                }
-            };
-            const giveUp = (err) => {
-                if (settled) return;
-                settled = true;
-                reject(err);
-            };
-
-            const client = currentUrl.startsWith('https:') ? https : http;
-            const agent = currentUrl.startsWith('https:') ? httpsAgent : httpAgent;
-            const req = client.get(currentUrl, { headers, timeout, agent }, (res) => {
-                rememberCookies(res.headers['set-cookie']);
-                if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
-                    if (remaining <= 0) {
-                        res.resume();
-                        giveUp(new Error(`重定向次数过多: ${currentUrl}`));
-                        return;
-                    }
-                    // 中文站 Location 常带未编码的原始 UTF-8（如 /q/汤…-1-<md5>.html）：
-                    // Node http 头按 latin1 给字符串，直接 new URL 会把"UTF-8 字节误读成 latin1 字符"
-                    // 再百分编码一次（%E6%B9%AF → %C3%A6…），搜索子域对这类坏 URL 直接 403。
-                    // 先按 latin1 还原字节、按 UTF-8 解码；已编码的纯 ASCII 路径不受影响。
-                    const location = Buffer.from(String(res.headers.location), 'latin1').toString('utf-8');
-                    const redirectUrl = new URL(location, currentUrl).toString();
-                    res.resume();
-                    // 已交接给下一跳：本跳任何后到事件都不再结算，避免与跳转链抢 resolve/reject
-                    settled = true;
-                    attempt(n, redirectUrl, remaining - 1);
-                    return;
-                }
-
-                if (res.statusCode && res.statusCode >= 400) {
-                    res.resume();
-                    // 4xx 不重试：404 是资源不存在、403 是风控/挑战拦路，重试只会白等退避时间。
-                    // 之前全状态都重试：auto 探测 8 候选 × 3 次 × 退避，死 gid 一次探测被拖慢数十秒。
-                    // 408（超时）/429（限流）与 5xx 例外，仍按退避重试。
-                    const retryable = res.statusCode === 408 || res.statusCode === 429 || res.statusCode >= 500;
-                    if (retryable) fail(new Error(`HTTP ${res.statusCode} for ${currentUrl}`));
-                    else giveUp(new Error(`HTTP ${res.statusCode} for ${currentUrl}`));
-                    return;
-                }
-
-                const chunks = [];
-                let received = 0;
-                const MAX_BODY = 10 * 1024 * 1024;
-                res.on('data', (c) => {
-                    received += c.length;
-                    if (received > MAX_BODY) {
-                        req.destroy();
-                        giveUp(new Error(`响应过大，已中断: ${currentUrl}`));
-                        return;
-                    }
-                    chunks.push(c);
-                });
-                res.on('end', () => {
-                    if (settled) return;
-                    settled = true;
-                    resolve({ html: Buffer.concat(chunks).toString('utf-8'), url: currentUrl });
-                });
-                // 响应中途断流（代理/VPN 掉线、服务端提前关闭）：req 不报错，只在 res 上体现。
-                // 此前没有任何 res 级错误监听，promise 永不结算 → 频道列表/探测/抓页整个挂死，
-                // UI 一直转圈且没有任何报错（搜索路径 20s 竞速兜底也救不了非搜索频道）。
-                res.on('error', (err) => fail(err));
-                // close 是必然事件：complete=false 说明响应被截断，用它兜住 aborted/未捕获的断流
-                res.on('close', () => {
-                    if (!res.complete) fail(new Error(`响应被中断（连接提前关闭）: ${currentUrl}`));
-                });
-            });
-
-            req.on('timeout', () => {
-                req.destroy();
-                fail(new Error(`Timeout fetching ${currentUrl}`));
-            });
-
-            req.on('error', (err) => {
-                fail(err);
-            });
-        }
-
-        attempt(1, url, redirects);
-    });
-}
-
-function httpGet(url, referer = null, timeout = 30000, retries = 3, redirects = 5) {
-    return httpGetFinal(url, referer, timeout, retries, redirects).then((r) => r.html);
-}
 
 function normalizeGid(input) {
     const str = String(input || '').trim();
@@ -918,11 +779,20 @@ function parsePageRange(spec, totalPages) {
     const total = Number.isFinite(Number(totalPages)) && Number(totalPages) > 0
         ? Math.floor(Number(totalPages))
         : 0;
-    if (!spec || spec.trim().toLowerCase() === 'all') {
+    // 归一化必须先 trim 再判空。原来判的是 `!spec`（只挡 null/undefined/''），
+    // 于是**纯空白**的 spec（' '、'\t'）会掉进下面的 split 分支：
+    // 每段 trim 后都是空串被 continue 掉，最终返回空数组 —— 同样是"0 页、无报错"。
+    // 渲染层有个同名同语义的 rangeIncludesPage（GalleryPanel），它把纯空白当"全选"，
+    // 两边就此分叉：UI 认为在抓全部，主进程一页都不抓。
+    // 目前渲染层总会先 trim 成 `1-${total}` 再传（见 handleFetchPages），
+    // 所以还没炸；但这条 IPC 边界不保证调用方一定归一化，靠调用方自觉太脆。
+    // 在这里统一按"空 = 全部"处理，两边语义重新对齐。
+    const normalized = typeof spec === 'string' ? spec.trim() : '';
+    if (!normalized || normalized.toLowerCase() === 'all') {
         return Array.from({ length: total }, (_, i) => i + 1);
     }
     const pages = new Set();
-    const chunks = spec.split(',');
+    const chunks = normalized.split(',');
     for (const chunk of chunks) {
         const trimmed = chunk.trim();
         if (!trimmed) continue;
@@ -966,7 +836,7 @@ function downloadImageWithResume(url, dest, referer, onChunk) {
         if (pos > 0) headers.Range = `bytes=${pos}-`;
 
         const client = url.startsWith('https:') ? https : http;
-        const agent = url.startsWith('https:') ? httpsAgent : httpAgent;
+        // 不传 agent：全局网络层已接管 globalAgent，这条请求自动走代理。
         // 写盘流提至外层：网络错误/超时时一并销毁，否则 fd 泄漏；
         // 写盘流自身错误（如磁盘满）也要接住，否则触发 unhandled 'error' 直接崩进程
         let fileStream = null;
@@ -1001,7 +871,7 @@ function downloadImageWithResume(url, dest, referer, onChunk) {
                 fail(new Error(`下载超过总时限 ${DOWNLOAD_TOTAL_TIMEOUT_MS / 1000}s 仍未完成: ${url}`));
             }, DOWNLOAD_TOTAL_TIMEOUT_MS);
         };
-        req = client.get(url, { headers, timeout: 120000, agent }, (res) => {
+        req = client.get(url, { headers, timeout: 120000 }, (res) => {
             // 连接已建立：看门狗按"收到数据"续期，覆盖"连上后对端不再发数据"的挂死
             kickIdle();
             armTotal();
@@ -1127,9 +997,6 @@ function downloadImageWithResume(url, dest, referer, onChunk) {
     });
 }
 
-function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 // 默认下载根：优先 Electron 下载目录（随系统语言/用户设置走），
 // CLI/未就绪时回退用户主目录（直接拼 USERPROFILE 在 Linux/mac 下为空会落到相对路径）
@@ -2102,9 +1969,8 @@ module.exports = {
     fetchChannelList,
     isCloudflareChallengePage,
     isCloudflareErrorPage,
-    setProxy,
-    getProxy,
+    // UA 由本模块持有（抓页面的是它），main.js 在拿到浏览器会话 UA 后推过来。
+    // 代理相关不再从这里导出：那是进程级网络设施，归 main.js 的全局网络层。
     setUserAgent,
     getUserAgent,
-    UA,
 };
