@@ -47,8 +47,6 @@ interface StoredCacheEntry extends ChannelCache {
 // 详情快照落盘类型（剔除 firstHtml 大文本，见 GalleryProbeResult 注释）
 type StoredProbe = Omit<GalleryProbeResult, 'firstHtml'>;
 
-const isElectronEnv = (): boolean => Boolean(getElectronAPI()?.acgmho);
-
 /* ========================================================================== */
 /*                     2. 全局后台保存任务模块 (Downloads Store)               */
 /* ========================================================================== */
@@ -462,8 +460,6 @@ export const useAcgmhoGallery = () => {
         storeCacheDebounced(cacheRef.current);
     }, []);
 
-    const isElectron = isElectronEnv();
-
     // 加载频道列表（主进程唯一源，有兜底保证）
     useEffect(() => {
         const electronAPI = getElectronAPI();
@@ -491,7 +487,7 @@ export const useAcgmhoGallery = () => {
         ) => {
             const electronAPI = getElectronAPI();
             if (!electronAPI?.acgmho?.channelList) {
-                setError('当前环境不支持浏览画廊，请在 Electron 桌面端中运行');
+                setError('读取不到画廊桥（preload 未加载），请重启应用。');
                 return;
             }
             if (append) {
@@ -630,7 +626,6 @@ export const useAcgmhoGallery = () => {
 
     // 首屏恢复 latest 缓存并静默补新
     useEffect(() => {
-        if (!isElectron) return;
         const cached = cacheRef.current.get('latest');
         if (cached && cached.items.length > 0) {
             setItems(cached.items);
@@ -640,7 +635,7 @@ export const useAcgmhoGallery = () => {
             return;
         }
         void loadPage('latest', 1, false);
-    }, [isElectron, loadPage]);
+    }, [loadPage]);
 
     // actions 容器 memo：GalleryCard memo 依赖 onOpen 身份，容器每 render 重建会连带整网重渲染
     const galleryActions = useMemo(
@@ -659,7 +654,6 @@ export const useAcgmhoGallery = () => {
             isLoading,
             isLoadingMore,
             error,
-            isElectron,
         },
         actions: galleryActions,
     };
@@ -811,7 +805,7 @@ export const useAcgmho = () => {
 
             const electronAPI = getElectronAPI();
             if (!electronAPI?.acgmho?.probe) {
-                setError('当前环境不支持图集探测，请在 Electron 桌面端中运行');
+                setError('读取不到图集探测桥（preload 未加载），请重启应用。');
                 return null;
             }
 
@@ -845,7 +839,7 @@ export const useAcgmho = () => {
 
             const electronAPI = getElectronAPI();
             if (!electronAPI?.acgmho?.startDownload) {
-                setError('当前环境不支持下载，请在 Electron 桌面端中运行');
+                setError('读取不到下载桥（preload 未加载），请重启应用。');
                 return;
             }
 
@@ -911,7 +905,7 @@ export const useAcgmho = () => {
 
             const electronAPI = getElectronAPI();
             if (!electronAPI?.acgmho?.fetchPages) {
-                setError('当前环境不支持在线解析图集，请在 Electron 桌面端中运行');
+                setError('读取不到在线解析桥（preload 未加载），请重启应用。');
                 return null;
             }
 
@@ -1103,7 +1097,6 @@ export const useAcgmho = () => {
             failedPages,
             error,
             lastDownloadDir,
-            isElectron: isElectronEnv(),
         },
         actions: detailActions,
     };

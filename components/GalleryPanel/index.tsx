@@ -464,7 +464,7 @@ const BrowseSection: React.FC<BrowseSectionProps> = ({
     tasks,
     downloadActions,
 }) => {
-    const { channels, channelId, searchKeyword, items, hasMore, isLoading, isLoadingMore, error, isElectron } =
+    const { channels, channelId, searchKeyword, items, hasMore, isLoading, isLoadingMore, error } =
         galleryState;
     const [query, setQuery] = useState(searchKeyword || '');
 
@@ -564,14 +564,6 @@ const BrowseSection: React.FC<BrowseSectionProps> = ({
                     </div>
                     <span className="font-semibold text-rose-300">立即解析 →</span>
                 </button>
-            )}
-
-            {/* 非桌面端环境提示 */}
-            {!isElectron && (
-                <div className="flex shrink-0 items-center gap-2 rounded-xl border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-200">
-                    <AlertCircle className="h-4 w-4 shrink-0 text-amber-400" />
-                    <span>当前非桌面端 Electron 环境，画廊与下载功能受限（浏览器环境会触发跨域限制）。</span>
-                </div>
             )}
 
             {/* 全局保存任务栏（可折叠） */}

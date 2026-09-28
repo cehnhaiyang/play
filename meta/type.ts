@@ -386,13 +386,18 @@ export interface AiBookFile {
  * 它们不是 `S` 的替代 —— 规则类能力必须在引擎层生效（钩子装在页面主世界，
  * 脚本只能影响自己那一次调用），存储类能力必须走原生 API
  * （Cookie 在渲染进程里读不到 HttpOnly）。
+ *
+ * `kb` 是知识库检索，与上面五个都不同：它**不碰页面**，只读本地文章。
+ * 放在这里是因为它的消费者就是 Agent —— 模型在动手前先查库，
+ * 比从零推理页面结构划算得多。
  */
 export type AgentToolName =
     | 'S'
     | 'navigate'
     | 'tamper_rules'
     | 'storage'
-    | 'tokens';
+    | 'tokens'
+    | 'kb';
 
 /**
  * 对话流里的一条消息。

@@ -1,17 +1,71 @@
 const { app, BrowserWindow, ipcMain, shell, webContents, dialog } = require('electron');
 const { probeGallery, downloadGallery, saveGalleryImages, fetchGalleryPages, normalizeGid, galleryTaskKey, galleryKeyMatches, GALLERY_CHANNELS, fetchChannelList, buildChannelListResult, channelListUrl, deriveListPageUrl, isCloudflareChallengePage, isCloudflareErrorPage, setUserAgent: pushUserAgentToSite } = require('./acgmhoService');
 const { solveChallengeWithBrowser } = require('./challengeSolver');
-const { getSettings, saveProxyPort, saveAiConfig, testAiConnection } = require('./settings');
+const { getSettings, saveProxyPort, saveKbRoot, saveAiConfig, testAiConnection } = require('./settings');
+const { loadKbSource, readKbArticle, kbStatus } = require('./kbService');
+const { detectEdgeProfiles, importEdgeData } = require('./edgeImportService');
+const {
+    setupBrowserSession, setupBrowserIpc, attachBrowserInput, attachGuestExtras, guardWebviewAttach,
+} = require('./browserService');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
 const net = require('net');
 const tls = require('tls');
-const { spawn } = require('child_process');
+const { spawn, spawnSync, execSync } = require('child_process');
 const { pipeline } = require('stream/promises');
 const { createWriteStream } = require('fs');
 const ffmpegStatic = require('ffmpeg-static');
+
+/* ========================================================================== */
+/*                          启动自提权（管理员运行）                            */
+/* ========================================================================== */
+/*
+ * 用户决策：整个程序以管理员身份运行 —— Edge 的 App-Bound Cookie 密钥
+ * 第一层 DPAPI 只能在 SYSTEM 上下文解开，而拿到 SYSTEM 令牌需要管理员。
+ *
+ * 行为：
+ *   - 已提权（`net session` 成功）→ 直接往下走；
+ *   - 未提权 → 用 `Start-Process -Verb RunAs` 以管理员重启自己，
+ *     然后当前进程退出（子进程继承 `THEPLAY_ELEVATED=1`，不会再套娃）；
+ *   - UAC 被拒绝 → **直接退出**（用户决策：不降级运行，
+ *     免得界面上每个功能都"看起来能点、一点就报权限不足"）。
+ *
+ * 这段必须在 `app.whenReady()` 之前执行，且不能依赖任何界面。
+ * 测试不 require main.js（mainstatic 只读源码），这里不影响测试。
+ */
+(function ensureElevated() {
+    if (process.platform !== 'win32') return;
+    if (process.env.THEPLAY_ELEVATED === '1') return;
+    /*
+     * 以下两种情况说明 main.js 是被当库加载/求值，不是真正的程序启动，
+     * 此时绝不能弹 UAC，直接跳过：
+     *   - require.main !== module：测试桩用 new Function 求值 main.js 源码
+     *     （见 scripts/proxy-check.js、scripts/proxy-sync-check.js），
+     *     传进来的 module 是假对象；
+     *   - 执行体是纯 node：真启动时 execPath 是 electron.exe（dev）
+     *     或打包后的程序，文件名不可能是 node。
+     */
+    try {
+        if (typeof require.main !== 'undefined' && require.main !== module) return;
+        if (/^node(\.exe)?$/i.test(path.basename(process.execPath))) return;
+    } catch (_e) { return; }
+    try {
+        execSync('net session', { stdio: 'ignore' });
+        return;
+    } catch (_e) { /* 未提权，往下走重启流程 */ }
+    let relaunched = false;
+    try {
+        process.env.THEPLAY_ELEVATED = '1';
+        const quotedArgs = process.argv.slice(1).map((a) => `"${String(a).replace(/"/g, '')}"`).join(' ');
+        const argPart = quotedArgs ? ` -ArgumentList ${quotedArgs}` : '';
+        const ps = `Start-Process -FilePath "${process.execPath}"${argPart} -WorkingDirectory "${process.cwd()}" -Verb RunAs`;
+        const r = spawnSync('powershell.exe', ['-NoProfile', '-Command', ps], { windowsHide: true });
+        relaunched = !r.error && r.status === 0;
+    } catch (_e) { relaunched = false; }
+    app.exit(relaunched ? 0 : 1);
+})();
 
 /* ========================================================================== */
 /*                          全局网络层（进程级设施）                          */
@@ -1460,6 +1514,8 @@ let galleryHandlersReady = false;
 let downloadHandlersReady = false;
 let torrentHandlersReady = false;
 let settingsHandlersReady = false;
+let kbHandlersReady = false;
+let edgeImportHandlersReady = false;
 
 // 搜索限流冷却：站点对搜索接口限流（实测约 10 次连续请求触发，超限返回
 // "搜索过于频繁"提示页，约 20s 后恢复；期间继续重试会不断刷新限流窗口）。
@@ -2629,6 +2685,22 @@ function setupTamperHandlers(sess) {
 const sniffedSessions = new WeakSet();
 const recentSniffedUrls = new Map();
 
+/**
+ * 网络层嗅探总开关，默认关闭 —— 由嗅探面板的"持续嗅探"开关控制：
+ * 打开时持续推送捕获到的媒体，关闭时一条不推。
+ * 开关只管"推不推送"：webRequest 监听器本身常驻不摘，
+ * Electron 每个事件只保留最后一个监听器，摘掉重装反而会
+ * 和请求头改写互相顶掉，且常驻监听的开销只是每次回调多一次判断。
+ */
+let snifferEnabled = false;
+
+// 只注册一次：setupSniffer 是按 session 调用的，放里面会重复注册
+// （ipcMain.handle 重复注册同一通道会抛），所以挂在模块顶层。
+ipcMain.handle('sniffer-set-enabled', async (_event, enabled) => {
+    snifferEnabled = enabled === true;
+    return { success: true, armed: snifferEnabled };
+});
+
 setInterval(() => {
     const now = Date.now();
     for (const [url, time] of recentSniffedUrls.entries()) {
@@ -2677,6 +2749,9 @@ function setupSniffer(sess) {
     const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico', 'tiff', 'heic', 'avif'];
 
     sess.webRequest.onResponseStarted(filter, (details) => {
+        // 总开关没打开时直接丢弃："持续嗅探"关闭中，网络层不推送任何结果。
+        // 放第一行，后面的 ACG/后缀判定都省了。
+        if (!snifferEnabled) return;
         const { url, responseHeaders, method, statusCode } = details;
         if (!url || (statusCode !== 200 && statusCode !== 206) || method === 'OPTIONS' || method === 'HEAD') {
             return;
@@ -3007,7 +3082,17 @@ function createWindow() {
             // （独立 session），只挂主窗口那次注册就管不到它的请求 ——
             // 表现为防盗链 403、UA 与渲染层不一致。WeakSet 记账保证幂等。
             applyRequestHeaderRules(webContents.session);
+            // 浏览器能力同理：下载拦截与权限策略也按 session 生效。
+            // 漏了这一行，webview 一旦带 partition，网页下载会绕过记录、
+            // 权限会退回 Electron 的默认"全部允许"——两件事都不报错。
+            setupBrowserSession(webContents.session);
         }
+
+        // 焦点在页面里时，只有 guest 能收到键盘事件（webview 是跨进程 OOPIF，
+        // 键盘/滚轮不冒泡到宿主页面）。浏览器级快捷键必须挂在这里，
+        // 否则用户一点进页面就全部静默失效。见 browserService 顶部注释。
+        attachGuestExtras(webContents);
+
         webContents.setWindowOpenHandler(({ url }) => {
             mainWindow.webContents.send('navigate-to-url', url);
             return { action: 'deny' };
@@ -3015,6 +3100,13 @@ function createWindow() {
     });
 
     applyRequestHeaderRules(mainWindow.webContents.session);
+    setupBrowserSession(mainWindow.webContents.session);
+
+    // 宿主窗口自己也要挂：焦点在地址栏或 Agent 输入框里时，
+    // 键盘事件落在宿主 webContents 上，只挂 guest 会让这些位置的快捷键失效。
+    // 两处都挂才是完整的 —— 这是本模块最容易漏的一处不对称。
+    attachBrowserInput(mainWindow.webContents);
+    guardWebviewAttach(mainWindow.webContents);
 
     const { session } = require('electron');
     setupSniffer(session.defaultSession);
@@ -3028,6 +3120,12 @@ function createWindow() {
     setupTorrentHandlers();
     setupTorrentFileHandlers();
     setupSettingsHandlers();
+    setupKbHandlers();
+    setupEdgeImportHandlers();
+    // 浏览器外壳能力的 IPC（下载记录 / 下载操作）。窗口 getter 用闭包注入，
+    // 不让 browserService 反向 require main.js —— 那会形成循环依赖，
+    // 而循环 require 只报 warning 不报错，症状是第一次用到才炸。
+    setupBrowserIpc(() => mainWindow);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -3131,13 +3229,15 @@ function setupSettingsHandlers() {
     settingsHandlersReady = true;
 
     ipcMain.handle('settings-get', async () => {
-        const { proxyPort, ai } = getSettings();
+        const { proxyPort, ai, kbRoot } = getSettings();
         return {
             success: true,
             proxyPort,
             applied: getAcgmhoProxy() || '',
             proxyProtocol: getAcgmhoProxyProtocol() || '',
             ai,
+            kbRoot,
+            kb: kbStatus(kbRoot),
         };
     });
 
@@ -3161,6 +3261,93 @@ function setupSettingsHandlers() {
     // 探活用提交上来的草稿配置，不落盘。第二个参数是映射后的档位取值，由渲染层传入
     ipcMain.handle('settings-test-ai-config', async (_event, value, reasoningEffort) => {
         return testAiConnection(value, reasoningEffort);
+    });
+}
+
+/**
+ * 知识库 IPC。
+ *
+ * 主进程这一侧**只搬字节**：解析 front-matter、评分、切片全在渲染层的
+ * services/KbService（纯 TS，可单测）。这里返回的东西就是磁盘上的原文，
+ * 不做任何加工 —— 加工逻辑一旦分居两侧，两边迟早会漂移。
+ */
+function setupKbHandlers() {
+    if (kbHandlersReady) return;
+    kbHandlersReady = true;
+
+    // 整库一次读完（248 个文件 / 约 3 MB）。渲染层把它长期驻留，
+    // 之后每次检索都在本地算，不再往返 IPC。
+    ipcMain.handle('kb-load', async () => loadKbSource(getSettings().kbRoot));
+
+    ipcMain.handle('kb-read', async (_event, relativePath) => {
+        return readKbArticle(getSettings().kbRoot, relativePath);
+    });
+
+    ipcMain.handle('kb-status', async () => kbStatus(getSettings().kbRoot));
+
+    // 保存路径后立刻回报新状态，界面不用再发一次 kb-status
+    ipcMain.handle('kb-set-root', async (_event, value) => {
+        const res = saveKbRoot(value);
+        return { ...res, status: kbStatus(getSettings().kbRoot) };
+    });
+}
+
+/**
+ * Edge 数据导入 IPC。
+ *
+ * 分两步而不是一步：
+ *
+ *   - `edge-detect` 只读 Local State 与 Bookmarks 的大小/条目数，快且不会被锁影响；
+ *   - `edge-import` 才打开 SQLite 与解密。耗时操作放在用户点「导入」之后，
+ *     而不是打开设置面板就做。
+ *
+ * Cookie 的写回放在这里而不是服务里：服务不 require electron（那样才能被测试
+ * 直接 require），而 cookies.set 是 session 的能力。
+ */
+function setupEdgeImportHandlers() {
+    if (edgeImportHandlersReady) return;
+    edgeImportHandlersReady = true;
+
+    ipcMain.handle('edge-detect', async () => detectEdgeProfiles());
+
+    ipcMain.handle('edge-import', async (event, options) => {
+        const report = (message) => {
+            try { event.sender.send('edge-import-progress', message); } catch (_e) { /* 窗口关了就算了 */ }
+        };
+
+        const result = await importEdgeData(options, report);
+        if (!result.ok || result.cookies.length === 0) return result;
+
+        // 写回 Cookie：目标 session 必须与 <webview> 用的一致。
+        // webview 没有配 partition，用的就是 defaultSession。
+        const session = require('electron').session.defaultSession;
+        const failed = [];
+        for (const cookie of result.cookies) {
+            try {
+                await session.cookies.set({
+                    url: cookie.url,
+                    name: cookie.name,
+                    value: cookie.value,
+                    domain: cookie.domain,
+                    path: cookie.path,
+                    secure: cookie.secure,
+                    httpOnly: cookie.httpOnly,
+                    sameSite: cookie.sameSite,
+                    ...(cookie.expirationDate ? { expirationDate: cookie.expirationDate } : {}),
+                });
+            } catch (e) {
+                failed.push(cookie.domain + cookie.name);
+            }
+        }
+
+        result.stats.cookiesApplied = result.cookies.length - failed.length;
+        if (failed.length > 0) {
+            result.warnings.push({
+                category: 'cookies',
+                message: `有 ${failed.length} 条 Cookie 被会话拒绝（多为过期或域不匹配），其余已写入。`,
+            });
+        }
+        return result;
     });
 }
 

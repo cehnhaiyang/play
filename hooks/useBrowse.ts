@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    Bookmark,
+    BookmarkNode,
+    BookmarkTree,
+    BookmarkBarVisibility,
+    BrowserCommand,
+    BrowserDownload,
+    BrowserDownloadAction,
     CookieItem,
     DownloadCapabilities,
     DownloadMediaResult,
@@ -10,10 +15,34 @@ import {
     MediaType,
     TamperRule,
     WebviewElement,
-    getAppWindow,
     getElectronAPI,
 } from '../meta';
 import { extractMediaLinks } from '../services/AiService';
+import {
+    classifyNavigationError,
+    shouldShowNavigationError,
+    nextZoomLevel,
+    zoomLevelToFactor,
+    type NavigationError,
+} from '../services/BrowserService';
+export type { MergeStats } from '../services/BookmarkService';
+export type { BookmarkBarVisibility } from '../meta';
+import {
+    collectUrls,
+    findNode,
+    flattenUrls,
+    insertNode,
+    makeDefaultTree,
+    makeFolder,
+    makeUrlNode,
+    mergeIntoFolder,
+    migrateFlatBookmarks,
+    moveNode,
+    normalizeTree,
+    removeNode,
+    replaceNode,
+    type MergeStats,
+} from '../services/BookmarkService';
 import { loadJSON, loadStr, saveJSON, saveStr } from '../utils/persist';
 import { MEDIA_EXTENSIONS, generateId, isAcgUrl, isLinkFromPage, isRealUrl } from '../utils/utils';
 
@@ -76,7 +105,18 @@ const INSPECTOR_STREAM_EXTS = CATEGORIES.stream.filter((ext) => ext !== 'ts');
 
 const TABS_STORE_KEY = 'browse-tabs';
 const TABS_STORE_MAX = 20;
+/**
+ * 「最近关闭」栈深度。取 10 与 Chrome 一致：
+ * 再深用户也不会去数，而每一项都只是一个 { url, title } 小对象。
+ */
+const CLOSED_STACK_MAX = 10;
 const BOOKMARKS_STORE_KEY = 'react-player-bookmarks';
+/**
+ * v2 起书签是**树**（带文件夹），与 v1 的扁平数组不兼容。
+ * 换键而不是原地改结构：旧键留着，用户若回退版本还能读回自己的书签。
+ */
+const BOOKMARK_TREE_STORE_KEY = 'react-player-bookmark-tree';
+const BOOKMARK_BAR_STORE_KEY = 'react-player-bookmark-bar';
 const BOOKMARKS_MAX = 500;
 const LINKS_STORE_KEY = 'sniff-links';
 const LINKS_STORE_MAX = 300;
@@ -929,6 +969,16 @@ const buildTamperScript = (config: TamperConfig): string =>
 /*                                  类型                                       */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * 一次导航失败。
+ *
+ * 类型与判据都来自 services/BrowserService —— **这里只是再导出**，
+ * 让 hooks 的使用方不必知道它住在哪一层。判据绝不能在本文件里再写一份：
+ * 主进程与渲染层各维护一张错误码表，漂移的症状是"同一个错误在日志里和
+ * 界面上叫两个名字"，不报错、不崩溃，只是让人对不上号。
+ */
+export type { NavigationError };
+
 export interface Tab {
     id: string;
     /** 当前 URL（React 状态同步用） */
@@ -942,8 +992,22 @@ export interface Tab {
     historyIndex: number;
     /** 用于触发刷新的 Key */
     reloadKey: number;
+    /** 强制刷新（忽略缓存）的 Key。与 reloadKey 分开：两者走不同的 webview API */
+    hardReloadKey: number;
     /** 待处理的导航动作（由 interactions 落到 webview API） */
     pendingNavigation?: 'back' | 'forward';
+    /** 真实 favicon 地址（page-favicon-updated 事件）。空则回落到 hostname 取色块 */
+    favicon: string;
+    /** 导航失败详情。非空时页面区显示错误页而不是空白 */
+    error: NavigationError | null;
+    /** 渲染进程崩溃（render-process-gone）。与 error 分开：它需要的是"重新加载"而不是"重试" */
+    crashed: boolean;
+    /** 此刻是否正在出声（静音的视频不算） */
+    audible: boolean;
+    /** 是否被静音 */
+    muted: boolean;
+    /** 缩放级别（Electron 的 zoomLevel，每级 1.2 倍）。0 为 100% */
+    zoomLevel: number;
 }
 
 export interface TabsState {
@@ -961,17 +1025,50 @@ export interface TabsState {
         goForward: (tabId: string) => void;
         goHome: (tabId: string) => void;
         reload: (tabId: string) => void;
+        /** 强制刷新：忽略缓存重新拉取。普通刷新改不掉的旧资源靠它 */
+        hardReload: (tabId: string) => void;
         openInNewTab: (url: string) => void;
         syncTabUrl: (tabId: string, url: string, historyIndex?: number) => void;
         clearPendingNavigation: (tabId: string) => void;
+        setTabFavicon: (tabId: string, favicon: string) => void;
+        setTabError: (tabId: string, error: NavigationError | null) => void;
+        setTabCrashed: (tabId: string, crashed: boolean) => void;
+        setTabAudible: (tabId: string, audible: boolean) => void;
+        setTabMuted: (tabId: string, muted: boolean) => void;
+        setTabZoom: (tabId: string, zoomLevel: number) => void;
+        /** 恢复最近关闭的标签页（Ctrl+Shift+T）。没有可恢复的返回 false */
+        reopenClosedTab: () => boolean;
     };
 }
 
+/**
+ * 书签状态。
+ *
+ * 真值是 `tree`（树）。不再另外派生一份平铺列表：唯一需要平铺的消费者是
+ * 首页的快速访问网格，它已删除；剩下的消费点（书签栏、下拉、管理器）都
+ * 直接遍历树，多一份派生副本只会多一处会漂移的判据。
+ */
 export interface BookmarksState {
-    bookmarks: Bookmark[];
+    /** 书签树（真值） */
+    tree: BookmarkTree;
+    /** 收藏夹栏显示策略 */
+    barVisibility: BookmarkBarVisibility;
+    setBarVisibility: (value: BookmarkBarVisibility) => void;
     isBookmarked: (url: string) => boolean;
     toggleBookmark: (url: string, title?: string) => void;
     removeBookmark: (id: string) => void;
+    /** 在指定文件夹下新建文件夹，返回新文件夹 id（失败返回空串） */
+    addFolder: (parentId: string, title: string) => string;
+    /** 重命名节点 */
+    renameNode: (id: string, title: string) => void;
+    /** 改网址节点的 url */
+    updateNodeUrl: (id: string, url: string) => void;
+    /** 移动节点到另一个文件夹 */
+    moveBookmark: (id: string, targetFolderId: string, index?: number) => void;
+    /** 把导入的节点合并进某个根，返回统计 */
+    mergeImported: (target: 'bar' | 'other', nodes: BookmarkNode[]) => MergeStats;
+    /** 清空某个根下的全部内容 */
+    clearRoot: (target: 'bar' | 'other') => void;
 }
 
 export interface SearchState {
@@ -987,6 +1084,12 @@ export interface SnifferState {
     statusMessage: string;
     filterType: MediaType | 'all';
     scopeFilter: 'all' | 'current';
+    /**
+     * "持续嗅探"总开关。打开时切页自动扫描 + 网络层持续推送；
+     * 关闭时两者全停（手动点"嗅探"按钮做的一次性扫描不受影响）。
+     * 默认关闭，状态落盘持久化。
+     */
+    sniffEnabled: boolean;
     error: string;
     downloadingUrl: string;
     /** 当前下载的实时进度；没有下载在进行时为 null */
@@ -995,6 +1098,8 @@ export interface SnifferState {
     actions: {
         /** runId：同一轮多次扫描共用一个序号，过期轮次的结果与状态更新会被丢弃 */
         scan: (targetUrl?: string, runId?: number) => Promise<void>;
+        /** 打开/关闭持续嗅探（同步写盘 + 通知主进程开关网络推送） */
+        setSniffEnabled: (enabled: boolean) => void;
         analyzeWithAi: (targetUrl: string) => Promise<void>;
         setFilterType: (type: MediaType | 'all') => void;
         setScopeFilter: (scope: 'all' | 'current') => void;
@@ -1018,6 +1123,14 @@ export interface SnifferState {
  */
 export const shouldAddressBarFollow = (inputFocused: boolean): boolean => !inputFocused;
 
+/** 页面内查找的当前结果 */
+export interface FindInfo {
+    /** 命中总数 */
+    matches: number;
+    /** 当前是第几个（1 起）；无命中时为 0 */
+    active: number;
+}
+
 export interface InteractionsState {
     inputUrl: string;
     setInputUrl: (url: string) => void;
@@ -1026,11 +1139,9 @@ export interface InteractionsState {
      * 否则 SPA 的 in-page 导航会把用户正在敲的地址覆盖掉（见 useInteractions 内注释）。
      */
     setInputFocused: (focused: boolean) => void;
-    isElectron: boolean;
     isCurrentPageBookmarked: boolean;
     handleNavigate: (urlOrQuery: string) => void;
     handleOpenInNewTab: (url: string) => void;
-    onLoadFinish: (tabId: string) => void;
     /**
      * 取该标签页**稳定身份**的 ref 回调。JSX 里必须写 `ref={getWebviewRef(tab.id)}`，
      * 不能写内联箭头 —— 原因见 useInteractions 内的注释。
@@ -1041,7 +1152,6 @@ export interface InteractionsState {
      * 就没有"正确写法 / 错误写法"两条路可选。
      */
     getWebviewRef: (tabId: string) => (el: WebviewElement | null) => void;
-    registerIframe: (id: string, el: HTMLIFrameElement | null) => void;
     getActiveWebview: () => WebviewElement | null;
     /**
      * 订阅「页面就绪」广播：每个标签页每次 dom-ready 各触发一次，回调收到该页 webview。
@@ -1054,6 +1164,36 @@ export interface InteractionsState {
     onPageReady: (cb: (tabId: string, webview: WebviewElement) => void) => () => void;
     /** 遍历当前存活的全部 webview（规则变更时向所有页面推送用） */
     forEachWebview: (cb: (webview: WebviewElement, tabId: string) => void) => void;
+    /** 取某个标签页的 webview（可能未挂载，返回 null） */
+    getWebview: (tabId: string) => WebviewElement | null;
+
+    /* ------------------------------ 页面能力 ------------------------------ */
+
+    /** 中止当前导航。加载卡住时唯一的出路 —— 不调它只能等超时 */
+    stopLoading: (tabId: string) => void;
+    /** 页面内查找。空串 = 结束查找并清掉高亮 */
+    findInPage: (tabId: string, text: string, options?: { forward?: boolean; findNext?: boolean }) => void;
+    /** 结束查找 */
+    stopFindInPage: (tabId: string, keepSelection?: boolean) => void;
+    /** 调整缩放。delta: +1 放大 / -1 缩小 / 0 复位到 100% */
+    zoomBy: (tabId: string, delta: number) => void;
+    /** 静音 / 取消静音 */
+    toggleMute: (tabId: string) => void;
+    /** 重新加载崩溃的页面 */
+    reviveTab: (tabId: string) => void;
+
+    /** 当前查找状态（按标签页）。查找条据此显示 "3/17" */
+    findInfo: FindInfo;
+    /** 当前正在查找的词（空串表示查找条关着） */
+    findQuery: string;
+    /** 打开/关闭查找条。传空串等于关闭 */
+    setFindQuery: (text: string) => void;
+    /**
+     * 订阅**只属于界面层**的浏览器动作（聚焦地址栏 / 让 Agent 分析元素 /
+     * 用选中文字搜索）。真值在 BrowsePanel（它持有地址栏 input 的 ref 与
+     * Agent 输入框），useBrowse 无从下手，所以原样转发。返回退订函数。
+     */
+    onUiAction: (cb: (command: BrowserCommand) => void) => () => void;
 }
 
 export interface TamperState {
@@ -1099,6 +1239,33 @@ export interface BrowseState {
     sniffer: SnifferState;
     interactions: InteractionsState;
     tamper: TamperState;
+    downloads: DownloadsState;
+}
+
+/**
+ * 网页自身触发的下载（区别于嗅探下载 / 画廊下载 / BT）。
+ *
+ * 状态由**主进程**持有（DownloadItem 只在那里），渲染层只是镜像 ——
+ * 所以这里的 actions 全是"发一条 IPC 然后等主进程推新快照回来"，
+ * 不做乐观更新。乐观更新在这里是错的：暂停能不能成功取决于服务器
+ * 是否支持 Range 请求，本地先改状态会让界面显示"已暂停"而实际还在下。
+ */
+export interface DownloadsState {
+    items: BrowserDownload[];
+    /** 正在进行的条数（进度条徽标用） */
+    activeCount: number;
+    actions: {
+        pause: (id: string) => Promise<void>;
+        resume: (id: string) => Promise<void>;
+        cancel: (id: string) => Promise<void>;
+        /** 在系统文件管理器里定位到文件 */
+        reveal: (id: string) => Promise<void>;
+        open: (id: string) => Promise<void>;
+        /** 只从列表移除记录，不删文件 */
+        remove: (id: string) => Promise<void>;
+        /** 清掉所有已结束的记录 */
+        clearFinished: () => void;
+    };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1167,6 +1334,13 @@ const makeBlankTab = (id = generateId()): Tab => ({
     history: [],
     historyIndex: -1,
     reloadKey: 0,
+    hardReloadKey: 0,
+    favicon: '',
+    error: null,
+    crashed: false,
+    audible: false,
+    muted: false,
+    zoomLevel: 0,
 });
 
 const makeTab = (url = '', title = ''): Tab => ({
@@ -1178,6 +1352,13 @@ const makeTab = (url = '', title = ''): Tab => ({
     history: url ? [url] : [],
     historyIndex: url ? 0 : -1,
     reloadKey: 0,
+    hardReloadKey: 0,
+    favicon: '',
+    error: null,
+    crashed: false,
+    audible: false,
+    muted: false,
+    zoomLevel: 0,
 });
 
 /**
@@ -1216,6 +1397,15 @@ const useTabs = (): TabsState => {
         return { tabs, activeTabId: tabs[0].id };
     });
 
+    /**
+     * 「最近关闭」栈（Ctrl+Shift+T）。
+     *
+     * 用 ref 而不是 state：它只被 reopenClosedTab 读一次，且**改动它不需要
+     * 触发重渲染** —— 放进 state 会让每次关标签都多一轮渲染，而界面上
+     * 没有任何东西依赖它。这也意味着它不跨重启（本来也不该跨）。
+     */
+    const closedStackRef = useRef<{ url: string; title: string }[]>([]);
+
     const { tabs, activeTabId } = state;
 
     /**
@@ -1246,6 +1436,13 @@ const useTabs = (): TabsState => {
 
     const closeTab = useCallback((tabId: string) => {
         setState((prev) => {
+            const closing = prev.tabs.find((t) => t.id === tabId);
+            // 只记非空白页，理由见 reopenClosedTab
+            if (closing && closing.url) {
+                closedStackRef.current.push({ url: closing.url, title: closing.title });
+                if (closedStackRef.current.length > CLOSED_STACK_MAX) closedStackRef.current.shift();
+            }
+
             if (prev.tabs.length <= 1) {
                 // 至少保留一个标签页，重置为空白页（沿用原 id，webview 引用不必换绑）
                 return { tabs: [makeBlankTab(prev.tabs[0].id)], activeTabId: prev.tabs[0].id };
@@ -1277,13 +1474,18 @@ const useTabs = (): TabsState => {
         setState((prev) => mapTab(prev, tabId, (tab) => {
             const history = tab.history.slice(0, tab.historyIndex + 1);
             const title = keepTitle ? tab.title : getTitleFromUrl(url);
+            // 一旦开始新导航，上一页的错误/崩溃态必须清掉。
+            // 不清的话：错误页盖着，而页面其实已经在加载了 —— 用户点重试
+            // 之后仍然看到错误页，只能再点一次刷新。
+            const cleared = { error: null, crashed: false };
             if (history[history.length - 1] === url) {
                 // 已停在同一地址：只更新加载态与标题，不新增历史项
-                return { ...tab, url, title, isLoading };
+                return { ...tab, ...cleared, url, title, isLoading };
             }
             history.push(url);
             return {
                 ...tab,
+                ...cleared,
                 url,
                 initialUrl: tab.initialUrl || url,
                 title,
@@ -1326,12 +1528,31 @@ const useTabs = (): TabsState => {
         setState((prev) => mapTab(prev, tabId, (tab) => ({
             ...tab, url: '', initialUrl: '', title: '新标签页',
             isLoading: false, history: [], historyIndex: -1,
+            // 错误页与 favicon 必须一起清掉：不清的话回到首页后错误页还盖着，
+            // 而 favicon 会留着上一个站点的图标
+            error: null, crashed: false, favicon: '', audible: false,
         })));
     }, []);
 
     const reload = useCallback((tabId: string) => {
         setState((prev) => mapTab(prev, tabId, (tab) => (
             tab.url ? { ...tab, isLoading: true, reloadKey: (tab.reloadKey || 0) + 1 } : tab
+        )));
+    }, []);
+
+    /**
+     * 强制刷新（Ctrl+Shift+R）。
+     *
+     * 与 reload 分开记一个 key，而不是共用一个加标志位：两者落到 webview 上
+     * 是**两个不同的 API**（reload / reloadIgnoringCache），用一个 effect
+     * 分发时若标志位与 key 的更新顺序有偏差，就会偶发地走错那一个 ——
+     * 表现为"强刷有时有效有时没有"。两个 key 各自独立递增，不会串。
+     */
+    const hardReload = useCallback((tabId: string) => {
+        setState((prev) => mapTab(prev, tabId, (tab) => (
+            tab.url
+                ? { ...tab, isLoading: true, hardReloadKey: (tab.hardReloadKey || 0) + 1 }
+                : tab
         )));
     }, []);
 
@@ -1358,12 +1579,81 @@ const useTabs = (): TabsState => {
         )));
     }, []);
 
+    /* ------------------------- 浏览器外壳能力的状态 ------------------------- */
+
+    /**
+     * 下面这组 setter 都是**幂等 + 同值不换引用**的写法。
+     *
+     * 它们由 webview 事件驱动，而其中几个（favicon、audible、zoom）会在一次
+     * 导航里被反复触发。每次都返回新对象的话，tabs 数组每帧都是新身份，
+     * 下游所有依赖 tabs 的 useMemo/effect 全部重算 —— 页面一多就是持续掉帧，
+     * 而且看不出是谁在改。
+     */
+    const setTabFavicon = useCallback((tabId: string, favicon: string) => {
+        setState((prev) => mapTab(prev, tabId, (tab) => (
+            tab.favicon === favicon ? tab : { ...tab, favicon }
+        )));
+    }, []);
+
+    const setTabError = useCallback((tabId: string, error: NavigationError | null) => {
+        setState((prev) => mapTab(prev, tabId, (tab) => (
+            // 同码同地址的错误不重复写入：did-fail-load 在重试时会连发多次
+            (tab.error === null && error === null) ? tab : { ...tab, error }
+        )));
+    }, []);
+
+    const setTabCrashed = useCallback((tabId: string, crashed: boolean) => {
+        setState((prev) => mapTab(prev, tabId, (tab) => (
+            tab.crashed === crashed ? tab : { ...tab, crashed }
+        )));
+    }, []);
+
+    const setTabAudible = useCallback((tabId: string, audible: boolean) => {
+        setState((prev) => mapTab(prev, tabId, (tab) => (
+            tab.audible === audible ? tab : { ...tab, audible }
+        )));
+    }, []);
+
+    const setTabMuted = useCallback((tabId: string, muted: boolean) => {
+        setState((prev) => mapTab(prev, tabId, (tab) => (
+            tab.muted === muted ? tab : { ...tab, muted }
+        )));
+    }, []);
+
+    const setTabZoom = useCallback((tabId: string, zoomLevel: number) => {
+        setState((prev) => mapTab(prev, tabId, (tab) => (
+            tab.zoomLevel === zoomLevel ? tab : { ...tab, zoomLevel }
+        )));
+    }, []);
+
+    /**
+     * 恢复最近关闭的标签页（Ctrl+Shift+T）。
+     *
+     * 只记**最近若干条**，且只记可重建的 url/title —— webview 里的滚动位置、
+     * 表单内容、SPA 内部状态都不在恢复范围内。这是"重开那个页面"，
+     * 不是"回到那个页面当时的样子"，界面上也不该暗示后者。
+     *
+     * 空白页不进栈：用户关掉一个刚开的空白页，再按 Ctrl+Shift+T 期待的是
+     * 上一个**真实页面**，而不是又把空白页开回来。
+     */
+    const reopenClosedTab = useCallback((): boolean => {
+        const entry = closedStackRef.current.pop();
+        if (!entry) return false;
+        const newTab = makeTab(entry.url, entry.title);
+        setState((prev) => ({ tabs: [...prev.tabs, newTab], activeTabId: newTab.id }));
+        return true;
+    }, []);
+
     const actions = useMemo(() => ({
         createTab, closeTab, switchTab, navigateTab, updateTabTitle, setTabLoading,
-        goBack, goForward, goHome, reload, openInNewTab, syncTabUrl, clearPendingNavigation,
+        goBack, goForward, goHome, reload, hardReload, openInNewTab, syncTabUrl, clearPendingNavigation,
+        setTabFavicon, setTabError, setTabCrashed, setTabAudible, setTabMuted, setTabZoom,
+        reopenClosedTab,
     }), [
         createTab, closeTab, switchTab, navigateTab, updateTabTitle, setTabLoading,
-        goBack, goForward, goHome, reload, openInNewTab, syncTabUrl, clearPendingNavigation,
+        goBack, goForward, goHome, reload, hardReload, openInNewTab, syncTabUrl, clearPendingNavigation,
+        setTabFavicon, setTabError, setTabCrashed, setTabAudible, setTabMuted, setTabZoom,
+        reopenClosedTab,
     ]);
 
     return useMemo(() => ({ tabs, activeTabId, activeTab, actions }), [tabs, activeTabId, activeTab, actions]);
@@ -1374,83 +1664,111 @@ const useTabs = (): TabsState => {
 /* -------------------------------------------------------------------------- */
 
 /**
- * 书签条目校验 + 归一化。
+ * 初始化：读取书签树。
  *
- * title 是**必填展示字段**（HomePage 直接 bm.title.substring(0, 2) 取首字做图标），
- * 只校验 id/url 会让缺 title 的历史脏数据一路走到渲染层崩掉整个快速访问页。
- * 这里把缺失/非字符串的 title 补成 hostname，坏数据在入口就被修好。
+ * 三级回退，顺序不能换：
+ *   1. v2 的树 —— 正常路径；
+ *   2. v1 的扁平数组 —— **迁移**进「收藏夹栏」而不是丢弃。老用户升级后
+ *      看到的是"书签都还在"，而不是"升级完书签没了"；
+ *   3. 空的默认树 —— 只在两者都没有时（首次启动）。
+ *
+ * 第 3 档给的是**空**树而不是几个预置网址：预置等于替用户决定他该收藏什么。
+ * 首次启动的书签栏本就是空的，用户要的是「从 Edge 导入」。
+ *
+ * 放在 lazy initializer 而不是 effect 里：用 effect 会先渲染一帧空列表再填上。
  */
-const normalizeBookmark = (b: unknown): Bookmark | null => {
-    if (!b || typeof b !== 'object') return null;
-    const raw = b as Partial<Bookmark>;
-    if (typeof raw.id !== 'string' || typeof raw.url !== 'string' || raw.url.length === 0) return null;
-    const title = typeof raw.title === 'string' && raw.title.trim()
-        ? raw.title
-        : getTitleFromUrl(raw.url);
-    return {
-        id: raw.id,
-        url: raw.url,
-        title,
-        createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : Date.now(),
-    };
-};
-
-const DEFAULT_BOOKMARKS: Bookmark[] = [
-    { id: '1', title: 'Google', url: 'https://www.google.com', createdAt: 0 },
-    { id: '2', title: 'Bing', url: 'https://www.bing.com', createdAt: 0 },
-    { id: '3', title: 'YouTube', url: 'https://www.youtube.com', createdAt: 0 },
-    { id: '4', title: 'Bilibili', url: 'https://www.bilibili.com', createdAt: 0 },
-];
-
-/**
- * 初始化：从 LocalStorage 读取书签。
- * 放在 lazy initializer 而不是 effect 里 —— 用 effect 会先渲染一帧空列表再填上，
- * 且"初始化"与"写盘"两个 effect 的先后顺序决定了会不会把默认书签覆盖掉用户数据。
- */
-const loadStoredBookmarks = (): Bookmark[] => {
+const loadStoredBookmarks = (): BookmarkTree => {
     try {
-        const saved = loadStr(BOOKMARKS_STORE_KEY, '', '');
-        if (saved) {
-            const parsed: unknown = JSON.parse(saved);
-            if (Array.isArray(parsed)) {
-                // 坏条目只丢弃，不崩；空数组视为"用户清空过"，同样尊重。
-                // 取最新的若干条（slice(-MAX)）：条目按收藏顺序追加，末尾最新，
-                // slice(0, MAX) 会在攒够上限后把磁盘副本冻结在最早那批 ——
-                // 之后无论再收藏什么，重启后都看不到。
-                return parsed
-                    .map(normalizeBookmark)
-                    .filter((b): b is Bookmark => b !== null)
-                    .slice(-BOOKMARKS_MAX);
+        const savedTree = loadStr(BOOKMARK_TREE_STORE_KEY, '', '');
+        if (savedTree) {
+            const parsed: unknown = JSON.parse(savedTree);
+            if (parsed && typeof parsed === 'object') {
+                return normalizeTree(parsed, generateId);
+            }
+        }
+
+        const savedFlat = loadStr(BOOKMARKS_STORE_KEY, '', '');
+        if (savedFlat) {
+            const parsedFlat: unknown = JSON.parse(savedFlat);
+            if (Array.isArray(parsedFlat)) {
+                const migrated = migrateFlatBookmarks(parsedFlat, generateId);
+                // 立刻落盘成 v2，避免每次启动都重跑迁移（迁移会给节点换新 id）
+                saveStr(BOOKMARK_TREE_STORE_KEY, JSON.stringify(migrated), '');
+                return migrated;
             }
         }
     } catch (e) {
         console.error('加载书签失败:', e);
     }
-    const defaults = DEFAULT_BOOKMARKS.map((b) => ({ ...b, createdAt: Date.now() }));
-    saveStr(BOOKMARKS_STORE_KEY, JSON.stringify(defaults), '');
+    const defaults = makeDefaultTree();
+    saveStr(BOOKMARK_TREE_STORE_KEY, JSON.stringify(defaults), '');
     return defaults;
 };
 
+/** 读收藏夹栏显示策略（默认与 Edge/Chrome 出厂一致：仅新标签页） */
+const loadBarVisibility = (): BookmarkBarVisibility => {
+    const saved = loadStr(BOOKMARK_BAR_STORE_KEY, '', '');
+    return saved === 'always' || saved === 'never' ? saved : 'newTab';
+};
+
+/**
+ * 把树按节点数收敛到上限。
+ *
+ * 超限时**从收藏夹栏的末尾往前删**（保留最新的），并且先把「其他收藏夹」
+ * 整块保留 —— 那是用户明确归类过的内容，比栏上的随手收藏更该留下。
+ * 上限原本只在读回侧生效，内存态与磁盘态可以无限增长，配额爆掉后 saveStr
+ * 静默返回 false —— 表现为"收藏了但没存住"。
+ */
+const trimTree = (tree: BookmarkTree): BookmarkTree => {
+    let total = flattenUrls(tree.bar).length + flattenUrls(tree.other).length;
+    if (total <= BOOKMARKS_MAX) return tree;
+
+    const bar = tree.bar;
+    const children = [...(bar.children || [])];
+    const otherCount = flattenUrls(tree.other).length;
+    let budget = Math.max(0, BOOKMARKS_MAX - otherCount);
+
+    // 从后往前删 url 节点，文件夹整块保留（删半个文件夹比删几条更糟）
+    for (let i = children.length - 1; i >= 0 && budget >= 0; i -= 1) {
+        const child = children[i];
+        if (child.type !== 'url') continue;
+        if (budget > 0) { budget -= 1; continue; }
+        children.splice(i, 1);
+    }
+    return { bar: { ...bar, children }, other: tree.other };
+};
+
 const useBookmarks = (): BookmarksState => {
-    const [bookmarks, setBookmarks] = useState<Bookmark[]>(loadStoredBookmarks);
+    const [tree, setTree] = useState<BookmarkTree>(loadStoredBookmarks);
+    const [barVisibility, setBarVisibilityState] = useState<BookmarkBarVisibility>(loadBarVisibility);
 
     /**
-     * 写盘只做追加式快照，不读回。
-     * 所有变更走函数式更新：旧实现基于闭包里的 bookmarks 快照计算新数组，
-     * 连点两次"收藏"会两次都读到旧列表，第二次把第一次的结果覆盖掉。
-     *
-     * 落盘时收敛到上限（取最新）：上限原本只在读回侧生效，内存态与磁盘态
-     * 可以无限增长，配额爆掉后 saveStr 静默返回 false —— 表现为"收藏了但没存住"。
+     * 落盘：写收敛后的树，不读回。
+     * 所有变更走函数式更新 —— 基于闭包快照计算会在连点两次时把前一次覆盖掉。
      */
     useEffect(() => {
-        saveStr(BOOKMARKS_STORE_KEY, JSON.stringify(bookmarks.slice(-BOOKMARKS_MAX)), '');
-    }, [bookmarks]);
+        saveStr(BOOKMARK_TREE_STORE_KEY, JSON.stringify(trimTree(tree)), '');
+    }, [tree]);
 
-    const isBookmarked = useCallback((url: string) => {
-        return bookmarks.some((b) => b.url === url);
-    }, [bookmarks]);
+    useEffect(() => {
+        saveStr(BOOKMARK_BAR_STORE_KEY, barVisibility, '');
+    }, [barVisibility]);
 
-    /** 切换收藏状态（存在则删除，不存在则添加） */
+    const setBarVisibility = useCallback((value: BookmarkBarVisibility) => {
+        setBarVisibilityState(value);
+    }, []);
+
+    /**
+     * 「是否已收藏」的判据源。
+     *
+     * 用 collectUrls 建集合，而不是遍历上面那份平铺数组 —— 判据只此一处，
+     * 星标亮不亮与收藏夹里有没有它必然一致。
+     */
+    const urlSet = useMemo(() => collectUrls(tree), [tree]);
+
+    const isBookmarked = useCallback((url: string) => urlSet.has(url), [urlSet]);
+
+    /** 切换收藏状态：已存在则从树上摘掉，不存在则追加到收藏夹栏末尾 */
     const toggleBookmark = useCallback((url: string, title: string = '新书签') => {
         if (!url) return;
         let finalTitle = title;
@@ -1458,21 +1776,104 @@ const useBookmarks = (): BookmarksState => {
             if (!title || title === '新书签') finalTitle = new URL(url).hostname;
         } catch { /* 非法 URL 保留传入标题 */ }
 
-        setBookmarks((prev) => {
-            if (prev.some((b) => b.url === url)) {
-                return prev.filter((b) => b.url !== url);
+        setTree((prev) => {
+            const existing = flattenUrls(prev.bar).find((e) => e.node.url === url)
+                || flattenUrls(prev.other).find((e) => e.node.url === url);
+            if (existing) {
+                const inBar = findNode(prev.bar, existing.node.id);
+                return inBar
+                    ? { bar: removeNode(prev.bar, existing.node.id), other: prev.other }
+                    : { bar: prev.bar, other: removeNode(prev.other, existing.node.id) };
             }
-            return [...prev, { id: generateId(), url, title: finalTitle, createdAt: Date.now() }];
+            const node = makeUrlNode(generateId(), url, finalTitle);
+            return { bar: insertNode(prev.bar, prev.bar.id, node), other: prev.other };
         });
     }, []);
 
+    /** 删除节点。根节点不允许删（界面上也不会给出入口） */
     const removeBookmark = useCallback((id: string) => {
-        setBookmarks((prev) => prev.filter((b) => b.id !== id));
+        setTree((prev) => {
+            if (id === prev.bar.id || id === prev.other.id) return prev;
+            const inBar = findNode(prev.bar, id);
+            return inBar
+                ? { bar: removeNode(prev.bar, id), other: prev.other }
+                : { bar: prev.bar, other: removeNode(prev.other, id) };
+        });
+    }, []);
+
+    /** 新建文件夹，返回新 id（找不到父节点时返回空串） */
+    const addFolder = useCallback((parentId: string, title: string): string => {
+        const id = generateId();
+        setTree((prev) => {
+            const node = makeFolder(id, title.trim() || '新建文件夹');
+            const inBar = findNode(prev.bar, parentId);
+            return inBar
+                ? { bar: insertNode(prev.bar, parentId, node), other: prev.other }
+                : { bar: prev.bar, other: insertNode(prev.other, parentId, node) };
+        });
+        return id;
+    }, []);
+
+    const renameNode = useCallback((id: string, title: string) => {
+        const clean = title.trim();
+        if (!clean) return;
+        setTree((prev) => ({
+            bar: replaceNode(prev.bar, id, (node) => ({ ...node, title: clean })),
+            other: replaceNode(prev.other, id, (node) => ({ ...node, title: clean })),
+        }));
+    }, []);
+
+    const updateNodeUrl = useCallback((id: string, url: string) => {
+        const clean = url.trim();
+        if (!clean) return;
+        setTree((prev) => ({
+            bar: replaceNode(prev.bar, id, (node) => (node.type === 'url' ? { ...node, url: clean } : node)),
+            other: replaceNode(prev.other, id, (node) => (node.type === 'url' ? { ...node, url: clean } : node)),
+        }));
+    }, []);
+
+    const moveBookmark = useCallback((id: string, targetFolderId: string, index?: number) => {
+        setTree((prev) => moveNode(prev, id, targetFolderId, index));
+    }, []);
+
+    /**
+     * 合并导入的书签。
+     *
+     * 去重集合从**当前树**现算，而不是闭包里的旧值 —— 连续导入两次时，
+     * 第二次必须看得见第一次插进去的 url，否则会重复一份。
+     */
+    const mergeImported = useCallback((target: 'bar' | 'other', nodes: BookmarkNode[]): MergeStats => {
+        const stats: MergeStats = { added: 0, skipped: 0 };
+        setTree((prev) => {
+            const seen = collectUrls(prev);
+            const folder = target === 'bar' ? prev.bar : prev.other;
+            const merged = mergeIntoFolder(folder, nodes, seen, generateId);
+            stats.added = merged.stats.added;
+            stats.skipped = merged.stats.skipped;
+            return target === 'bar'
+                ? { bar: merged.folder, other: prev.other }
+                : { bar: prev.bar, other: merged.folder };
+        });
+        return stats;
+    }, []);
+
+    const clearRoot = useCallback((target: 'bar' | 'other') => {
+        setTree((prev) => target === 'bar'
+            ? { bar: { ...prev.bar, children: [] }, other: prev.other }
+            : { bar: prev.bar, other: { ...prev.other, children: [] } });
     }, []);
 
     return useMemo(
-        () => ({ bookmarks, isBookmarked, toggleBookmark, removeBookmark }),
-        [bookmarks, isBookmarked, toggleBookmark, removeBookmark]
+        () => ({
+            tree, barVisibility, setBarVisibility,
+            isBookmarked, toggleBookmark, removeBookmark,
+            addFolder, renameNode, updateNodeUrl, moveBookmark, mergeImported, clearRoot,
+        }),
+        [
+            tree, barVisibility, setBarVisibility,
+            isBookmarked, toggleBookmark, removeBookmark,
+            addFolder, renameNode, updateNodeUrl, moveBookmark, mergeImported, clearRoot,
+        ]
     );
 };
 
@@ -1540,11 +1941,12 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
 
     // DOM 引用（不要用 state 存 webview，会触发 React DevTools 跨域错误）
     const webviewRefs = useRef<Map<string, WebviewElement>>(new Map());
-    const iframeRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
     // webview 是否已 ready（dom-ready 之后才能安全调用 API）
     const webviewReadyRefs = useRef<Set<string>>(new Set());
     // 刷新请求的上一轮 reloadKey
     const prevReloadKeys = useRef<Record<string, number>>({});
+    // 强制刷新的上一轮 hardReloadKey。与 reloadKey 分开记账，理由见 8b 的 effect
+    const prevHardReloadKeys = useRef<Record<string, number>>({});
     // 正在进行的前进后退（did-navigate 时据此判断要不要新增历史）
     const pendingHistoryNav = useRef<Map<string, 'back' | 'forward'>>(new Map());
     // webview 尚未 ready 时暂存的待导航地址
@@ -1554,6 +1956,34 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
     // 每个标签页上一次广播时的 URL：SPA 的 in-page 导航据此去重，
     // 否则脚本自己点击链接 → 导航 → 再触发脚本，会形成回环
     const lastPageReadyUrl = useRef<Map<string, string>>(new Map());
+    /**
+     * 查找结果的接收器。
+     *
+     * 走 ref 而不是把 setState 直接塞进 attachWebviewListeners：那个回调
+     * 只在 webview 挂载时执行一次并缓存在闭包上，一旦把 state setter 编进
+     * 依赖，`__listenersAttached` 标记会让新的 setter **永远不生效** ——
+     * 症状是查找匹配数一直不更新，而查找条本身看起来完全正常。
+     * ref 转发让闭包永远指向最新实现，且不必重挂监听。
+     */
+    const findReporterRef = useRef<((tabId: string, info: FindInfo) => void) | null>(null);
+    /**
+     * 浏览器动作分发器。
+     *
+     * 订阅只建立一次（见下方 7b），而实现每次渲染刷新一次 —— 因为分发的每个
+     * 分支都要读**最新**的 tabs / activeTabId / 各个回调。用 ref 转发而不是
+     * 把一堆依赖塞进订阅：那样每切一次标签就重订阅一次，两次订阅之间的
+     * 窗口期里按下的键会被丢掉，表现为"偶尔按了没反应"。
+     *
+     * 赋值放在文件后段（所有回调定义完之后）、无依赖的 effect 里。
+     */
+    const browserActionRef = useRef<(command: BrowserCommand) => void>(() => { });
+    /**
+     * 只属于界面层的浏览器动作（聚焦地址栏、让 Agent 分析元素）。
+     *
+     * 这两件事的真值在 BrowsePanel（它持有地址栏 input 的 ref 与 Agent 输入框），
+     * useBrowse 无从下手，所以原样转发出去由面板订阅。
+     */
+    const uiActionListeners = useRef<Set<(command: BrowserCommand) => void>>(new Set());
 
     // 最新值镜像：事件回调里必须读到当前 tabs/activeTabId，而不是绑定时的快照。
     // 走 effect 而非渲染期赋值：并发渲染下被丢弃的那次渲染不应污染 ref。
@@ -1561,11 +1991,6 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
     useEffect(() => { tabsRef.current = tabsState.tabs; }, [tabsState.tabs]);
     const activeTabIdRef = useRef(activeTabId);
     useEffect(() => { activeTabIdRef.current = activeTabId; }, [activeTabId]);
-
-    const isElectron = useMemo(
-        () => !!(getElectronAPI() || getAppWindow().process?.isElectron),
-        []
-    );
 
     /**
      * 1. 地址栏跟随当前标签页 —— 但**不能**在用户正编辑时跟随。
@@ -1606,12 +2031,6 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
                 }
             } else if (webview) {
                 pendingNavigations.current.set(tab.id, tab.url);
-            } else {
-                // iframe 的 history API 受同源策略限制，只能重设 src
-                const iframe = iframeRefs.current.get(tab.id);
-                if (iframe && iframe.src !== tab.url) {
-                    iframe.src = tab.url;
-                }
             }
         });
     }, [tabsState.tabs]);
@@ -1636,11 +2055,6 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
         const finalUrl = parseInputToUrl(url);
         if (finalUrl) tabActions.openInNewTab(finalUrl);
     }, [parseInputToUrl, tabActions]);
-
-    // 4. 页面加载结束
-    const onLoadFinish = useCallback((tabId: string) => {
-        tabActions.setTabLoading(tabId, false);
-    }, [tabActions]);
 
     // 5. 绑定 webview 事件
     const attachWebviewListeners = useCallback((tabId: string, webview: WebviewElement) => {
@@ -1684,12 +2098,78 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
         };
 
         const handleFinish = () => tabActions.setTabLoading(tabId, false);
-        const handleFail = () => tabActions.setTabLoading(tabId, false);
+
+        /**
+         * 导航失败。
+         *
+         * 旧实现是 `() => setTabLoading(tabId, false)` —— 把 errorCode、
+         * errorDescription、validatedURL **全部丢掉**。用户看到的是白屏，
+         * 不知道是断网、DNS 错、证书过期还是站点下线，也无从下手。
+         *
+         * 归类判据在 services/BrowserService（纯 TS，可单测），这里只负责
+         * 把事件字段喂进去 —— 不重复实现一份错误码表，两份必然漂移。
+         */
+        const handleFail = (e: Event) => {
+            tabActions.setTabLoading(tabId, false);
+
+            const detail = e as Event & {
+                errorCode?: number;
+                errorDescription?: string;
+                validatedURL?: string;
+                isMainFrame?: boolean;
+            };
+            // 只对**主框架**的、非 ERR_ABORTED 的失败显示错误页。
+            // 子框架（广告 iframe）挂了不该让整页变错误页；而 -3（ERR_ABORTED）
+            // 是正常导航（重定向、点下载、SPA 换页）都会抛的，不过滤的话
+            // 每次点下载链接都会闪一下错误页。
+            if (!shouldShowNavigationError(detail.errorCode ?? 0, detail.isMainFrame !== false)) return;
+
+            tabActions.setTabError(tabId, classifyNavigationError(
+                detail.errorCode ?? 0,
+                detail.errorDescription || '',
+                detail.validatedURL || '',
+            ));
+        };
+
+        // 渲染进程崩溃（OOM、内核 bug）。与加载失败分开：那个能重试，这个只能重载
+        const handleGone = () => {
+            tabActions.setTabLoading(tabId, false);
+            tabActions.setTabCrashed(tabId, true);
+        };
 
         // 真实标题（旧实现从未监听，标签页因此永远显示域名）
         const handleTitle = (e: Event) => {
             const title = (e as Event & { title?: string }).title;
             if (title) tabActions.updateTabTitle(tabId, title);
+        };
+
+        /**
+         * 真实 favicon。
+         *
+         * 取**最后一个**候选而不是第一个：站点的 favicons 数组常常是
+         * [高清 png, svg, ico] 或反过来，而 Chromium 把"最终选中的那个"
+         * 放在末尾。取第一个实测会拿到 404 的旧路径。
+         *
+         * 拿不到就留空 —— 界面回落到 hostname 取色块（SiteTile），
+         * 那是"没有图标时的占位"，不是失败。
+         */
+        const handleFavicon = (e: Event) => {
+            const list = (e as Event & { favicons?: string[] }).favicons;
+            if (!Array.isArray(list) || list.length === 0) return;
+            tabActions.setTabFavicon(tabId, String(list[list.length - 1] || ''));
+        };
+
+        // 页面内查找结果。webview 的 findInPage **没有同步返回值**，
+        // 只能靠这个事件拿匹配数 —— 漏了它，查找条永远显示"0/0"
+        const handleFoundInPage = (e: Event) => {
+            const result = (e as Event & {
+                result?: { matches?: number; activeMatchOrdinal?: number; finalUpdate?: boolean };
+            }).result;
+            if (!result) return;
+            findReporterRef.current?.(tabId, {
+                matches: Number(result.matches) || 0,
+                active: Number(result.activeMatchOrdinal) || 0,
+            });
         };
 
         const syncFromWebview = (url: string) => {
@@ -1736,10 +2216,17 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
         webview.addEventListener('did-finish-load', handleFinish);
         webview.addEventListener('did-fail-load', handleFail);
         webview.addEventListener('page-title-updated', handleTitle);
+        webview.addEventListener('page-favicon-updated', handleFavicon);
+        webview.addEventListener('found-in-page', handleFoundInPage);
+        webview.addEventListener('render-process-gone', handleGone);
         webview.addEventListener('did-navigate', handleNavigateInternal);
         webview.addEventListener('did-navigate-in-page', handleInPageNavigate);
         // 注意：不再监听 'new-window'。Electron 44 的 <webview> 已移除该事件，
         // 新窗口统一由主进程 setWindowOpenHandler → navigate-to-url IPC 处理。
+        //
+        // 也不监听 'audio-state-changed'：<webview> **元素上没有这个事件**
+        // （元素只有 media-started-playing / media-paused，而那两个判不出
+        // "静音的视频"与"有声的视频"）。发声状态由主进程经 browser-command 推。
 
         (webview as any).__listenersAttached = true;
     }, [tabActions]);
@@ -1748,15 +2235,13 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
     const registerWebview = useCallback((id: string, el: WebviewElement | null) => {
         if (el) {
             webviewRefs.current.set(id, el);
-            if (isElectron) {
-                attachWebviewListeners(id, el);
-                // 挂载时可能已经 ready（事件早于监听绑定），补一次探测
-                window.setTimeout(() => {
-                    try {
-                        if (el.getURL?.()) webviewReadyRefs.current.add(id);
-                    } catch { /* webview 已卸载 */ }
-                }, 100);
-            }
+            attachWebviewListeners(id, el);
+            // 挂载时可能已经 ready（事件早于监听绑定），补一次探测
+            window.setTimeout(() => {
+                try {
+                    if (el.getURL?.()) webviewReadyRefs.current.add(id);
+                } catch { /* webview 已卸载 */ }
+            }, 100);
             return;
         }
         webviewRefs.current.delete(id);
@@ -1766,12 +2251,8 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
         pendingHistoryNav.current.delete(id);
         lastPageReadyUrl.current.delete(id);
         delete prevReloadKeys.current[id];
-    }, [isElectron, attachWebviewListeners]);
-
-    const registerIframe = useCallback((id: string, el: HTMLIFrameElement | null) => {
-        if (el) iframeRefs.current.set(id, el);
-        else iframeRefs.current.delete(id);
-    }, []);
+        delete prevHardReloadKeys.current[id];
+    }, [attachWebviewListeners]);
 
     /**
      * webview 的 ref 回调必须按 tab 缓存成**稳定身份**。
@@ -1822,6 +2303,28 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
         return typeof unsubscribe === 'function' ? unsubscribe : undefined;
     }, []);
 
+    /**
+     * 7b. 主进程下发的浏览器动作（快捷键、右键菜单、发声状态）。
+     *
+     * **方向是反的**：键盘事件只有主进程收得到（webview 是跨进程 OOPIF，
+     * 键盘/滚轮不冒泡到宿主页面的 window），所以由主进程判出"这是哪个浏览器
+     * 动作"再发过来；渲染层在这里执行 —— 因为标签页状态与 webview 引用
+     * 都只在这里。
+     *
+     * 订阅**只建立一次**（依赖为空），而分发实现每渲染刷新一次
+     * （browserActionRef 在文件下方无依赖的 effect 里重新赋值）。
+     * 若把 tabs 放进订阅依赖，每切一次标签就重订阅一次，两次订阅之间的
+     * 窗口期里按下的键会被丢掉 —— 表现为"偶尔按了没反应"。
+     */
+    useEffect(() => {
+        const electronAPI = getElectronAPI();
+        if (!electronAPI?.browser?.onCommand) return;
+        const unsubscribe = electronAPI.browser.onCommand((command: BrowserCommand) => {
+            if (command && command.action) browserActionRef.current(command);
+        });
+        return typeof unsubscribe === 'function' ? unsubscribe : undefined;
+    }, []);
+
     // 8. 刷新请求
     useEffect(() => {
         tabsState.tabs.forEach((tab) => {
@@ -1832,11 +2335,27 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
             const webview = webviewRefs.current.get(tab.id);
             if (webview) {
                 try { webview.reload(); } catch (e) { console.error(e); }
-                return;
             }
-            const iframe = iframeRefs.current.get(tab.id);
-            if (iframe?.contentWindow) {
-                try { iframe.contentWindow.location.reload(); } catch (e) { console.error(e); }
+        });
+    }, [tabsState.tabs]);
+
+    /**
+     * 8b. 强制刷新（Ctrl+Shift+R / Ctrl+F5）。
+     *
+     * 单独一个 effect + 单独的 key，而不是在 8 里读一个布尔标志：
+     * 标志与 key 在同一次 setState 里更新时，"先看标志再看 key"这个顺序
+     * 依赖 React 的批处理细节，而**两个 key 各自独立递增不依赖任何顺序**。
+     * 走错那一个的症状是"强刷有时有效有时没有"，很难复现。
+     */
+    useEffect(() => {
+        tabsState.tabs.forEach((tab) => {
+            const prev = prevHardReloadKeys.current[tab.id] || 0;
+            if (tab.hardReloadKey <= prev) return;
+            prevHardReloadKeys.current[tab.id] = tab.hardReloadKey;
+
+            const webview = webviewRefs.current.get(tab.id);
+            if (webview) {
+                try { webview.reloadIgnoringCache(); } catch (e) { console.error(e); }
             }
         });
     }, [tabsState.tabs]);
@@ -1867,11 +2386,146 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
 
     const isCurrentPageBookmarked = isBookmarked(activeTab.url);
 
+    /* ------------------------------ 页面能力 ------------------------------ */
+
+    /**
+     * 页面内查找。
+     *
+     * 查找词与结果都只跟**当前标签页**有关，但状态放在 interactions 而不是
+     * 每个 Tab 上：Tab 是要落盘重建的（tabs 快照只存 url/title），把查找词
+     * 放进去等于把一次性的界面状态写进持久化结构。
+     *
+     * 关闭时**必须**调 stopFindInPage('clearSelection')：不调的话页面上会
+     * 一直留着上一次的高亮，用户以为还在查找中。
+     */
+    const [findQuery, setFindQueryState] = useState('');
+    const [findInfo, setFindInfo] = useState<FindInfo>({ matches: 0, active: 0 });
+    const findQueryRef = useRef('');
+
+    useEffect(() => {
+        findReporterRef.current = (tabId, info) => {
+            // 只接收**当前标签页**的结果：后台标签页的查找事件也会推过来，
+            // 不筛的话切页后查找条显示的是另一个页面的匹配数
+            if (tabId !== activeTabIdRef.current) return;
+            setFindInfo(info);
+        };
+        return () => { findReporterRef.current = null; };
+    }, []);
+
+    const findInPage = useCallback((tabId: string, text: string, options?: { forward?: boolean; findNext?: boolean }) => {
+        const webview = webviewRefs.current.get(tabId);
+        if (!webview || !webviewReadyRefs.current.has(tabId)) return;
+        try {
+            webview.findInPage(text, {
+                forward: options?.forward !== false,
+                // findNext=false 表示"开一次新的查找会话"（重置当前命中位置）。
+                // 改词时必须为 false，否则会在旧会话里找新词 —— 命中数正确但
+                // "第几个"会从上次的位置继续，表现为高亮停在半中间。
+                findNext: options?.findNext !== false,
+                matchCase: false,
+            });
+        } catch (e) {
+            console.error('findInPage 失败:', e);
+        }
+    }, []);
+
+    const stopFindInPage = useCallback((tabId: string, keepSelection: boolean = false) => {
+        const webview = webviewRefs.current.get(tabId);
+        if (!webview) return;
+        try {
+            webview.stopFindInPage(keepSelection ? 'keepSelection' : 'clearSelection');
+        } catch (e) {
+            console.error('stopFindInPage 失败:', e);
+        }
+    }, []);
+
+    const setFindQuery = useCallback((text: string) => {
+        const tabId = activeTabIdRef.current;
+        const next = String(text || '');
+        const prev = findQueryRef.current;
+        findQueryRef.current = next;
+        setFindQueryState(next);
+
+        if (!next) {
+            setFindInfo({ matches: 0, active: 0 });
+            if (prev) stopFindInPage(tabId);
+            return;
+        }
+        // 词变了就是新会话（findNext:false），否则是同一会话里跳下一个
+        findInPage(tabId, next, { findNext: prev === next });
+    }, [findInPage, stopFindInPage]);
+
+    /** 切标签页时把查找条收掉：查找是针对具体页面的，跟着切会找错页 */
+    useEffect(() => {
+        if (!findQueryRef.current) return;
+        findQueryRef.current = '';
+        setFindQueryState('');
+        setFindInfo({ matches: 0, active: 0 });
+    }, [activeTabId]);
+
+    const stopLoading = useCallback((tabId: string) => {
+        const webview = webviewRefs.current.get(tabId);
+        if (webview) {
+            try { webview.stop(); } catch (e) { console.error(e); }
+        }
+        // 无论 webview 在不在，都要把加载态落下来 —— 否则按钮会永远转下去
+        tabActions.setTabLoading(tabId, false);
+    }, [tabActions]);
+
+    /**
+     * 缩放。
+     *
+     * 必须**同时**改 webview 与 Tab 状态：只改 webview 的话地址栏右侧的
+     * 百分比不会变（用户以为没生效，连按好几次直接顶到上限）。
+     *
+     * 用 setZoomFactor 而不是 setZoomLevel：level 是 Chromium 的整数档，
+     * 而这里已经把 level 换算成了百分比展示，用 factor 能保证"显示的百分比"
+     * 与实际缩放**逐位一致**，不会出现界面说 120% 而实际是 1.2^1=1.2 之外的值。
+     */
+    const zoomBy = useCallback((tabId: string, delta: number) => {
+        const tab = tabsRef.current.find((t) => t.id === tabId);
+        const next = nextZoomLevel(tab ? tab.zoomLevel : 0, delta);
+        const webview = webviewRefs.current.get(tabId);
+        if (webview) {
+            try { webview.setZoomFactor(zoomLevelToFactor(next)); } catch (e) { console.error(e); }
+        }
+        tabActions.setTabZoom(tabId, next);
+    }, [tabActions]);
+
+    const toggleMute = useCallback((tabId: string) => {
+        const tab = tabsRef.current.find((t) => t.id === tabId);
+        const next = !(tab ? tab.muted : false);
+        const webview = webviewRefs.current.get(tabId);
+        if (webview) {
+            try { webview.setAudioMuted(next); } catch (e) { console.error(e); }
+        }
+        tabActions.setTabMuted(tabId, next);
+    }, [tabActions]);
+
+    /**
+     * 复活崩溃的页面。
+     *
+     * 走 reload 而不是 loadURL(tab.url)：崩溃后 webContents 还活着，
+     * reload 会原地重来；loadURL 会**新增一条历史**，用户按后退会回到
+     * 崩溃前那个页面再崩一次。
+     */
+    const reviveTab = useCallback((tabId: string) => {
+        tabActions.setTabCrashed(tabId, false);
+        tabActions.setTabError(tabId, null);
+        const webview = webviewRefs.current.get(tabId);
+        if (webview) {
+            try { webview.reload(); } catch (e) { console.error(e); }
+        }
+        tabActions.setTabLoading(tabId, true);
+    }, [tabActions]);
+
     // 供 Tamper 等外部调用
     const getActiveWebview = useCallback(
         () => webviewRefs.current.get(activeTabIdRef.current) || null,
         []
     );
+
+    const getWebview = useCallback((tabId: string) => webviewRefs.current.get(tabId) || null, []);
 
     /** 订阅页面就绪；退订函数由调用方在 effect 清理里调用 */
     const onPageReady = useCallback((cb: (tabId: string, webview: WebviewElement) => void) => {
@@ -1886,24 +2540,187 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
         });
     }, []);
 
+    /**
+     * 11. 浏览器动作分发。
+     *
+     * 放在所有回调定义**之后**：它要引用 stopLoading / zoomBy / findInPage 等，
+     * 而这些是 const 声明（有 TDZ），写在前面会在首次渲染时抛
+     * "Cannot access before initialization"。
+     *
+     * 依赖为空 + 每次渲染重新赋值：见 browserActionRef 的注释。
+     */
+    useEffect(() => {
+        browserActionRef.current = (command: BrowserCommand) => {
+            const activeId = activeTabIdRef.current;
+            const tabs = tabsRef.current;
+            const arg = command.arg;
+
+            // 只属于界面层的动作直接转发给面板（它持有地址栏 input 与 Agent 输入框）
+            if (command.action === 'focusAddressBar' || command.action === 'analyzeElement'
+                || command.action === 'searchSelection') {
+                uiActionListeners.current.forEach((cb) => {
+                    try { cb(command); } catch (e) { console.error('ui action listener failed:', e); }
+                });
+                return;
+            }
+
+            switch (command.action) {
+                case 'newTab':
+                    tabActions.createTab();
+                    break;
+                case 'closeTab':
+                    tabActions.closeTab(activeId);
+                    break;
+                case 'reopenTab': {
+                    // 没东西可恢复时**什么都不做**，不新建空白页 ——
+                    // 用户按 Ctrl+Shift+T 是想找回刚关掉的页面，
+                    // 给他一个空白页等于把"恢复"这个动作的意义抹掉。
+                    // 栈空是正常的（刚启动、或关的都是空白页），不报错。
+                    tabActions.reopenClosedTab();
+                    break;
+                }
+                case 'nextTab': case 'prevTab': {
+                    if (tabs.length < 2) break;
+                    const idx = tabs.findIndex((t) => t.id === activeId);
+                    const step = command.action === 'nextTab' ? 1 : -1;
+                    // 环绕：在最后一个上按 Ctrl+Tab 回到第一个（Chrome 的行为）
+                    const next = (idx + step + tabs.length) % tabs.length;
+                    tabActions.switchTab(tabs[next].id);
+                    break;
+                }
+                case 'selectTabIndex': {
+                    const index = Number(arg);
+                    if (Number.isInteger(index) && index >= 0 && index < tabs.length) {
+                        tabActions.switchTab(tabs[index].id);
+                    }
+                    break;
+                }
+                case 'lastTab':
+                    if (tabs.length > 0) tabActions.switchTab(tabs[tabs.length - 1].id);
+                    break;
+                case 'reload':
+                    tabActions.reload(activeId);
+                    break;
+                case 'hardReload':
+                    tabActions.hardReload(activeId);
+                    break;
+                case 'stop':
+                    stopLoading(activeId);
+                    break;
+                case 'back':
+                    tabActions.goBack(activeId);
+                    break;
+                case 'forward':
+                    tabActions.goForward(activeId);
+                    break;
+                case 'home':
+                    tabActions.goHome(activeId);
+                    break;
+                case 'toggleBookmark': {
+                    const tab = tabs.find((t) => t.id === activeId);
+                    if (tab && tab.url) bookmarks.toggleBookmark(tab.url, tab.title);
+                    break;
+                }
+                case 'zoomIn':
+                    zoomBy(activeId, 1);
+                    break;
+                case 'zoomOut':
+                    zoomBy(activeId, -1);
+                    break;
+                case 'zoomReset':
+                    zoomBy(activeId, 0);
+                    break;
+                case 'find':
+                    setFindQuery('');
+                    break;
+                case 'findNext':
+                    if (findQueryRef.current) {
+                        findInPage(activeId, findQueryRef.current, { findNext: true, forward: true });
+                    }
+                    break;
+                case 'findPrev':
+                    if (findQueryRef.current) {
+                        findInPage(activeId, findQueryRef.current, { findNext: true, forward: false });
+                    }
+                    break;
+                case 'escape':
+                    // Esc 只通知不拦截（页面自己也要用），所以这里必须判"我现在
+                    // 有没有东西可以关" —— 没有就什么都不做，把按键让给页面
+                    if (findQueryRef.current) setFindQuery('');
+                    break;
+                case 'toggleDevTools':
+                    // F12 / Ctrl+Shift+I 已由主进程直接 toggleDevTools，不会到这里。
+                    // 保留分支是为了让这张表与主进程的 BROWSER_ACTIONS 逐字一致 ——
+                    // 少一个分支，静态断言就会报"渲染层不认这个动作"。
+                    break;
+                case 'openInBackgroundTab':
+                    // 后台打开：建标签但不切过去。createTab 会把新页设为活动页，
+                    // 所以建完再把活动页切回来
+                    if (arg?.url) {
+                        tabActions.createTab(String(arg.url));
+                        tabActions.switchTab(activeId);
+                    }
+                    break;
+                case 'audibleChanged': {
+                    // 按 webContentsId 找标签页：发声的是**那个页面**，
+                    // 不一定是当前页（后台标签页开始放音频时当前页根本没变）
+                    const target = findTabByWebContentsId(command.webContentsId);
+                    if (target) tabActions.setTabAudible(target, Boolean(arg?.audible));
+                    break;
+                }
+                default:
+                    break;
+            }
+        };
+    });
+
+    /** 按 webContentsId 反查标签页 id。找不到返回空串（webview 可能已经关掉） */
+    const findTabByWebContentsId = useCallback((webContentsId?: number): string => {
+        if (!webContentsId) return '';
+        let found = '';
+        webviewRefs.current.forEach((webview, tabId) => {
+            if (found) return;
+            try {
+                if (webview.getWebContentsId?.() === webContentsId) found = tabId;
+            } catch { /* webview 已卸载 */ }
+        });
+        return found;
+    }, []);
+
+    /** 订阅界面层动作（聚焦地址栏 / 让 Agent 分析元素）。返回退订函数 */
+    const onUiAction = useCallback((cb: (command: BrowserCommand) => void) => {
+        uiActionListeners.current.add(cb);
+        return () => { uiActionListeners.current.delete(cb); };
+    }, []);
+
     return useMemo(() => ({
         inputUrl,
         setInputUrl,
         setInputFocused,
-        isElectron,
         isCurrentPageBookmarked,
         handleNavigate,
         handleOpenInNewTab,
-        onLoadFinish,
         getWebviewRef,
-        registerIframe,
         getActiveWebview,
+        getWebview,
         onPageReady,
         forEachWebview,
+        stopLoading,
+        findInPage,
+        stopFindInPage,
+        zoomBy,
+        toggleMute,
+        reviveTab,
+        findInfo,
+        findQuery,
+        setFindQuery,
+        onUiAction,
     }), [
-        inputUrl, isElectron, isCurrentPageBookmarked, handleNavigate, handleOpenInNewTab,
-        onLoadFinish, getWebviewRef, registerIframe, getActiveWebview,
+        inputUrl, isCurrentPageBookmarked, handleNavigate, handleOpenInNewTab,
+        getWebviewRef, getActiveWebview, getWebview,
         onPageReady, forEachWebview, setInputFocused,
+        stopLoading, findInPage, stopFindInPage, zoomBy, toggleMute, reviveTab,
+        findInfo, findQuery, setFindQuery, onUiAction,
     ]);
 };
 
@@ -1940,7 +2757,7 @@ const useSniffer = (deps: SniffDeps): SnifferState => {
      * scan 与 analyzeWithAi 是两个独立操作、共用一个 isAnalyzing：
      * 布尔量下先结束的那个会把还在跑的那个的加载态一起关掉。
      * 实测路径：在 A 页点「AI 深度嗅探」（要等 AI 接口，很慢）→ 随即导航到 B 页
-     * （App 的 effect 连扫三轮）→ scan(B) 很快结束、置 false →
+     * （此时若用户在 B 页又点了"嗅探"）→ scan(B) 很快结束、置 false →
      * 此刻界面显示"未在分析"、AI 按钮重新可点，而 AI 请求还在飞。
      * 用户以为没反应，再点一次，于是并发两轮。
      */
@@ -1998,6 +2815,32 @@ const useSniffer = (deps: SniffDeps): SnifferState => {
     const downloadingUrlRef = useRef('');
     useEffect(() => { downloadingUrlRef.current = downloadingUrl; }, [downloadingUrl]);
 
+    /**
+     * "持续嗅探"总开关，默认关闭。打开 = 切页自动扫描 + 网络层持续推送，
+     * 关闭 = 两者全停（手动"嗅探"按钮的一次性扫描不受影响）。
+     * 落盘持久化，重启后保持用户上次的选择。
+     */
+    const [sniffEnabled, setSniffEnabledState] = useState<boolean>(() =>
+        loadJSON<boolean>('sniff-enabled', false) === true);
+    useEffect(() => { saveJSON('sniff-enabled', sniffEnabled); }, [sniffEnabled]);
+    /** 常驻订阅的回调闭包的是挂载时的快照，开关状态必须靠 ref 读最新值 */
+    const sniffEnabledRef = useRef(sniffEnabled);
+    useEffect(() => { sniffEnabledRef.current = sniffEnabled; }, [sniffEnabled]);
+    /** 把开关同步给主进程。桥缺失（preload 未加载）时静默跳过：页内扫描照常工作，只是没有网络层增量 */
+    const pushSnifferEnabled = useCallback((enabled: boolean) => {
+        try {
+            void getElectronAPI()?.setSnifferEnabled?.(enabled)?.catch(() => { /* 开关同步失败不影响界面状态 */ });
+        } catch { /* 防御性兜底 */ }
+    }, []);
+    const setSniffEnabled = useCallback((enabled: boolean) => {
+        setSniffEnabledState(enabled);
+        pushSnifferEnabled(enabled);
+    }, [pushSnifferEnabled]);
+    // 启动时把开关状态同步给主进程（主进程侧默认关闭，不同步会两边不一致）。
+    // 推当前值即可，幂等；只在挂载时做一次，之后的变化走 setSniffEnabled。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    useEffect(() => { pushSnifferEnabled(sniffEnabledRef.current); }, []);
+
     const addLinks = useCallback((newLinks: FoundLink[]) => {
         const usable = (newLinks || []).filter(isSniffable);
         if (usable.length === 0) return;
@@ -2041,11 +2884,13 @@ const useSniffer = (deps: SniffDeps): SnifferState => {
         });
     }, []);
 
-    // 主进程网络层推送
+    // 主进程网络层推送（常驻订阅，只挂一次）
     useEffect(() => {
         const electronAPI = getElectronAPI();
         if (!electronAPI?.onSniffedMedia) return;
         return electronAPI.onSniffedMedia((media) => {
+            // "持续嗅探"关闭时直接丢弃：网络层的推送不进列表
+            if (!sniffEnabledRef.current) return;
             addLinks([{
                 ...media,
                 pageUrl: media.pageUrl || activeTabRef.current?.url,
@@ -2077,7 +2922,7 @@ const useSniffer = (deps: SniffDeps): SnifferState => {
         if (!electronAPI?.getDownloadCapabilities) {
             setDownloadCapabilities({
                 ffmpegAvailable: false,
-                ffmpegMessage: '当前为浏览器环境，仅支持普通文件下载。',
+                ffmpegMessage: '读取不到下载能力桥（preload 未加载），请重启应用。',
             });
             return;
         }
@@ -2171,10 +3016,9 @@ const useSniffer = (deps: SniffDeps): SnifferState => {
     /**
      * 扫描轮次序号。
      *
-     * App 在 URL 变化时会连扫三次（立即 + 1.5s + 3.5s，等 SPA 把资源渲染出来），
-     * 三次共用同一个 runId。用户快速切页时旧页面的迟到轮次必须作废，
-     * 否则会把上一页的资源写进当前列表、并抢走新轮次的加载态。
-     * 不传 runId（如悬浮球的"重新扫描"）视为始终有效。
+     * 用户连点"嗅探"时多轮 scan 会并发：后一轮必须作废前一轮的迟到结果，
+     * 否则旧轮次把东西写进列表、并抢走新轮次的加载态。
+     * 不传 runId（如悬浮球的"嗅探"按钮）视为始终有效。
      */
     const latestRunRef = useRef<number | null>(null);
     const isCurrentRun = useCallback(
@@ -2182,6 +3026,11 @@ const useSniffer = (deps: SniffDeps): SnifferState => {
         []
     );
 
+    /**
+     * 手动嗅探的入口（悬浮球"嗅探"按钮 / 空态"嗅探当前页"）。
+     * 纯一次性扫描，不碰"持续嗅探"开关：开关关闭时点了也只扫这一次，
+     * 网络层不会因此开始推送 —— 要持续捕获请打开开关。
+     */
     const scan = useCallback(async (targetUrl?: string, runId?: number) => {
         const url = targetUrl || activeTabRef.current?.url;
         if (!url) return;
@@ -2236,7 +3085,9 @@ const useSniffer = (deps: SniffDeps): SnifferState => {
                 }
 
                 if (isCurrentRun(runId)) {
-                    setStatusMessage('嗅探扫描完成，网络监听持续捕捉中。');
+                    setStatusMessage(sniffEnabledRef.current
+                        ? '嗅探扫描完成，网络监听持续捕捉中。'
+                        : '嗅探扫描完成（持续嗅探已关闭，之后的新请求不再自动捕获）。');
                 }
             } catch (err) {
                 if (isCurrentRun(runId)) {
@@ -2418,8 +3269,8 @@ const useSniffer = (deps: SniffDeps): SnifferState => {
     }, [filterType, foundLinks, scopeFilter, activeTabUrl]);
 
     const actions = useMemo(() => ({
-        scan, analyzeWithAi, setFilterType, setScopeFilter, clear, clearCurrentPage, download, cancelDownload,
-    }), [scan, analyzeWithAi, clear, clearCurrentPage, download, cancelDownload]);
+        scan, setSniffEnabled, analyzeWithAi, setFilterType, setScopeFilter, clear, clearCurrentPage, download, cancelDownload,
+    }), [scan, setSniffEnabled, analyzeWithAi, clear, clearCurrentPage, download, cancelDownload]);
 
     return useMemo(() => ({
         foundLinks,
@@ -2428,6 +3279,7 @@ const useSniffer = (deps: SniffDeps): SnifferState => {
         statusMessage,
         filterType,
         scopeFilter,
+        sniffEnabled,
         error,
         downloadingUrl,
         downloadProgress,
@@ -2435,7 +3287,7 @@ const useSniffer = (deps: SniffDeps): SnifferState => {
         actions,
     }), [
         foundLinks, filteredLinks, isAnalyzing, statusMessage, filterType,
-        scopeFilter, error, downloadingUrl, downloadProgress, downloadCapabilities, actions,
+        scopeFilter, sniffEnabled, error, downloadingUrl, downloadProgress, downloadCapabilities, actions,
     ]);
 };
 
@@ -2739,6 +3591,86 @@ const useTamper = (deps: TamperDeps): TamperState => {
 };
 
 /* -------------------------------------------------------------------------- */
+/*                             内部：网页下载                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 网页自身触发的下载。
+ *
+ * **状态的真值在主进程**：DownloadItem 只在那边存在，暂停/继续能不能成功
+ * 还取决于服务器是否支持 Range 请求。所以这里只做两件事：
+ *
+ *   1. 订阅主进程推来的快照，按 id 合并进列表；
+ *   2. 把用户操作转成 IPC 发回去，**不做乐观更新** —— 本地先改成"已暂停"
+ *      而实际还在下，是比不响应更糟的界面。
+ *
+ * 合并按 id 而不是整体替换：主进程那边有记录上限（会淘汰旧条目），
+ * 整体替换会让被淘汰的记录在界面上凭空消失，而用户可能正在看它。
+ */
+const useDownloads = (): DownloadsState => {
+    const [items, setItems] = useState<BrowserDownload[]>([]);
+
+    const upsert = useCallback((incoming: BrowserDownload) => {
+        if (!incoming || !incoming.id) return;
+        setItems((prev) => {
+            const idx = prev.findIndex((d) => d.id === incoming.id);
+            if (idx < 0) return [incoming, ...prev];
+            const next = prev.slice();
+            next[idx] = incoming;
+            return next;
+        });
+    }, []);
+
+    useEffect(() => {
+        const electronAPI = getElectronAPI();
+        const bridge = electronAPI?.browser;
+        if (!bridge) return;
+
+        const unsubscribe = bridge.onDownload(upsert);
+        // 首次拉一次历史：订阅只覆盖"订阅之后"的事件，面板打开时
+        // 之前已经下完的东西不补一次就永远看不到
+        void bridge.downloads().then((list) => {
+            if (Array.isArray(list)) setItems(list);
+        }).catch(() => { /* 主进程还没就绪，忽略 */ });
+
+        return typeof unsubscribe === 'function' ? unsubscribe : undefined;
+    }, [upsert]);
+
+    const run = useCallback(async (id: string, action: BrowserDownloadAction) => {
+        const bridge = getElectronAPI()?.browser;
+        if (!bridge) return;
+        try {
+            const result = await bridge.downloadAction(id, action);
+            // remove 是唯一由渲染层自己收敛的操作：主进程删完不会再推快照
+            if (action === 'remove' && result?.success) {
+                setItems((prev) => prev.filter((d) => d.id !== id));
+            }
+        } catch (e) {
+            console.error('下载操作失败:', action, e);
+        }
+    }, []);
+
+    const actions = useMemo(() => ({
+        pause: (id: string) => run(id, 'pause'),
+        resume: (id: string) => run(id, 'resume'),
+        cancel: (id: string) => run(id, 'cancel'),
+        reveal: (id: string) => run(id, 'reveal'),
+        open: (id: string) => run(id, 'open'),
+        remove: (id: string) => run(id, 'remove'),
+        clearFinished: () => {
+            setItems((prev) => prev.filter((d) => d.state === 'progressing'));
+        },
+    }), [run]);
+
+    const activeCount = useMemo(
+        () => items.filter((d) => d.state === 'progressing').length,
+        [items]
+    );
+
+    return useMemo(() => ({ items, activeCount, actions }), [items, activeCount, actions]);
+};
+
+/* -------------------------------------------------------------------------- */
 /*                                  协调器                                      */
 /* -------------------------------------------------------------------------- */
 
@@ -2768,8 +3700,10 @@ export const useBrowse = (): BrowseState => {
         getActiveWebview: interactions.getActiveWebview,
     });
 
+    const downloads = useDownloads();
+
     return useMemo(
-        () => ({ tabs, bookmarks, search, sniffer, interactions, tamper }),
-        [tabs, bookmarks, search, sniffer, interactions, tamper]
+        () => ({ tabs, bookmarks, search, sniffer, interactions, tamper, downloads }),
+        [tabs, bookmarks, search, sniffer, interactions, tamper, downloads]
     );
 };

@@ -160,6 +160,7 @@ const buildAgentHarness = (options = {}) => {
     };
 
     const UTILS = require('./build/utils/utils.js');
+    const KBSVC = require('./build/services/KbService/index.js');
     const fakeWindow = { setTimeout: () => 1, clearTimeout: () => {} };
 
     // 去掉 import（类型导入 strip 后已消失）与 export；
@@ -169,13 +170,16 @@ const buildAgentHarness = (options = {}) => {
         'const { chat } = AiService;',
         'const { buildCookieKeys, collectDroppedRules, decodeJwt, findCookieByKey, generateId, pickJwtCandidates, rewriteJwtPayload } = utils;',
         'const { loadJSON, saveJSON } = persist;',
+        // useAgent 从 KbService 具名导入五个符号，其中 KB_SEARCH_LIMIT 还要插值进
+        // 提示词模板 —— 漏注入会在求值时直接抛 ReferenceError，而不是某条断言失败。
+        'const { buildKbIndex, normalizeRel, readKbArticle, searchKb, KB_SEARCH_LIMIT } = KbService;',
     ].join('\n') + '\n'
         + strip(SRC)
             .replace(/^import[\s\S]*?from\s+'[^']*';\s*$/gm, '')
             .replace(/^export /gm, '');
 
     const makeAgent = new Function(
-        'React', 'AiService', 'utils', 'persist', 'window', 'TextEncoder',
+        'React', 'AiService', 'utils', 'persist', 'KbService', 'window', 'TextEncoder',
         `${body}\nreturn useAgent;`,
     );
 
@@ -245,7 +249,7 @@ const buildAgentHarness = (options = {}) => {
         },
     });
 
-    const factory = makeAgent(ReactProxy, { chat }, UTILS, persist, fakeWindow, TextEncoder);
+    const factory = makeAgent(ReactProxy, { chat }, UTILS, persist, KBSVC, fakeWindow, TextEncoder);
 
     const deps = {
         getActiveWebview: () => null,
@@ -1812,6 +1816,79 @@ const run = async () => {
         // 回退的用途是"改一改重发"，提问必须填回输入框
         assert(/setInput\(\(prev\) => \(prev\.trim\(\) \? prev : prompt\)\)/.test(src),
             '回退应把提问填回输入框，且不覆盖用户已写的内容');
+    });
+
+    /* --------------------------- 提示词：工作方式 --------------------------- */
+
+    /**
+     * 从 open-reverselab 的 AGENTS.md 汲取的那几条方法论。
+     *
+     * 这些是**行为约束**，写漏了不会有任何编译或运行时错误 —— 只会让模型
+     * 退回"给概念解释、靠猜下结论、含糊收尾"的默认姿态。所以在这里钉住。
+     */
+    await check('提示词含工作方式三条（假设-验证 / 具体 / 证据）', async () => {
+        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        const at = src.indexOf('## 工作方式');
+        assert(at > 0, '应有「工作方式」一节');
+        const section = src.slice(at, src.indexOf('## 完成标准', at));
+        assert(section.includes('假设'), '要立假设再验证 —— 这条是 AGENTS.md 最核心的思路');
+        assert(/不要靠猜下结论|不要.*猜.*结论/.test(section), '要明说不许靠猜下结论');
+        assert(/选择器|字段名|接口路径|payload/.test(section), '要落到具体，别停在概念');
+        assert(section.includes('证据'), '结论要有证据来源');
+    });
+
+    await check('提示词含完成标准三条', async () => {
+        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        const at = src.indexOf('## 完成标准');
+        assert(at > 0, '应有「完成标准」一节');
+        const section = src.slice(at, src.indexOf('`;', at));
+        assert(section.includes('取到了数据'), '完成标准之一：取到数据');
+        assert(section.includes('验证了判断'), '完成标准之一：验证判断');
+        assert(section.includes('改动了页面'), '完成标准之一：改动页面');
+        assert(/怎么确认它生效/.test(section),
+            '改动类必须要求自证生效 —— 否则"我改了"和"确实生效"分不开');
+        assert(/试过什么|卡在哪/.test(section), '做不到时要给可交接的状态，不许含糊收尾');
+    });
+
+    /**
+     * 提示词里引用的 KB 入口必须真的能搜到。
+     *
+     * 提示词教模型「不确定时先 search "攻击网"」，而攻击网那 4 篇文章是唯一
+     * 没有 front-matter 的（靠 H1 兜底取标题）。哪天索引规则一改把它们漏掉，
+     * 提示词就变成在教模型找一个不存在的东西 —— 而这条不会有任何报错。
+     */
+    await check('提示词推荐的「攻击网」入口确实可搜到', async () => {
+        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        assert(src.includes('search "攻击网"'), '提示词应给出攻击网入口');
+
+        const KB = require('./build/services/KbService/index.js');
+        const kbService = require(path.join(ROOT, 'electron', 'kbService.js'));
+        const root = kbService.resolveKbRoot('');
+        if (!root) return; // 没有 KB 目录时跳过（CI / fresh clone）
+
+        const payload = kbService.loadKbSource('');
+        const entries = KB.buildKbIndex(payload.files, payload.boardIndexes);
+        const hits = KB.searchKb(entries, '攻击网');
+        assert(hits.length > 0, '「攻击网」必须能搜到，否则提示词在教模型找一个不存在的东西');
+        assert(hits.some((h) => h.path.includes('attack-network')),
+            `应命中 attack-network.md，实际 ${hits.map((h) => h.path).join(', ')}`);
+    });
+
+    /**
+     * 提示词里的数字必须来自真值，不能手抄。
+     *
+     * 踩过：`kb search 回最多 5 条` 与 `正文 ≤24KB` 都是手写的，
+     * 而真值在 KbService 的 KB_SEARCH_LIMIT / KB_READ_LIMIT_BYTES 里 ——
+     * 改了常量提示词不跟着变，模型就按错的上限规划步骤。
+     */
+    await check('提示词用插值引用 KB 常量，不手抄数字', async () => {
+        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        assert(/\$\{KB_SEARCH_LIMIT\}/.test(src),
+            'search 条数上限应插值 KB_SEARCH_LIMIT，而不是写死');
+        assert(!/search 回最多 \d+ 条/.test(src), '不得把条数上限手抄进提示词');
+        assert(!/正文 ≤\d+KB/.test(src), '不得把正文上限手抄进提示词');
+        // 篇数同理：它会随 KB 升级变，写死必然过期
+        assert(!/知识库（\d+ 篇/.test(src), '不得把文章篇数写死 —— KB 升级后必然对不上');
     });
 
     console.log(`Agent 工具派发：通过 ${pass} 项，失败 ${fails.length} 项`);

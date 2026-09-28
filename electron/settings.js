@@ -33,6 +33,14 @@ const DEFAULT_AI = {
 const DEFAULT_SETTINGS = {
     proxyPort: '',
     ai: { ...DEFAULT_AI },
+    /**
+     * 知识库根目录（open-reverselab 仓库下的 kb 目录）。
+     *
+     * 留空 = 走默认查找（项目根下以 open-reverselab 开头的同级目录，
+     * 见 kbService.kbCandidates）。填绝对路径则优先用它 ——
+     * 打包版不把 KB 打进 asar，那时只能靠这一项。
+     */
+    kbRoot: '',
 };
 
 let cachedSettingsPath = null;
@@ -90,6 +98,9 @@ function readSettings() {
         ...parsed,
         // ai 是嵌套对象，浅合并会让"只存了半个 ai"的旧文件丢掉其余默认值
         ai: normalizeAiConfig(parsed.ai),
+        // kbRoot 只接受字符串：存量文件里可能是 null / 数字（手改过），
+        // 非字符串一律回落成空串（= 走默认查找），而不是把脏值传给 fs
+        kbRoot: typeof parsed.kbRoot === 'string' ? parsed.kbRoot.trim() : '',
     };
     return cachedSettings;
 }
@@ -208,6 +219,23 @@ function normalizeAiInput(input) {
     };
 }
 
+/**
+ * 保存知识库根目录。
+ *
+ * 不做存在性校验就落盘：目录可能在移动硬盘 / 网络盘上，此刻不可达不代表用户填错。
+ * 真实可用性由 kbService.kbStatus 每次现查，设置面板据此显示「已找到 N 篇」。
+ * 但**格式**要挡一下 —— 空串合法（= 走默认查找），含 NUL 的串会让 fs 抛错。
+ */
+function saveKbRoot(input) {
+    const value = String(input == null ? '' : input).trim();
+    if (value.includes('\0')) {
+        return { success: false, kbRoot: readSettings().kbRoot, message: '路径含非法字符' };
+    }
+    const res = writeSettings({ kbRoot: value });
+    if (!res.success) return { success: false, kbRoot: readSettings().kbRoot, message: res.message };
+    return { success: true, kbRoot: value, message: value ? `知识库路径已保存：${value}` : '已留空：按默认位置查找知识库' };
+}
+
 function getSettings() {
     return { ...readSettings() };
 }
@@ -310,6 +338,7 @@ async function testAiConnection(input, wireEffort) {
 module.exports = {
     getSettings,
     saveProxyPort,
+    saveKbRoot,
     normalizeProxyInput,
     saveAiConfig,
     testAiConnection,

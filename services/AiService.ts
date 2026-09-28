@@ -141,7 +141,7 @@ const normalizeConfig = (input: Partial<AiConfig> | null | undefined): AiConfig 
 
 /**
  * 读取当前 AI 配置。
- * 优先问主进程；浏览器环境或 IPC 失败时回落到 localStorage。
+ * 优先问主进程；IPC 失败时回落到 localStorage。
  */
 export const getAiConfig = async (): Promise<AiConfig> => {
     const settingsApi = getElectronAPI()?.settings;
@@ -150,7 +150,7 @@ export const getAiConfig = async (): Promise<AiConfig> => {
             const snapshot = await settingsApi.get();
             if (snapshot?.ai) return normalizeConfig(snapshot.ai);
         } catch (_error) {
-            // 主进程暂时不可用：继续往下走浏览器回落，不直接抛错
+            // 主进程暂时不可用：继续往下走本地回落，不直接抛错
         }
     }
 

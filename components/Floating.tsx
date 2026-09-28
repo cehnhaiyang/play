@@ -1,20 +1,16 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
     AlertCircle,
     BrainCircuit,
     Check,
-    CheckCircle2,
     Copy,
     Cpu,
     Download,
-    ExternalLink,
     Eye,
     EyeOff,
-    FileDown,
     FileQuestion,
     FileText,
     Film,
-    FolderOpen,
     Globe,
     Image as ImageIcon,
     Info,
@@ -22,33 +18,29 @@ import {
     Link2,
     ListFilter,
     Loader2,
-    Magnet,
     Music,
-    Pause,
     Play,
     Plug,
     Radio,
     RefreshCw,
     Save,
+    ScrollText,
     Search,
     Settings,
-    SlidersHorizontal,
     Sparkles,
+    ToggleLeft,
+    ToggleRight,
     Trash2,
     Wifi,
     X,
     Zap,
 } from 'lucide-react';
 import type { SnifferState } from '../hooks';
-import { SORT_OPTIONS, useMagnetSearch } from '../hooks';
 import type {
     AiConfig,
     FoundLink,
     MediaDownloadProgress,
     MediaType,
-    SearchHit,
-    SearchSiteStatus,
-    TorrentTaskSnapshot,
 } from '../meta';
 import { getElectronAPI } from '../meta';
 import { isLinkFromPage } from '../utils/utils';
@@ -65,12 +57,21 @@ import {
     type AiProviderPreset,
 } from '../services/AiService';
 import { loadJSON, saveJSON } from '../utils/persist';
+import {
+    LOG_BUFFER_CAP,
+    LOG_PERSIST_CAP,
+    clearLogs,
+    getLogEntries,
+    getLogVersion,
+    subscribeLogs,
+    type LogLevel,
+} from '../services/LogService';
 
 /**
  * 悬浮球与它的三个面板。
  *
- * 这个文件是**一个整体**：悬浮球 + 资源嗅探 + 磁力下载 + 设置。
- * 三块内容由同一个 keep-alive 策略管着（打开过就常驻内存，切页/关球只用
+ * 这个文件是**一个整体**：悬浮球 + 资源嗅探 + 设置 + 运行日志。
+ * 四块内容由同一个 keep-alive 策略管着（打开过就常驻内存，切页/关球只用
  * `hidden` 藏，输入、滚动、已加载的列表原样保留）—— 拆成多个文件后，
  * 改一次这个策略要同时动好几处，漏一处就是"切个页搜索条件没了"。
  *
@@ -79,16 +80,19 @@ import { loadJSON, saveJSON } from '../utils/persist';
  * 那时没有可用页面，摆一个能打字却做不了事的对话框只会误导人。
  * 留在这里的三个面板都不依赖 webview。
  *
- * 原 Floating/ 目录（index + SniffResults + TorrentFloating + SettingsFloating
- * + shared）全部合并到这里。
+ * 磁力下载也不在这里。它已迁到浏览器全屏页（components/TorrentPanel）：
+ * 搜索结果与任务表在小浮窗里翻得难受，与 ACG 画廊同概念走地址栏入口。
+ *
+ * 原 Floating/ 目录（index + SniffResults + 磁力面板 + SettingsFloating
+ * + shared）全部合并到这里，唯独磁力面板搬去了 TorrentPanel。
  */
 
 /* ========================================================================== */
 /*                              常量与共享原子件                              */
 /* ========================================================================== */
 
-/** 悬浮球里剩下的面板。'agent' / 'tamper' 是历史落盘值，见 readStoredPanel */
-type FloatingPanelType = 'sniff' | 'torrent' | 'settings';
+/** 悬浮球里剩下的面板。'agent' / 'tamper' / 'torrent' 是历史落盘值，见 readStoredPanel */
+type FloatingPanelType = 'sniff' | 'settings' | 'logs';
 
 interface FloatingProps {
     sniffer: SnifferState;
@@ -150,18 +154,17 @@ const PANEL_META: Record<
         accent: 'from-indigo-500 via-violet-500 to-cyan-400',
         hint: '自动侦测音视频、流媒体及直链资源',
     },
-    torrent: {
-        label: '磁力下载',
-        icon: Magnet,
-        accent: 'from-cyan-500 via-sky-500 to-indigo-500',
-        // 不写具体站点名：站点是引擎注册表里的数据，写死两个名字会在加站之后立刻变成假话
-        hint: '扇出搜索全部已注册站点，内置引擎直下正片',
-    },
     settings: {
         label: '设置',
         icon: Settings,
         accent: 'from-sky-500 via-blue-500 to-indigo-400',
         hint: '网络代理与 AI 服务配置',
+    },
+    logs: {
+        label: '运行日志',
+        icon: ScrollText,
+        accent: 'from-slate-500 via-slate-400 to-slate-300',
+        hint: '渲染进程的全部 console 输出，重启后保留最近一部分',
     },
 };
 
@@ -171,7 +174,7 @@ const clampPosition = (nextX: number, nextY: number) => ({
 });
 
 /** 导航顺序。写死而不是 Object.keys(PANEL_META)：顺序是设计决定，不该随对象字面量改动而变 */
-const PANEL_ORDER: FloatingPanelType[] = ['sniff', 'torrent', 'settings'];
+const PANEL_ORDER: FloatingPanelType[] = ['sniff', 'settings', 'logs'];
 
 /**
  * 剪贴板写入。
@@ -459,6 +462,7 @@ const SniffResults: React.FC<SnifferResultsProps> = ({ sniffer, onPlay, onAiAnal
         foundLinks,
         filterType,
         scopeFilter,
+        sniffEnabled,
         isAnalyzing,
         statusMessage,
         downloadingUrl,
@@ -506,6 +510,17 @@ const SniffResults: React.FC<SnifferResultsProps> = ({ sniffer, onPlay, onAiAnal
                 </p>
 
                 <div className="flex items-center gap-2">
+                    {/* 持续嗅探总开关：打开 = 切页自动三轮扫描 + 主进程网络层持续推送；
+                        关闭 = 两者全停。手动"重新扫描"是一次性的，不受开关影响 */}
+                    <button
+                        onClick={() => actions.setSniffEnabled(!sniffEnabled)}
+                        className={`${BTN_GHOST} ${sniffEnabled ? 'border-emerald-400/40 text-emerald-300' : ''}`}
+                        title={sniffEnabled ? '关闭持续嗅探：切页不再自动扫描，主进程也不再推送' : '打开持续嗅探：切页自动扫描，主进程持续推送新资源'}
+                        aria-pressed={sniffEnabled}
+                    >
+                        {sniffEnabled ? <ToggleRight className="h-3.5 w-3.5 text-emerald-400" /> : <ToggleLeft className="h-3.5 w-3.5" />}
+                        <span>持续嗅探</span>
+                    </button>
                     <button
                         onClick={() => actions.scan(currentUrl)}
                         disabled={isAnalyzing}
@@ -717,492 +732,6 @@ const SniffResults: React.FC<SnifferResultsProps> = ({ sniffer, onPlay, onAiAnal
                         <p className="break-words">{statusMessage}</p>
                     </div>
                 )
-            )}
-        </div>
-    );
-};
-
-/* ========================================================================== */
-/*                              磁力下载                                       */
-/* ========================================================================== */
-
-const fmtSpeed = (n: number) => `${formatBytes(n)}/s`;
-
-const statusText = (s: TorrentTaskSnapshot['status']): string => {
-    switch (s) {
-        case 'metadata':
-            return '找资源中';
-        case 'downloading':
-            return '下载中';
-        case 'seeding':
-            return '做种中';
-        case 'paused':
-            return '已暂停';
-        case 'error':
-            return '出错';
-        default:
-            return s;
-    }
-};
-
-/** 未知值统一显示为「?」而不是 0——两者含义不同（站点没公布 ≠ 数量为零） */
-const fmtNum = (n: number) => (n < 0 ? '?' : String(n));
-
-const fmtDate = (ms: number): string => {
-    if (!ms || ms < 0) return '';
-    const d = new Date(ms);
-    if (Number.isNaN(d.getTime())) return '';
-    const pad = (v: number) => String(v).padStart(2, '0');
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-};
-
-const STATUS_TONES: Record<string, string> = {
-    downloading: 'bg-cyan-500/15 text-cyan-300',
-    seeding: 'bg-emerald-500/15 text-emerald-300',
-    error: 'bg-rose-500/15 text-rose-300',
-};
-
-const SEARCH_INPUT = `min-w-[200px] flex-1 rounded-lg border border-white/10 bg-white/[0.06] px-2.5 py-1.5 text-xs text-slate-200 outline-none transition placeholder:text-slate-600 focus:border-cyan-400/50 ${FOCUS_RING}`;
-const SEARCH_SELECT = `rounded-lg border border-white/10 bg-white/[0.06] px-2.5 py-1.5 text-xs text-slate-200 outline-none transition focus:border-cyan-400/50 ${FOCUS_RING}`;
-const SEARCH_PRIMARY = `inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-gradient-to-r from-cyan-500 to-indigo-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:brightness-110 active:scale-95 disabled:opacity-50 ${FOCUS_RING}`;
-
-/**
- * 结果行。一次搜索可能回来 150 条，行内不持有任何会变的状态之外的东西，
- * 所以 memo 之后翻页/滚动只重绘真正变化的那几行。
- */
-const SearchHitRow = React.memo(function SearchHitRow({
-    hit,
-    onDownload,
-    onSaveTorrent,
-    onCopyResult,
-    onOpenDetail,
-}: {
-    hit: SearchHit;
-    onDownload: (hit: SearchHit) => void;
-    onSaveTorrent: (hit: SearchHit) => void;
-    onCopyResult: (ok: boolean) => void;
-    onOpenDetail: (url: string) => void;
-}) {
-    const [copied, flashCopied] = useTransientFlag(1500);
-
-    const handleCopyMagnet = useCallback(async () => {
-        const ok = await copyText(hit.magnet || '');
-        if (ok) flashCopied();
-        onCopyResult(ok);
-    }, [hit.magnet, flashCopied, onCopyResult]);
-
-    const seeders = hit.seeders;
-    // 做种数为 0 是死种，任何加速手段都救不了 —— 列表里先标出来，别让人下完才发现
-    const isDead = seeders === 0;
-    const detailUrl = hit.viewUrl;
-
-    return (
-        <div className={`rounded-xl p-2.5 transition-colors ${SURFACE_SUNKEN} hover:border-white/20`}>
-            <div className="line-clamp-2 text-xs font-medium leading-5 text-slate-100" title={hit.title}>
-                {hit.title}
-            </div>
-
-            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
-                <span className="rounded border border-cyan-400/25 bg-cyan-400/10 px-1.5 py-px text-[10px] font-medium text-cyan-300">
-                    {hit.siteLabel}
-                </span>
-                {hit.category && <span className="text-cyan-400/80">{hit.category}</span>}
-                {hit.sizeText && <span>{hit.sizeText}</span>}
-                <span className={isDead ? 'text-rose-400' : seeders > 0 ? 'text-emerald-400' : 'text-slate-500'}>
-                    做种 {fmtNum(seeders)}
-                    {isDead && '（死种）'}
-                </span>
-                <span>吸血 {fmtNum(hit.leechers)}</span>
-                {hit.publishedAt > 0 && <span>{fmtDate(hit.publishedAt)}</span>}
-            </div>
-
-            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                <button onClick={() => onDownload(hit)} className={SEARCH_PRIMARY}>
-                    <Download className="h-3 w-3" /> 下载
-                </button>
-                {hit.torrent && (
-                    <button onClick={() => onSaveTorrent(hit)} className={BTN_GHOST} title="只保存 .torrent 种子文件">
-                        <FileDown className="h-3 w-3" /> 种子
-                    </button>
-                )}
-                {hit.magnet && (
-                    <button onClick={() => void handleCopyMagnet()} className={BTN_GHOST} title="复制 magnet">
-                        {copied ? <Check className="h-3 w-3 text-emerald-400" /> : <Link2 className="h-3 w-3" />}
-                        {copied ? '已复制' : '磁链'}
-                    </button>
-                )}
-                {detailUrl && (
-                    <button onClick={() => onOpenDetail(detailUrl)} className={BTN_GHOST} title="站点详情页">
-                        <ExternalLink className="h-3 w-3" /> 详情
-                    </button>
-                )}
-            </div>
-        </div>
-    );
-});
-
-const TaskRow = React.memo(function TaskRow({
-    task,
-    onPause,
-    onResume,
-    onDelete,
-    onOpenFolder,
-}: {
-    task: TorrentTaskSnapshot;
-    onPause: (id: string) => void;
-    onResume: (id: string) => void;
-    onDelete: (task: TorrentTaskSnapshot) => void;
-    onOpenFolder: (target: string) => void;
-}) {
-    const percent = Math.round(task.progress * 100);
-    const isActive = task.status === 'downloading' || task.status === 'metadata';
-
-    return (
-        <div className={`rounded-xl p-2.5 ${SURFACE_SUNKEN}`}>
-            <div className="flex items-center justify-between gap-2">
-                <div className="line-clamp-1 flex-1 text-xs font-medium text-slate-100" title={task.name}>
-                    {task.name}
-                </div>
-                <span
-                    className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${STATUS_TONES[task.status] || 'bg-white/10 text-slate-300'
-                        }`}
-                >
-                    {statusText(task.status)}
-                </span>
-            </div>
-
-            <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
-                <div
-                    className="h-full rounded-full bg-gradient-to-r from-cyan-400 to-indigo-400 transition-[width] duration-300"
-                    style={{ width: `${percent}%` }}
-                />
-            </div>
-
-            <div className="mt-1 flex flex-wrap items-center gap-x-3 text-[11px] text-slate-500">
-                <span>{percent}%</span>
-                <span>
-                    {formatBytes(task.downloaded)} / {formatBytes(task.total)}
-                </span>
-                <span>↓ {fmtSpeed(task.downloadSpeed)}</span>
-                <span>↑ {fmtSpeed(task.uploadSpeed)}</span>
-                <span>{task.numPeers} peers</span>
-                {task.files.length > 1 && <span>{task.files.length} 个文件</span>}
-            </div>
-
-            {task.status === 'error' && task.error && <div className="mt-1 text-[11px] text-rose-400">{task.error}</div>}
-
-            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                {isActive ? (
-                    <button onClick={() => onPause(task.id)} className={BTN_GHOST}>
-                        <Pause className="h-3 w-3" /> 暂停
-                    </button>
-                ) : (
-                    <button onClick={() => onResume(task.id)} className={BTN_GHOST}>
-                        <Play className="h-3 w-3" /> 继续
-                    </button>
-                )}
-                <button onClick={() => onDelete(task)} className={BTN_GHOST}>
-                    <X className="h-3 w-3" /> 删除
-                </button>
-                <button onClick={() => onOpenFolder(task.outDir || task.id)} className={BTN_GHOST}>
-                    <FolderOpen className="h-3 w-3" /> 目录
-                </button>
-            </div>
-        </div>
-    );
-});
-
-const TorrentFloating: React.FC = () => {
-    const { state, actions } = useMagnetSearch();
-    const { query, isSearching, hits, siteStatus, elapsedMs, tasks, error, notice, isElectron, sites } = state;
-
-    const [tab, setTab] = useState<'search' | 'tasks'>('search');
-    const [showSites, setShowSites] = useState(false);
-    const [showStatus, setShowStatus] = useState(false);
-
-    // 逐个取出：actions 对象每轮都是新引用，直接依赖它会让下面所有 memo 失效
-    const { setQuery, search, downloadHit, saveTorrentFile, setNotice, setError, cancelTask } = actions;
-
-    const set = useCallback(
-        (patch: Partial<typeof query>) => setQuery({ ...query, ...patch }),
-        [setQuery, query]
-    );
-
-    const onSearch = useCallback(() => {
-        search();
-        setTab('search');
-    }, [search]);
-
-    const onDownloadHit = useCallback(
-        async (hit: SearchHit) => {
-            // 做种数为 0 的是死种：任何加速手段都救不了，先预警免得用户干等报「慢」。
-            // seeders 为 -1 表示站点没公布做种数（未知），不拦。
-            if (hit.seeders === 0) {
-                const go = window.confirm(
-                    `「${hit.title.slice(0, 40)}」当前做种数为 0，可能极慢或根本无法完成。\n\n仍要尝试下载吗？`
-                );
-                if (!go) return;
-            }
-            const taskId = await downloadHit(hit);
-            if (taskId) setTab('tasks');
-        },
-        [downloadHit]
-    );
-
-    const onSaveTorrent = useCallback((hit: SearchHit) => void saveTorrentFile(hit), [saveTorrentFile]);
-
-    const onCopyResult = useCallback(
-        (ok: boolean) => {
-            if (ok) setNotice('magnet 已复制');
-            else setError('复制失败：剪贴板不可用');
-        },
-        [setNotice, setError]
-    );
-
-    const onOpenDetail = useCallback((url: string) => window.open(url, '_blank'), []);
-
-    const onDeleteTask = useCallback(
-        (task: TorrentTaskSnapshot) => {
-            const done = task.status === 'seeding' || (task.progress >= 1 && task.total > 0);
-            const msg = done
-                ? `删除任务「${task.name.slice(0, 30)}」？\n\n已完成文件保留在下载目录，仅移除任务记录。`
-                : `删除任务「${task.name.slice(0, 30)}」？\n\n未完成分片将被一起删除，该操作不可撤销。`;
-            if (window.confirm(msg)) void cancelTask(task.id);
-        },
-        [cancelTask]
-    );
-
-    const selectedSites = query.sites.length ? query.sites : sites.map((s) => s.id);
-    const okSites = siteStatus.filter((s) => s.ok).length;
-    const failedSites = siteStatus.filter((s) => !s.ok);
-
-    if (!isElectron) {
-        return (
-            <EmptyHint icon={<Magnet className="h-6 w-6" />} title="磁力搜索与内置下载仅在 Electron 桌面端可用">
-                <p className="text-xs text-slate-500">请用桌面版打开。</p>
-            </EmptyHint>
-        );
-    }
-
-    return (
-        <div className="flex h-full min-h-0 flex-col gap-3">
-            {/* ============ 搜索栏 ============ */}
-            <div className="flex shrink-0 flex-col gap-2">
-                <div className="flex flex-wrap items-center gap-2">
-                    <input
-                        value={query.q}
-                        onChange={(e) => set({ q: e.target.value })}
-                        onKeyDown={(e) => {
-                            if (e.key === 'Enter') onSearch();
-                        }}
-                        placeholder="输入关键词，一次搜索全部站点"
-                        aria-label="搜索关键词"
-                        className={SEARCH_INPUT}
-                    />
-                    <select
-                        value={query.sort}
-                        onChange={(e) => set({ sort: e.target.value as typeof query.sort })}
-                        className={SEARCH_SELECT}
-                        title="排序方式"
-                        aria-label="排序方式"
-                    >
-                        {SORT_OPTIONS.map((o) => (
-                            <option key={o.value} value={o.value}>
-                                {o.label}
-                            </option>
-                        ))}
-                    </select>
-                    <button
-                        onClick={() => setShowSites((v) => !v)}
-                        className={`${BTN_GHOST} ${showSites ? 'border-cyan-400/40 text-cyan-300' : ''}`}
-                        title="选择要搜索的站点"
-                        aria-expanded={showSites}
-                    >
-                        <SlidersHorizontal className="h-3 w-3" />
-                        {query.sites.length ? `${query.sites.length}/${sites.length} 站` : `全部 ${sites.length} 站`}
-                    </button>
-                    <button onClick={onSearch} disabled={isSearching} className={SEARCH_PRIMARY}>
-                        {isSearching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
-                        {isSearching ? '搜索中…' : '搜索'}
-                    </button>
-                </div>
-
-                {/* 站点多选：由引擎注册表驱动，注册表里加站点后这里自动出现，无需改 UI */}
-                {showSites && (
-                    <div className={`flex flex-wrap items-center gap-1.5 rounded-xl p-2 ${SURFACE_SUNKEN}`}>
-                        <span className="px-1 text-[11px] text-slate-500">搜索范围</span>
-                        <button
-                            onClick={() => set({ sites: [] })}
-                            className={`${BTN_GHOST} ${query.sites.length === 0 ? 'border-cyan-400/40 text-cyan-300' : ''}`}
-                        >
-                            全部
-                        </button>
-                        {sites.map((s) => {
-                            const on = selectedSites.includes(s.id);
-                            return (
-                                <button
-                                    key={s.id}
-                                    onClick={() => actions.toggleSite(s.id)}
-                                    className={`${BTN_GHOST} ${on ? 'border-cyan-400/40 bg-cyan-400/10 text-cyan-200' : 'opacity-60'}`}
-                                    title={`${s.homepage}${s.kinds.length ? ` · ${s.kinds.join(' / ')}` : ''}`}
-                                >
-                                    {s.label}
-                                    {s.adult && <span className="text-rose-400/80">18+</span>}
-                                </button>
-                            );
-                        })}
-                        <div className="flex-1" />
-                        <label className="flex items-center gap-1.5 text-[11px] text-slate-400">
-                            <input
-                                type="checkbox"
-                                checked={query.includeAdult}
-                                onChange={(e) => set({ includeAdult: e.target.checked })}
-                                className="accent-cyan-500"
-                            />
-                            包含成人站点
-                        </label>
-                        <select
-                            value={String(query.minSeeders)}
-                            onChange={(e) => set({ minSeeders: Number(e.target.value) })}
-                            className={SEARCH_SELECT}
-                            title="过滤做种数过低的条目（做种数未知的站点不受影响）"
-                            aria-label="做种数过滤"
-                        >
-                            <option value="0">不限做种</option>
-                            <option value="1">≥ 1</option>
-                            <option value="5">≥ 5</option>
-                            <option value="20">≥ 20</option>
-                        </select>
-                    </div>
-                )}
-            </div>
-
-            {/* 动作反馈（下载已开始 / 种子已保存 / magnet 已复制）。
-          各站统计不在这里 —— 它由下面的状态行独占，两边都写就是同一句话说两遍 */}
-            {error && (
-                <div className="flex shrink-0 items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-xs text-rose-300">
-                    <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                    <span>{error}</span>
-                </div>
-            )}
-            {!error && notice && (
-                <div className="shrink-0 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-1.5 text-xs text-emerald-300">
-                    {notice}
-                </div>
-            )}
-
-            {/* 各站明细：扇出搜索必须让用户看到「哪几站没搜到、为什么」，
-          否则无法区分「没有这个资源」与「有个站挂了」 */}
-            {siteStatus.length > 0 && (
-                <div className="shrink-0">
-                    <button
-                        onClick={() => setShowStatus((v) => !v)}
-                        className={`flex items-center gap-2 rounded text-[11px] text-slate-400 transition-colors hover:text-slate-200 ${FOCUS_RING}`}
-                        aria-expanded={showStatus}
-                    >
-                        <CheckCircle2 className={`h-3.5 w-3.5 ${failedSites.length ? 'text-amber-400' : 'text-emerald-400'}`} />
-                        <span>
-                            {okSites}/{siteStatus.length} 站返回结果
-                            {failedSites.length > 0 && <span className="text-rose-400"> · {failedSites.length} 站失败</span>}
-                            {elapsedMs > 0 && <span className="text-slate-500"> · {elapsedMs}ms</span>}
-                        </span>
-                        <span className="text-slate-600">{showStatus ? '收起' : '明细'}</span>
-                    </button>
-                    {showStatus && (
-                        <div className={`mt-1.5 flex flex-col gap-1 rounded-lg p-2 ${SURFACE_SUNKEN}`}>
-                            {siteStatus.map((s: SearchSiteStatus) => (
-                                <div key={s.site} className="flex items-center gap-2 text-[11px]">
-                                    <span className={s.ok ? 'text-emerald-400' : 'text-rose-400'}>{s.ok ? '●' : '×'}</span>
-                                    <span className="w-28 shrink-0 truncate text-slate-300" title={s.label}>
-                                        {s.label}
-                                    </span>
-                                    <span className="text-slate-500">{s.ok ? `${s.count} 条 · ${s.elapsedMs}ms` : s.error || '失败'}</span>
-                                </div>
-                            ))}
-                        </div>
-                    )}
-                </div>
-            )}
-
-            {/* ============ 子标签 ============ */}
-            <div className="flex shrink-0 items-center gap-1.5">
-                {(
-                    [
-                        { value: 'search', label: `结果 (${hits.length})` },
-                        { value: 'tasks', label: `下载任务 (${tasks.length})` },
-                    ] as const
-                ).map((t) => (
-                    <button
-                        key={t.value}
-                        onClick={() => setTab(t.value)}
-                        className={`rounded-lg px-3 py-1 text-xs font-semibold transition ${FOCUS_RING} ${tab === t.value ? 'bg-white/[0.12] text-white' : 'text-slate-400 hover:bg-white/[0.06] hover:text-slate-200'
-                            }`}
-                    >
-                        {t.label}
-                    </button>
-                ))}
-                <div className="flex-1" />
-                {tab === 'search' && hits.length > 0 && (
-                    <button onClick={actions.clearResults} className={BTN_GHOST}>
-                        清空结果
-                    </button>
-                )}
-                {tab === 'tasks' && (
-                    <button onClick={() => void actions.refreshTasks()} className={BTN_GHOST}>
-                        刷新任务
-                    </button>
-                )}
-            </div>
-
-            {/* ============ 结果列表 ============ */}
-            {tab === 'search' && (
-                <div className="custom-scrollbar flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-1">
-                    {hits.length === 0 && !isSearching && (
-                        <EmptyHint icon={<Search className="h-6 w-6" />} title="还没有结果">
-                            <p className="max-w-md text-xs leading-5 text-slate-500">
-                                在上方输入关键词，引擎会同时搜索全部 {sites.length} 个站点并汇总结果。
-                                <br />
-                                点「下载」直接用内置引擎下正片，无需迅雷 / qBittorrent。
-                            </p>
-                        </EmptyHint>
-                    )}
-                    {hits.map((hit) => (
-                        <SearchHitRow
-                            key={`${hit.site}-${hit.id}`}
-                            hit={hit}
-                            onDownload={onDownloadHit}
-                            onSaveTorrent={onSaveTorrent}
-                            onCopyResult={onCopyResult}
-                            onOpenDetail={onOpenDetail}
-                        />
-                    ))}
-                </div>
-            )}
-
-            {/* ============ 任务列表 ============ */}
-            {tab === 'tasks' && (
-                <div className="custom-scrollbar flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-1">
-                    {tasks.length === 0 && (
-                        <EmptyHint icon={<Download className="h-6 w-6" />} title="暂无下载任务">
-                            <p className="max-w-md text-xs leading-5 text-slate-500">
-                                去「结果」里点「下载」开始。
-                                <br />
-                                若任务长期 0 速度：先看 peers 是否为 0——为 0 多半是资源已死（做种 0）或当前网络禁 P2P；
-                                引擎已自动挂载 17 个公共 Tracker + 6 个 DHT 入口 + 200 并行连接，新任务一般 1 分钟内能找到 peer。
-                            </p>
-                        </EmptyHint>
-                    )}
-                    {tasks.map((t) => (
-                        <TaskRow
-                            key={t.id}
-                            task={t}
-                            onPause={actions.pauseTask}
-                            onResume={actions.resumeTask}
-                            onDelete={onDeleteTask}
-                            onOpenFolder={actions.openFolder}
-                        />
-                    ))}
-                </div>
             )}
         </div>
     );
@@ -1803,6 +1332,183 @@ const SettingsFloating: React.FC = () => {
 };
 
 /* ========================================================================== */
+/*                              运行日志                                       */
+/* ========================================================================== */
+
+/** 列表最多渲染条数：console 输出可能刷屏，渲染层只看最近的 */
+const LOG_RENDER_CAP = 300;
+/** 距底部多少像素内算"贴底"：贴底时新日志自动跟随，上翻看历史就暂停跟随 */
+const LOG_STICK_PX = 24;
+
+const LOG_LEVEL_TONES: Record<LogLevel, string> = {
+    error: 'bg-rose-500/15 text-rose-300',
+    warn: 'bg-amber-500/15 text-amber-300',
+    info: 'bg-cyan-500/15 text-cyan-300',
+    debug: 'bg-violet-500/15 text-violet-300',
+    log: 'bg-white/10 text-slate-300',
+};
+
+const LOG_FILTERS: { value: 'all' | LogLevel; label: string }[] = [
+    { value: 'all', label: '全部' },
+    { value: 'error', label: '错误' },
+    { value: 'warn', label: '警告' },
+    { value: 'info', label: '信息' },
+    { value: 'debug', label: '调试' },
+    { value: 'log', label: '普通' },
+];
+
+const fmtLogTime = (ms: number): string => {
+    const d = new Date(ms);
+    if (Number.isNaN(d.getTime())) return '';
+    const pad = (v: number, w = 2) => String(v).padStart(w, '0');
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
+};
+
+/**
+ * 运行日志面板：渲染进程的全部 console 输出。
+ *
+ * 隐藏时不订阅：面板是 keep-alive 常驻的，若始终订阅，每条 console 输出
+ * 都会把隐藏的面板重渲染一遍。用 activeRef 门控，tab 切走即断开订阅，
+ * 版本号冻结在离开时的值，重进才继续跟。
+ */
+const LogsFloating: React.FC<{ active: boolean }> = ({ active }) => {
+    const [levelFilter, setLevelFilter] = useState<'all' | LogLevel>(() => {
+        const saved = loadJSON<'all' | LogLevel>('log-level-filter', 'all');
+        return saved === 'all' || (LOG_LEVEL_TONES as Record<string, string>)[saved] ? saved : 'all';
+    });
+    const [query, setQuery] = useState('');
+    const activeRef = useRef(active);
+    activeRef.current = active;
+    const listRef = useRef<HTMLDivElement | null>(null);
+    const stickRef = useRef(true);
+
+    useEffect(() => {
+        saveJSON('log-level-filter', levelFilter);
+    }, [levelFilter]);
+
+    // 订阅包装一层门控：面板 keep-alive 常驻，tab 切走即断开订阅，
+    // 版本号冻结在离开时的值，重进才继续跟 —— 否则每条 console 都重渲染隐藏面板
+    const subscribe = useCallback((listener: () => void) => {
+        if (!activeRef.current) return () => {};
+        return subscribeLogs(listener);
+    }, []);
+
+    const version = useSyncExternalStore(subscribe, getLogVersion);
+
+    const { visible, total, counts } = useMemo(() => {
+        const all = getLogEntries();
+        const counts: Record<'all' | LogLevel, number> = {
+            all: all.length,
+            error: 0,
+            warn: 0,
+            info: 0,
+            debug: 0,
+            log: 0,
+        };
+        for (const e of all) counts[e.level] += 1;
+        const q = query.trim().toLowerCase();
+        const filtered = all.filter(
+            (e) =>
+                (levelFilter === 'all' || e.level === levelFilter) &&
+                (q === '' || e.message.toLowerCase().includes(q))
+        );
+        const visible = filtered.length > LOG_RENDER_CAP ? filtered.slice(-LOG_RENDER_CAP) : filtered;
+        return { visible, total: all.length, counts };
+        // version 只做重渲染触发器：读它让 useSyncExternalStore 的每次广播都重算
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [version, levelFilter, query]);
+
+    // 新日志进来且贴底时跟随到底；用户上翻看历史时不动滚动条
+    useEffect(() => {
+        const el = listRef.current;
+        if (el && stickRef.current) el.scrollTop = el.scrollHeight;
+    }, [version]);
+
+    const handleScroll = useCallback(() => {
+        const el = listRef.current;
+        if (!el) return;
+        stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= LOG_STICK_PX;
+    }, []);
+
+    return (
+        <div className="flex h-full min-h-0 flex-col gap-3">
+            {/* 工具条：级别过滤 + 搜索 + 清空 */}
+            <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+                {LOG_FILTERS.map(({ value: f, label }) => (
+                    <button
+                        key={f}
+                        onClick={() => setLevelFilter(f)}
+                        className={`rounded-lg px-2.5 py-1 text-xs font-medium transition ${FOCUS_RING} ${levelFilter === f
+                            ? 'bg-white/[0.12] text-white'
+                            : 'text-slate-400 hover:bg-white/[0.06] hover:text-slate-200'
+                            }`}
+                        title={`只看${label}（${counts[f]} 条）`}
+                    >
+                        {label}
+                        <span className="ml-1 text-[10px] opacity-70">{counts[f]}</span>
+                    </button>
+                ))}
+                <div className="flex-1" />
+                <div className="relative">
+                    <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
+                    <input
+                        value={query}
+                        onChange={(e) => setQuery(e.target.value)}
+                        placeholder="搜索日志内容"
+                        aria-label="搜索日志内容"
+                        className={`w-40 rounded-lg border border-white/10 bg-white/[0.06] py-1.5 pl-7 pr-2 text-xs text-slate-200 outline-none transition placeholder:text-slate-600 focus:border-indigo-400/50 ${FOCUS_RING}`}
+                    />
+                </div>
+                <button onClick={() => clearLogs()} className={BTN_GHOST} title="清空内存与落盘的全部日志">
+                    <Trash2 className="h-3 w-3" /> 清空
+                </button>
+            </div>
+
+            {/* 日志列表：role="log" 让读屏软件知道这是实时追加区 */}
+            <div
+                ref={listRef}
+                onScroll={handleScroll}
+                role="log"
+                aria-label="运行日志"
+                className="custom-scrollbar flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto pr-1"
+            >
+                {visible.length === 0 && (
+                    <EmptyHint icon={<ScrollText className="h-6 w-6" />} title="暂无日志">
+                        <p className="max-w-md text-xs leading-5 text-slate-500">
+                            渲染进程的 console 输出会实时出现在这里。
+                            <br />
+                            主进程（终端里）的日志不在此列。
+                        </p>
+                    </EmptyHint>
+                )}
+                {visible.map((e) => (
+                    <div key={e.seq} className={`rounded-lg px-2.5 py-1.5 ${SURFACE_SUNKEN}`}>
+                        <div className="flex items-center gap-2">
+                            <span className="shrink-0 font-mono text-[10px] text-slate-500">{fmtLogTime(e.ts)}</span>
+                            <span
+                                className={`shrink-0 rounded px-1.5 py-px text-[10px] font-semibold ${LOG_LEVEL_TONES[e.level]}`}
+                            >
+                                {e.level}
+                            </span>
+                        </div>
+                        <div className="mt-0.5 whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-slate-300">
+                            {e.message}
+                        </div>
+                    </div>
+                ))}
+            </div>
+
+            <p className="shrink-0 text-[11px] text-slate-500">
+                共 {total} 条（内存上限 {LOG_BUFFER_CAP}，落盘保留最近 {LOG_PERSIST_CAP} 条）
+                {total > LOG_RENDER_CAP && levelFilter === 'all' && query.trim() === ''
+                    ? `，列表仅显示最近 ${LOG_RENDER_CAP} 条`
+                    : ''}
+            </p>
+        </div>
+    );
+};
+
+/* ========================================================================== */
 /*                              悬浮球外壳                                     */
 /* ========================================================================== */
 
@@ -1825,12 +1531,13 @@ export const Floating: React.FC<FloatingProps> = ({ sniffer, currentUrl, onPlay,
     /**
      * 读回上次停留的面板。
      *
-     * 存量用户落盘的可能是 'agent' / 'tamper'（那时它们还在悬浮球里）。
-     * 这两个键已不在 PANEL_META 里，不映射的话打开就是空白页 —— 回落成 'sniff'。
+     * 存量用户落盘的可能是 'agent' / 'tamper'（那时它们还在悬浮球里），
+     * 或 'torrent'（磁力下载已迁到浏览器全屏页 TorrentPanel）。
+     * 这三个键已不在 PANEL_META 里，不映射的话打开就是空白页 —— 回落成 'sniff'。
      */
     const readStoredPanel = useCallback((): FloatingPanelType => {
         const saved = loadJSON<string>('panel', 'sniff');
-        if (saved === 'agent' || saved === 'tamper') return 'sniff';
+        if (saved === 'agent' || saved === 'tamper' || saved === 'torrent') return 'sniff';
         const all = Object.keys(PANEL_META) as FloatingPanelType[];
         return all.includes(saved as FloatingPanelType) ? (saved as FloatingPanelType) : 'sniff';
     }, []);
@@ -2043,23 +1750,26 @@ export const Floating: React.FC<FloatingProps> = ({ sniffer, currentUrl, onPlay,
      * 元素本身要 memo 住。拖动悬浮球时 position 每帧都在变，整个组件跟着重渲染 ——
      * 若不 memo，嗅探列表（上限 300 条）会在拖动的每一帧重建一遍。
      * 元素引用不变时 React 会跳过整棵子树，与它是不是 hidden 无关。
-     * torrent / settings 不吃 props，所以它们的元素是真正一次性的。
+     * settings 不吃 props，所以它的元素是真正一次性的。
      */
     const sniffNode = useMemo(
         () => <SniffResults sniffer={sniffer} onPlay={onPlay} onAiAnalyze={onAiAnalyze} currentUrl={currentUrl} />,
         [sniffer, onPlay, onAiAnalyze, currentUrl]
     );
-    const torrentNode = useMemo(() => <TorrentFloating />, []);
     const settingsNode = useMemo(() => <SettingsFloating />, []);
+    // logs 只吃 active：tab 切换时才变，拖球时引用稳定；同一类型同一位置，
+    // 换引用只重渲染不重挂载，过滤条件/滚动位置照旧保留。
+    const logsActive = activePanel === 'logs';
+    const logsNode = useMemo(() => <LogsFloating active={logsActive} />, [logsActive]);
 
     const panels = useMemo(
         () =>
             ({
                 sniff: sniffNode,
-                torrent: torrentNode,
                 settings: settingsNode,
+                logs: logsNode,
             }) as Record<FloatingPanelType, React.ReactNode>,
-        [sniffNode, torrentNode, settingsNode]
+        [sniffNode, settingsNode, logsNode]
     );
 
     return (

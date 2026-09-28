@@ -3,3 +3,4 @@ export * from './Floating';
 export * from './AudioPanel';
 export * from './PlayPanel';
 export * from './GalleryPanel';
+export * from './TorrentPanel';

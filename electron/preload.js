@@ -18,19 +18,14 @@ const subscribe = (channel, callback) => {
     return () => ipcRenderer.removeListener(channel, handler);
 };
 
-contextBridge.exposeInMainWorld('process', {
-    // 标识当前运行在 Electron 环境。
-    // 注意：API Key 不再从这里暴露 —— AI 配置统一由「设置」面板管理，
-    // 真值落在主进程 settings.json，渲染层通过 settings API 读写。
-    isElectron: true
-});
-
 // 暴露 IPC 通信接口
 contextBridge.exposeInMainWorld('electronAPI', {
     // 监听来自主进程的导航请求（新标签页链接），返回取消订阅函数
     onNavigateToUrl: (callback) => subscribe('navigate-to-url', callback),
     // 监听网络嗅探结果
     onSniffedMedia: (callback) => subscribe('sniffed-media', callback),
+    /** 打开/关闭主进程网络层嗅探推送（默认关闭，由"持续嗅探"开关控制） */
+    setSnifferEnabled: (enabled) => ipcRenderer.invoke('sniffer-set-enabled', enabled),
     getDownloadCapabilities: () => ipcRenderer.invoke('get-download-capabilities'),
     downloadMedia: (payload) => ipcRenderer.invoke('download-media', payload),
     /** 取消正在进行的媒体下载（kill 子进程/请求，并删掉半成品文件） */
@@ -68,6 +63,45 @@ contextBridge.exposeInMainWorld('electronAPI', {
         setProxyPort: (value) => ipcRenderer.invoke('settings-set-proxy-port', value),
         setAiConfig: (value) => ipcRenderer.invoke('settings-set-ai-config', value),
         testAiConfig: (value, reasoningEffort) => ipcRenderer.invoke('settings-test-ai-config', value, reasoningEffort),
+    },
+    // --- 浏览器外壳能力（快捷键 / 右键菜单 / 网页下载 / 发声状态） ---
+    // 键盘与右键事件只有主进程收得到（webview 是跨进程 OOPIF，不冒泡到宿主
+    // 页面的 window），所以方向是**主进程 → 渲染层**：主进程判出是哪个浏览器
+    // 动作，发过来由渲染层执行。见 electron/browserService.js 顶部注释。
+    browser: {
+        /** 浏览器动作命令（新建标签、查找、缩放…）。返回取消订阅函数 */
+        onCommand: (callback) => subscribe('browser-command', callback),
+        /** 网页自身触发的下载：进度 / 完成 / 中断。返回取消订阅函数 */
+        onDownload: (callback) => subscribe('browser-download', callback),
+        /** 取当前全部下载记录（面板首次打开时补齐历史） */
+        downloads: () => ipcRenderer.invoke('browser-downloads'),
+        /** 暂停 / 继续 / 取消 / 在文件夹中显示 / 打开 / 从列表移除 */
+        downloadAction: (id, action) => ipcRenderer.invoke('browser-download-action', { id, action }),
+    },
+    // --- 知识库（open-reverselab 的 Markdown 文章） ---
+    // 主进程只负责把文件读出来；解析、检索、切片全在渲染层的 services/KbService，
+    // 所以这里是纯粹的字节搬运，没有任何业务判断。
+    kb: {
+        /** 整库一次读完（约 3MB）。渲染层长期驻留，之后检索不再往返 IPC */
+        load: () => ipcRenderer.invoke('kb-load'),
+        /** 读单篇正文。路径是 kb 根下的相对路径，形如 ctf-website/techniques/xx/yy.md */
+        read: (path) => ipcRenderer.invoke('kb-read', path),
+        /** 轻量状态：根目录 / 篇数 / 是否就绪 */
+        status: () => ipcRenderer.invoke('kb-status'),
+        /** 保存 kb 根目录，返回里带新的 status，界面不用再问一次 */
+        setRoot: (value) => ipcRenderer.invoke('kb-set-root', value),
+    },
+    // --- Edge 数据导入（收藏夹 / 历史 / 图标 / 自动填充 / Cookie） ---
+    // 两步：detect 只读文件大小与条目数（快、不会被锁影响），import 才开 SQLite
+    // 与解密。Cookie 走纯离线解密（APPB → SYSTEM DPAPI → 主密钥，不启动 Edge），
+    // 详见 electron/edgeImportService.js 顶部注释。
+    edge: {
+        /** 探测本机 Edge 与各 profile 的数据量 */
+        detect: () => ipcRenderer.invoke('edge-detect'),
+        /** 执行导入。options.include 逐项开关；返回逐项结果与 warnings */
+        run: (options) => ipcRenderer.invoke('edge-import', options),
+        /** 导入过程中的阶段提示（"正在读取收藏夹…"）。返回取消订阅函数 */
+        onProgress: (callback) => subscribe('edge-import-progress', callback),
     },
     // --- 种子文件获取（只有落盘需要主进程：文件系统权限） ---
     // 搜索不经过这里：搜索引擎完整地待在 services/SearchService，

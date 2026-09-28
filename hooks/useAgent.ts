@@ -11,6 +11,15 @@ import type {
 } from '../meta';
 import { chat } from '../services/AiService';
 import {
+    buildKbIndex,
+    normalizeRel,
+    readKbArticle,
+    searchKb,
+    KB_SEARCH_LIMIT,
+    type KbEntry,
+    type KbLoadPayload,
+} from '../services/KbService';
+import {
     buildCookieKeys,
     collectDroppedRules,
     decodeJwt,
@@ -27,7 +36,7 @@ import type { TamperState } from './useBrowse';
  * useAgent — Agent 工作空间（在已登录的页面里执行脚本）
  * ============================================================================
  *
- * 形状是**代码执行器**，不是点击驱动器。工具只有五个：
+ * 形状是**代码执行器**，不是点击驱动器。工具只有六个：
  *
  *   S             脚本工具，args.action 选四件事：
  *                 R 在活动页面主世界跑一段脚本 / L 列出已保存脚本
@@ -36,10 +45,15 @@ import type { TamperState } from './useBrowse';
  *   tamper_rules  读写拦截规则（响应 / 请求体 / 请求头）
  *   storage       读写 localStorage / sessionStorage / Cookie
  *   tokens        JWT 查找 / 解码 / 改写
+ *   kb            逆向工程知识库检索（本地文章，不碰页面）
  *
  * 后三个是**用户手动面板能力的开放**，不是 S 的替代：规则必须在引擎层生效
  * （钩子装在页面主世界，脚本只影响自己那一次调用），Cookie 必须走原生 API
  * （HttpOnly 在渲染进程里读不到）。
+ *
+ * kb 与前五个都不同：它**不碰页面**，只读本地文章。放在这里是因为消费者就是
+ * Agent —— 动手前先查库，比从零推理页面结构划算。检索本身在
+ * services/KbService（纯 TS，可单测），这里只做派发与缓存。
  *
  * 点击、输入、取数、翻页全部塌缩成 S·R 里的一行代码。这样做的依据是
  * 上下文经济学：每次观察都要序列化进模型上下文，DOM 快照动辄数万 token；
@@ -270,9 +284,27 @@ const TOOL_SPEC = `可用工具（每次只回一个 JSON 对象，不要回数�
    **key 要原样用 find 返回的那个**：cookie 的 key 可能是 "sid (sub.example.com)"
    这种带 domain 的形态（同名 cookie 在不同域下并存时用来区分），
    自己按 cookie 名拼一个会找不到。
-   注意：改写 payload 会让**签名失效**，服务端验签就会拒绝。这是这类调试的固有前提。`;
+   注意：改写 payload 会让**签名失效**，服务端验签就会拒绝。这是这类调试的固有前提。
 
-const SYSTEM_PROMPT = `你是一个浏览器自动化助手，在一个已登录的 Electron 浏览器里工作。
+6. kb —— 逆向工程知识库（本地文章）。**动手前先查**，别从零推理。
+   args: { "action": "search", "query": "付费墙 内容提取" }
+         { "action": "read", "path": "ctf-website/23-paywall-bypass/04-content-extraction.md" }
+         { "action": "read", "path": "...", "section": "方法 2" }
+         { "action": "status" }
+   search 回最多 ${KB_SEARCH_LIMIT} 条，每条带 path / title / 摘要 / score / matched（命中的词）。
+   用**中文或英文的自然短语**，一次把信号写全（"接口返回 401 未授权"比"401"好）；
+   单个字符查不出东西 —— 少于 2 个字符的英文词会被丢掉。
+   **不确定从哪下手时，先读攻击网**：search "攻击网" 拿到 Web 攻击网，
+   它是「多入口 → 分叉 → 下一步」的决策图，能一次看清所有可走的路。
+   覆盖：Web 攻击（JWT/SQLi/SSRF/签名/支付/限流/CORS/CVE/DoS）、Android、PE、
+   密码学与协议逆向。**不覆盖**视频嗅探、m3u8/HLS、ffmpeg、图片直链、防盗链 ——
+   那些问题别在这儿找，直接用 S 在页面里探测。
+   read 不带 section 时：正文不超上限就直接回全文；超了就只回 **outline**（标题大纲），
+   此时**必须**从 outline 里挑一个标题当 section 再读一次。
+   section 是标题的**子串**匹配，给几个字就够。
+   返回的 path 可以原样喂回 read。`;
+
+const SYSTEM_PROMPT = `你是一个专业的逆向工程Agent，工作在一个已登录的 Electron 浏览器里，目标是完成用户要求的一切二进制分析、架构理解、漏洞研究、CTF/crackme 分析、恶意样本行为研判、算法还原、调试验证和分析报告编写。
 
 ## 你的能力边界
 
@@ -285,7 +317,7 @@ const SYSTEM_PROMPT = `你是一个浏览器自动化助手，在一个已登录
 每次回复只输出**一个 JSON 对象**，放在 \`\`\`json 代码块里：
 
 \`\`\`json
-{"thought": "简述你这一步的判断", "tool": "S", "args": {"action": "R", "code": "..."}}
+{"thought": "你这一步的判断与依据", "tool": "S", "args": {"action": "R", "code": "..."}}
 \`\`\`
 
 当你已经拿到答案、不需要再调用工具时，输出：
@@ -305,13 +337,41 @@ ${TOOL_SPEC}
   收窄范围 —— 例如 [...document.querySelectorAll('a')].slice(0,50).map(a=>a.href)。
 - 脚本抛错不是终点：错误会原样回传给你，读懂它然后改代码重试。
 - 一次只做一件事。先确认页面结构（比如数一下元素个数），再动手取数据。
+- **遇到 Web 攻击手法（签名、鉴权、支付、限流、CORS、CVE、付费墙、注入）
+  先 kb search 一次再动手。** 库里的文章是「场景→信号→方法→可跑代码」的固定结构，
+  照抄改 URL 比从零试快得多。但**只在真遇到这类问题时查** ——
+  跟页面内容抓取、媒体嗅探无关的任务不用查，那是白花一步。
 - 你**能看到之前几轮的对话与工具结果**（它们以 user 消息形式出现，
   前缀是「[工具 … 的执行结果]」「[自动脚本…]」或「[系统提示]」）。
   用户说「继续」「它」「刚才那个」时指的就是上面这些内容 ——
-  先回看再动手，不要重新探测已经查清的东西。`;
+  先回看再动手，不要重新探测已经查清的东西。
+
+## 工作方式
+
+- **直接推进，别频繁回头问。** 目标清楚就自己定计划往下走；只有遇到
+  真正不可逆的破坏（删数据、提交订单、发消息给第三方）才停下来确认。
+- **不确定就先立假设再验证。** 把"我猜这个接口在 X"写进 thought，
+  然后用一步脚本去证实或推翻它。**不要靠猜下结论。**
+- **落到具体，不要停在概念。** 给字段名、接口路径、选择器、payload、
+  状态码、日志片段 —— 而不是"需要进一步分析"。
+- **改页面数据必须走 tamper_rules。** 用 S 改只会影响那一次调用的返回值，
+  页面自己的 JS 读到的仍是旧值。这条是硬约束，不是偏好。
+- **结论要有证据来源。** 说"这个站点用 JWT 鉴权"就得能指出是从哪个
+  Cookie / Storage / 响应头看出来的。没有证据的部分明说是推测。
+
+## 完成标准
+
+一件事只有满足下面任一条才算做完，否则继续或明说卡在哪：
+
+- **取到了数据** —— 给出实际值（数量、字段、URL），不是"可以取到"。
+- **验证了判断** —— 给出对照：改动前后页面行为的差异，或两个假设的排除过程。
+- **改动了页面** —— 给出改了什么、在哪一层生效（引擎规则 / 脚本 / 存储），
+  以及**怎么确认它生效了**。
+
+做不到时不要含糊收尾。直接说清：试过什么、卡在哪、下一步需要什么。`;
 
 /* -------------------------------------------------------------------------- */
-/*                                  工具函数                                    */
+/*                                  工具函数                                  */
 /* -------------------------------------------------------------------------- */
 
 const byteLength = (text: string): number => new TextEncoder().encode(text).length;
@@ -590,6 +650,22 @@ export interface AgentDeps {
      * Agent 这边**不另存一份副本** —— 两份真值迟早会不一致。
      */
     tamper: TamperState;
+    /**
+     * 知识库取数桥。
+     *
+     * 与 tamper 同一手法：Agent 不自己 require 主进程、也不碰 window，
+     * 由 App 把 preload 暴露的 kb API 注进来。这样测试可以直接喂一个假桥，
+     * 不必把 useAgent 跑在 Electron 里。
+     *
+     * 可空 —— 桥缺失时 kb 工具回结构化错误而不是崩。那是加载故障，不是运行环境。
+     */
+    kb?: KbBridge;
+}
+
+/** 知识库桥：preload 暴露的四个方法里 Agent 只用前两个 */
+export interface KbBridge {
+    load: () => Promise<KbLoadPayload>;
+    read: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
 }
 
 export interface AgentState {
@@ -689,6 +765,31 @@ export const useAgent = (deps: AgentDeps): AgentState => {
     // 混用两次渲染的切片会让"读到的旧规则"与"写入的新规则"打架。
     const tamperRef = useRef(deps.tamper);
     useEffect(() => { tamperRef.current = deps.tamper; }, [deps.tamper]);
+
+    /**
+     * 知识库桥镜像。
+     *
+     * 与 tamperRef 同一个理由：dispatchTool 的依赖数组里没有 deps.kb
+     * （它由 preload 暴露，引用天然稳定），但派发发生在 await 之间，
+     * 读镜像比赌闭包捕获的是哪一次渲染可靠。
+     */
+    const kbBridgeRef = useRef(deps.kb);
+    useEffect(() => { kbBridgeRef.current = deps.kb; }, [deps.kb]);
+
+    /**
+     * 知识库索引缓存。
+     *
+     * 整库 190 篇 / 约 3MB 正文，解析一次要遍历全部 front-matter。
+     * 缓存**存在性**而不是内容：`entries` 为 null 表示还没读过，
+     * 空数组表示读过但库里一篇文章都没有 —— 后者不能当"没读过"再读一遍。
+     *
+     * 同时缓存一个在途 Promise：模型可能一步里连发两次 search，
+     * 没有它就会并发读两遍整库。
+     */
+    const kbCacheRef = useRef<{ entries: KbEntry[] | null; inflight: Promise<KbEntry[]> | null }>({
+        entries: null,
+        inflight: null,
+    });
 
     // 停止标志。不能靠 state：循环体在 await 之间读它，state 更新不会及时可见
     const stoppedRef = useRef(false);
@@ -1131,6 +1232,117 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                     key,
                     token: next,
                     warning: '签名已失效 —— 签名覆盖的正是 payload，服务端验签就会拒绝。这是这类调试的固有前提。',
+                });
+            }
+
+            case 'kb': {
+                const bridge = kbBridgeRef.current;
+                if (!bridge) {
+                    return JSON.stringify({
+                        error: '知识库不可用：当前不在 Electron 环境里，没有取数通道。',
+                    });
+                }
+
+                const action = asString(args.action).toLowerCase() || 'search';
+
+                /**
+                 * 取索引，必要时读一次整库。
+                 *
+                 * 失败不缓存：路径配错时用户会去改设置，缓存住错误就再也读不到新路径。
+                 * 成功才写进 entries —— 空库是合法状态，必须与"没读过"区分开。
+                 */
+                const getEntries = async (): Promise<KbEntry[]> => {
+                    const cache = kbCacheRef.current;
+                    if (cache.entries) return cache.entries;
+                    if (cache.inflight) return cache.inflight;
+
+                    const task = (async () => {
+                        const payload = await bridge.load();
+                        if (payload?.error) throw new Error(payload.error);
+                        const built = buildKbIndex(payload?.files || [], payload?.boardIndexes || {});
+                        kbCacheRef.current.entries = built;
+                        return built;
+                    })();
+
+                    cache.inflight = task;
+                    try {
+                        return await task;
+                    } finally {
+                        // 无论成败都清掉在途标记：失败后要允许下一次重试
+                        kbCacheRef.current.inflight = null;
+                    }
+                };
+
+                if (action === 'status') {
+                    try {
+                        const entries = await getEntries();
+                        const boards: Record<string, number> = {};
+                        for (const entry of entries) {
+                            boards[entry.board] = (boards[entry.board] || 0) + 1;
+                        }
+                        return JSON.stringify({ ready: true, articles: entries.length, boards });
+                    } catch (e) {
+                        return JSON.stringify({ error: e instanceof Error ? e.message : String(e) });
+                    }
+                }
+
+                if (action === 'search') {
+                    const query = asString(args.query);
+                    if (!query.trim()) return JSON.stringify({ error: '缺少 query' });
+
+                    try {
+                        const entries = await getEntries();
+                        const hits = searchKb(entries, query);
+                        if (hits.length === 0) {
+                            // 无命中不是错误，但要给出下一步 —— 否则模型会原地重试同一个词。
+                            return JSON.stringify({
+                                query,
+                                hits: [],
+                                notice: '没有匹配。换个说法：用更完整的自然短语，'
+                                    + '或直接说页面现象（如「接口返回 401 未授权」「付费墙遮挡正文」）。'
+                                    + '若这属于视频嗅探 / m3u8 / 防盗链一类，本库不覆盖，请直接用 S 探测页面。',
+                            });
+                        }
+                        return JSON.stringify({ query, hits });
+                    } catch (e) {
+                        return JSON.stringify({ error: e instanceof Error ? e.message : String(e) });
+                    }
+                }
+
+                if (action === 'read') {
+                    const target = asString(args.path);
+                    if (!target) return JSON.stringify({ error: '缺少 path' });
+
+                    try {
+                        const entries = await getEntries();
+                        // 路径按归一化后的形式比对：模型可能原样回传 search 给的 path，
+                        // 也可能自己拼一个带 './' 或反斜杠的。
+                        const normalized = normalizeRel(target);
+                        const entry = entries.find((item) => item.path === normalized);
+                        if (!entry) {
+                            return JSON.stringify({
+                                error: `知识库里没有这篇文章：${target}。`
+                                    + 'path 要用 search 返回的那个，形如 ctf-website/techniques/…/xx.md。',
+                            });
+                        }
+
+                        const payload = await bridge.read(entry.path);
+                        if (payload?.error) return JSON.stringify({ error: payload.error });
+                        if (typeof payload?.content !== 'string') {
+                            return JSON.stringify({ error: `读不到正文：${entry.path}` });
+                        }
+
+                        const result = readKbArticle(entry, payload.content, {
+                            section: asString(args.section),
+                        });
+                        return JSON.stringify(result);
+                    } catch (e) {
+                        return JSON.stringify({ error: e instanceof Error ? e.message : String(e) });
+                    }
+                }
+
+                return JSON.stringify({
+                    error: `未知 action：${action || '(空)'}（kb 可用 search 检索 / read 读文章 / status 看状态）`,
                 });
             }
 

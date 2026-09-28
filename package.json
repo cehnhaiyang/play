@@ -54,6 +54,9 @@
         ],
         "directories": {
             "buildResources": "assets"
+        },
+        "win": {
+            "requestedExecutionLevel": "requireAdministrator"
         }
     },
     "allowScripts": {

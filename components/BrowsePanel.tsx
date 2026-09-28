@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
     AlertCircle,
     AlertTriangle,
@@ -11,18 +12,26 @@ import {
     Check,
     ChevronDown,
     ChevronRight,
+    ChevronsRight,
     Code,
     Compass,
+    FolderPlus,
+    GripVertical,
+    Pencil,
     Database,
+    Download,
+    FolderOpen,
     Globe,
     HardDrive,
     Home,
     KeyRound,
     Layers,
     Loader2,
+    Magnet,
     Maximize2,
     Minimize2,
     Music,
+    Pause,
     Play,
     Plus,
     RefreshCw,
@@ -38,12 +47,16 @@ import {
     Trash2,
     Undo2,
     User,
+    Volume2,
+    VolumeX,
     X,
 } from 'lucide-react';
 import { useBrowse } from '../hooks';
 import type {
     AgentState,
     BookmarksState,
+    DownloadsState,
+    FindInfo,
     SearchEngine,
     Tab,
     TamperState,
@@ -53,12 +66,18 @@ import { SEARCH_ENGINE_OPTIONS, isAddressLike } from '../hooks';
 import type {
     AgentMessage,
     AgentScript,
-    Bookmark,
+    BookmarkNode,
+    BookmarkBarVisibility,
     CookieItem,
+    EdgeDetectResult,
+    EdgeImportResult,
+    EdgeAccountEntry,
     HeaderRule,
+    KbStatus,
     TamperRule,
     WebviewElement,
 } from '../meta';
+import { getAppWindow, getElectronAPI } from '../meta';
 import {
     buildCookieData,
     collectDroppedRules,
@@ -68,6 +87,23 @@ import {
     pickJwtCandidates,
 } from '../utils/utils';
 import { loadJSON, saveJSON } from '../utils/persist';
+import { formatBytes } from '../services/SearchService';
+import { zoomLevelToPercent, type NavigationError } from '../services/BrowserService';
+import {
+    collectFolders,
+    countNodes,
+    findNode,
+    findParent,
+    flattenUrls,
+    isDescendant,
+    type MergeStats,
+} from '../services/BookmarkService';
+import {
+    buildKbIndex,
+    searchKb,
+    type KbEntry,
+    type KbSearchHit,
+} from '../services/KbService';
 
 /**
  * 浏览器面板。
@@ -167,11 +203,49 @@ const addressSecurity = (url: string): { Icon: React.ComponentType<{ className?:
 /*                                  标签栏                                      */
 /* ========================================================================== */
 
+/**
+ * 站点图标。
+ *
+ * 有真实 favicon 就用它，没有才回落到 hostname 取色块。
+ *
+ * 回落不是失败态 —— 很多站点（尤其是纯 API 页、内网页）本来就没有 favicon。
+ * 但**必须**区分这两种情况：取色块永远画得出来，所以"没有图标"这件事
+ * 只能靠"画的是色块还是图片"本身来表达，不能靠空白。
+ *
+ * 加载失败要退回色块：favicon 是远端资源，403/404/跨域都会发生，
+ * 而 broken image 在暗色主题下是一个刺眼的白框。
+ */
+const SiteIcon: React.FC<{ host: string; favicon: string; className?: string }> = ({
+    host, favicon, className = '',
+}) => {
+    const [failed, setFailed] = useState(false);
+
+    // 换了站点要重置失败标记：不重置的话，A 站的坏 favicon 会让 B 站的
+    // 好 favicon 也画不出来（组件按 host 复用，failed 一直挂着）
+    useEffect(() => { setFailed(false); }, [favicon]);
+
+    if (!favicon || failed) return <SiteTile host={host} className={className} />;
+
+    return (
+        <span className={`flex shrink-0 items-center justify-center overflow-hidden rounded-md border border-white/10 bg-white/6 ${className}`}>
+            <img
+                src={favicon}
+                alt=""
+                // 不挂 referrerPolicy：favicon 常被站点按 Referer 判防盗链，
+                // 而这里的 Referer 是应用自身的地址，带上反而更容易被拒
+                className="h-full w-full object-contain"
+                onError={() => setFailed(true)}
+            />
+        </span>
+    );
+};
+
 const TabsBar: React.FC<{
     tabs: TabsState['tabs'];
     activeTabId: string;
     actions: TabsState['actions'];
-}> = ({ tabs, activeTabId, actions }) => (
+    onToggleMute: (tabId: string) => void;
+}> = ({ tabs, activeTabId, actions, onToggleMute }) => (
     <div className="relative flex h-10 shrink-0 items-center gap-1 border-b border-white/8 bg-white/[0.02] px-2">
         <div className="scrollbar-hide flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
             {tabs.map((tab: Tab) => {
@@ -181,6 +255,13 @@ const TabsBar: React.FC<{
                     <div
                         key={tab.id}
                         onClick={() => actions.switchTab(tab.id)}
+                        // 中键关闭标签页。Chrome 的行为，重度用户靠它一天少点几百次
+                        onAuxClick={(event) => {
+                            if (event.button === 1) {
+                                event.preventDefault();
+                                actions.closeTab(tab.id);
+                            }
+                        }}
                         title={tab.url || '新标签页'}
                         className={`group relative flex h-7 min-w-[124px] max-w-[200px] cursor-pointer items-center gap-2 rounded-lg px-2.5 transition-all select-none ${isActive
                             ? 'bg-white/8 text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]'
@@ -195,12 +276,25 @@ const TabsBar: React.FC<{
                         {tab.isLoading ? (
                             <RotateCw className="h-3 w-3 shrink-0 animate-spin text-indigo-400" />
                         ) : (
-                            <SiteTile host={host} className="h-4 w-4 text-[9px]" />
+                            <SiteIcon host={host} favicon={tab.favicon} className="h-4 w-4 text-[9px]" />
                         )}
 
                         <span className={`min-w-0 flex-1 truncate text-xs ${isActive ? 'font-semibold' : ''}`}>
                             {tab.title || '新标签页'}
                         </span>
+
+                        {/* 发声 / 静音指示。**只有真在出声或已被静音时才出现** ——
+                            常驻一个喇叭图标会让每个标签页都多一个无意义的符号 */}
+                        {(tab.audible || tab.muted) && (
+                            <button
+                                onClick={(event) => { event.stopPropagation(); onToggleMute(tab.id); }}
+                                className={`flex h-4 w-4 shrink-0 items-center justify-center rounded transition ${tab.muted ? 'text-slate-500 hover:text-slate-300' : 'text-indigo-400 hover:text-indigo-200'
+                                    }`}
+                                title={tab.muted ? '取消静音' : '静音此标签页'}
+                            >
+                                {tab.muted ? <VolumeX className="h-3 w-3" /> : <Volume2 className="h-3 w-3" />}
+                            </button>
+                        )}
 
                         <button
                             onClick={(event) => { event.stopPropagation(); actions.closeTab(tab.id); }}
@@ -218,7 +312,7 @@ const TabsBar: React.FC<{
         <button
             onClick={() => actions.createTab()}
             className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-slate-500 transition hover:bg-white/8 hover:text-white"
-            title="新建标签页"
+            title="新建标签页（Ctrl+T）"
         >
             <Plus className="h-4 w-4" />
         </button>
@@ -322,6 +416,16 @@ const AddressBar: React.FC<{
     onNavigateToPlayer: () => void;
     onNavigateToAudio: () => void;
     onNavigateToGallery: () => void;
+    onNavigateToTorrent: () => void;
+    /** 中止当前加载 */
+    onStop: () => void;
+    /** 缩放：+1 / -1 / 0（复位） */
+    onZoom: (delta: number) => void;
+    /** 正在进行的下载条数，用于徽标 */
+    downloadCount: number;
+    onToggleDownloads: () => void;
+    /** 地址栏 input 的 ref，供 Ctrl+L 聚焦用 */
+    inputRef: React.RefObject<HTMLInputElement | null>;
 }> = ({
     activeTab,
     activeTabId,
@@ -338,6 +442,12 @@ const AddressBar: React.FC<{
     onNavigateToPlayer,
     onNavigateToAudio,
     onNavigateToGallery,
+    onNavigateToTorrent,
+    onStop,
+    onZoom,
+    downloadCount,
+    onToggleDownloads,
+    inputRef,
 }) => {
         /**
          * 后退/前进是否可用。
@@ -354,23 +464,33 @@ const AddressBar: React.FC<{
         const security = addressSecurity(activeTab.url);
         const query = inputUrl.trim();
         const asSearch = query.length > 0 && !isAddressLike(query);
+        const zoomPercent = zoomLevelToPercent(activeTab.zoomLevel);
 
         return (
             <div className="relative flex h-12 shrink-0 items-center gap-2 border-b border-white/8 bg-white/[0.03] px-2.5">
                 {/* 导航控制 */}
                 <div className="flex shrink-0 items-center gap-0.5">
-                    <NavButton onClick={() => tabActions.goBack(activeTabId)} disabled={!canGoBack} title="后退">
+                    <NavButton onClick={() => tabActions.goBack(activeTabId)} disabled={!canGoBack} title="后退（Alt+←）">
                         <ArrowLeft className="h-4 w-4" />
                     </NavButton>
-                    <NavButton onClick={() => tabActions.goForward(activeTabId)} disabled={!canGoForward} title="前进">
+                    <NavButton onClick={() => tabActions.goForward(activeTabId)} disabled={!canGoForward} title="前进（Alt+→）">
                         <ArrowRight className="h-4 w-4" />
                     </NavButton>
-                    <NavButton onClick={() => tabActions.goHome(activeTabId)} title="主页">
+                    <NavButton onClick={() => tabActions.goHome(activeTabId)} title="主页（Alt+Home）">
                         <Home className="h-4 w-4" />
                     </NavButton>
-                    <NavButton onClick={() => tabActions.reload(activeTabId)} title="刷新">
-                        <RotateCw className={`h-4 w-4 ${activeTab.isLoading || isAnalyzing ? 'animate-spin text-indigo-400' : ''}`} />
-                    </NavButton>
+                    {/* 刷新与停止**共用一个位置**（Chrome 的行为）：加载中显示停止，
+                        加载完显示刷新。两个按钮并排会让工具栏多一个永远灰着的格子，
+                        而且用户想停止时反而要去分辨哪个是哪个 */}
+                    {activeTab.isLoading || isAnalyzing ? (
+                        <NavButton onClick={onStop} title="停止加载（Esc）">
+                            <X className="h-4 w-4" />
+                        </NavButton>
+                    ) : (
+                        <NavButton onClick={() => tabActions.reload(activeTabId)} title="刷新（F5 / Ctrl+R，Shift 强制刷新）">
+                            <RotateCw className="h-4 w-4" />
+                        </NavButton>
+                    )}
                 </div>
 
                 <div className="h-5 w-px shrink-0 bg-white/8" />
@@ -388,6 +508,7 @@ const AddressBar: React.FC<{
                         )}
 
                         <input
+                            ref={inputRef}
                             type="text"
                             value={inputUrl}
                             onChange={(event) => setInputUrl(event.target.value)}
@@ -403,12 +524,24 @@ const AddressBar: React.FC<{
                             className="min-w-0 flex-1 bg-transparent text-sm text-slate-200 outline-none placeholder:text-slate-600"
                         />
 
+                        {/* 缩放指示。**只在非 100% 时出现**：常驻一个"100%"是噪声，
+                            而离开 100% 之后用户需要一个"怎么回到原样"的入口 */}
+                        {activeTab.zoomLevel !== 0 && (
+                            <button
+                                onClick={() => onZoom(0)}
+                                className="flex h-5 shrink-0 items-center rounded px-1 font-mono text-[10px] text-indigo-300 transition hover:bg-white/10"
+                                title={`当前缩放 ${zoomPercent}%，点击复位到 100%`}
+                            >
+                                {zoomPercent}%
+                            </button>
+                        )}
+
                         {activeTab.url && (
                             <button
                                 onClick={() => toggleBookmark(activeTab.url, activeTab.title)}
                                 className={`flex h-5 w-5 shrink-0 items-center justify-center rounded transition ${isCurrentPageBookmarked ? 'text-amber-400' : 'text-slate-600 hover:text-amber-300'
                                     }`}
-                                title={isCurrentPageBookmarked ? '取消收藏' : '收藏此页'}
+                                title={isCurrentPageBookmarked ? '取消收藏' : '收藏此页（Ctrl+D）'}
                             >
                                 <Star className={`h-3.5 w-3.5 ${isCurrentPageBookmarked ? 'fill-current' : ''}`} />
                             </button>
@@ -425,10 +558,27 @@ const AddressBar: React.FC<{
                     </div>
                 </div>
 
-                {/* 右侧功能入口：三个应用入口。地址栏不按域名长出额外按钮 ——
-                    "在播放器里打开这个页面"在画廊与播放器里各有入口 */}
+                {/* 右侧功能入口 */}
                 <div className="flex shrink-0 items-center gap-1.5">
+                    {/* 下载入口。有进行中的下载时显示数量徽标 —— 网页下载不像
+                        嗅探下载那样有独立面板，不给入口用户根本不知道文件去哪了 */}
+                    <button
+                        onClick={onToggleDownloads}
+                        className="relative flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition hover:bg-white/8 hover:text-white"
+                        title="下载内容"
+                    >
+                        <Download className="h-4 w-4" />
+                        {downloadCount > 0 && (
+                            <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-indigo-500 px-0.5 text-[8px] font-bold text-white">
+                                {downloadCount}
+                            </span>
+                        )}
+                    </button>
+
                     <div className="flex items-center gap-0.5 rounded-xl border border-white/8 bg-white/[0.03] p-0.5">
+                        <NavButton onClick={onNavigateToTorrent} title="磁力下载">
+                            <Magnet className="h-4 w-4 text-cyan-400" />
+                        </NavButton>
                         <NavButton onClick={onNavigateToGallery} title="ACG 画廊">
                             <BookOpen className="h-4 w-4 text-rose-400" />
                         </NavButton>
@@ -452,14 +602,1052 @@ const AddressBar: React.FC<{
     };
 
 /* ========================================================================== */
+/*                                 书签栏                                       */
+/* ========================================================================== */
+
+/** 书签下拉菜单的宽度，w-72 = 18rem = 288px。定位计算要用，所以提出来 */
+const BOOKMARK_MENU_WIDTH = 288;
+
+/**
+ * 把下拉菜单送到 document.body 上，用 fixed 定位贴住锚点。
+ *
+ * **为什么不能留在书签栏的 DOM 里**：书签栏的条目区是 `overflow-hidden` ——
+ * 溢出项必须被裁掉，否则那一行会被撑破。而下拉菜单恰恰是**故意**要溢出到
+ * 栏外的。两者直接冲突：留在原地时菜单的 top 落在条目区的盒子之外，
+ * 会被裁成 0 高度。
+ *
+ * 表现就是「点文件夹、点 » 都毫无反应」—— 事件其实都触发了，state 也变了，
+ * 菜单也渲染了，只是被裁得完全看不见。这类故障不报错、不抛异常，所以只能
+ * 靠结构判断，不能靠日志。
+ *
+ * 走 portal 之后菜单不再受书签栏的裁剪约束；锚点坐标每次打开时用
+ * getBoundingClientRect 现算，所以侧边栏开合、窗口缩放都不会让它错位。
+ */
+const BookmarkMenuPortal: React.FC<{
+    /** 菜单要贴住的元素。为 null 时不渲染 —— 首帧 ref 还没挂上 */
+    anchor: HTMLElement | null;
+    /**
+     * below：贴在锚点下方左对齐（书签栏上的文件夹、» 溢出菜单）。
+     * right：贴在锚点右侧、顶对齐（菜单里再展开的嵌套文件夹）。
+     */
+    placement?: 'below' | 'right';
+    children: React.ReactNode;
+}> = ({ anchor, placement = 'below', children }) => {
+    const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+
+    useLayoutEffect(() => {
+        if (!anchor) { setPos(null); return; }
+        const place = () => {
+            const rect = anchor.getBoundingClientRect();
+            const maxLeft = Math.max(8, window.innerWidth - BOOKMARK_MENU_WIDTH - 8);
+            const clampLeft = (value: number) => Math.min(Math.max(8, value), maxLeft);
+
+            if (placement === 'right') {
+                // 右侧放不下就翻到左边。嵌套文件夹在窗口右半边时全靠这一条，
+                // 否则子菜单会整个跑到窗口外，看起来同样是"点了没反应"。
+                const right = rect.right + 2;
+                const left = right + BOOKMARK_MENU_WIDTH > window.innerWidth - 8
+                    ? rect.left - BOOKMARK_MENU_WIDTH - 2
+                    : right;
+                setPos({ left: clampLeft(left), top: Math.max(8, rect.top - 4) });
+                return;
+            }
+            setPos({ left: clampLeft(rect.left), top: rect.bottom + 4 });
+        };
+        place();
+        window.addEventListener('resize', place);
+        // capture 阶段收滚动：菜单自己所在的滚动容器也要跟手
+        window.addEventListener('scroll', place, true);
+        return () => {
+            window.removeEventListener('resize', place);
+            window.removeEventListener('scroll', place, true);
+        };
+    }, [anchor, placement]);
+
+    if (!pos) return null;
+    return createPortal(
+        // z-40 与「右键书签栏」那个菜单同级：都要盖住浏览器面板（z-20），
+        // 但都不该盖住悬浮球（z-50）
+        <div data-bm-menu style={{ position: 'fixed', left: pos.left, top: pos.top }} className="z-40">
+            {children}
+        </div>,
+        document.body,
+    );
+};
+
+/**
+ * 书签栏。
+ *
+ * **位置是硬约束**：它必须插在 AddressBar 与 BrowserView 的容器之间，也就是
+ * 同一根 flex 列的兄弟节点。绝不能让书签栏成为 webview 的祖先或父链上的一环
+ * —— webview 是 Electron 的原生宿主标签，父链一变 React 就会把它卸载重挂，
+ * 页面重新加载（登录态、滚动位置、SPA 路由全丢）。
+ * 这里只占一行高度，开合也只是这一个 div 的出现/消失，webview 的父链不动。
+ *
+ * 溢出用「»」收纳而不是横向滚动：书签栏是一行定高的条，横向滚动条会占掉
+ * 本就不多的高度，而且滚动条本身在暗色主题下很显眼。
+ *
+ * 下拉菜单一律走 BookmarkMenuPortal —— 见该组件的注释。
+ */
+const BookmarkBar: React.FC<{
+    tree: BookmarkNode;
+    onNavigate: (url: string) => void;
+    onOpenManager: () => void;
+    onOpenImport: () => void;
+    onVisibilityChange: (value: BookmarkBarVisibility) => void;
+    visibility: BookmarkBarVisibility;
+    onRemove: (id: string) => void;
+    onOpenInNewTab: (url: string) => void;
+}> = ({ tree, onNavigate, onOpenManager, onOpenImport, onVisibilityChange, visibility, onRemove, onOpenInNewTab }) => {
+    const [openFolderId, setOpenFolderId] = useState<string | null>(null);
+    const [overflowOpen, setOverflowOpen] = useState(false);
+    const barRef = useRef<HTMLDivElement | null>(null);
+    const overflowBtnRef = useRef<HTMLButtonElement | null>(null);
+    const [visibleCount, setVisibleCount] = useState<number>(Number.MAX_SAFE_INTEGER);
+
+    const items = tree.children || [];
+
+    /**
+     * 溢出计算：量每个子项的实际宽度，能塞下几个就显示几个。
+     *
+     * 用 ResizeObserver 而不是监听 window.resize —— 侧边栏开合改变的是**容器**
+     * 宽度，window 尺寸根本没变，只听 resize 会在侧边栏展开后仍然溢出。
+     */
+    useEffect(() => {
+        const host = barRef.current;
+        if (!host) return;
+        const measure = () => {
+            const width = host.clientWidth;
+            if (width <= 0) return;
+            const children = Array.from(host.querySelectorAll<HTMLElement>('[data-bm-item]'));
+            if (children.length === 0) { setVisibleCount(Number.MAX_SAFE_INTEGER); return; }
+            // 给「»」按钮留 34px
+            let used = 0;
+            let count = 0;
+            const limit = width - 34;
+            for (const child of children) {
+                const w = child.offsetWidth + 2;
+                if (used + w > limit) break;
+                used += w;
+                count += 1;
+            }
+            setVisibleCount(count === 0 ? children.length : count);
+        };
+        measure();
+        const observer = new ResizeObserver(measure);
+        observer.observe(host);
+        return () => observer.disconnect();
+    }, [items.length]);
+
+    // 点空白处收起下拉
+    useEffect(() => {
+        if (!openFolderId && !overflowOpen) return;
+        const close = (event: MouseEvent) => {
+            const target = event.target as HTMLElement;
+            if (target.closest('[data-bm-menu]')) return;
+            setOpenFolderId(null);
+            setOverflowOpen(false);
+        };
+        window.addEventListener('mousedown', close);
+        return () => window.removeEventListener('mousedown', close);
+    }, [openFolderId, overflowOpen]);
+
+    const shown = items.slice(0, visibleCount);
+    const hidden = items.slice(visibleCount);
+
+    return (
+        <div
+            className="relative flex h-8 shrink-0 items-center gap-0.5 border-b border-white/8 bg-slate-900/60 px-2"
+            onContextMenu={(event) => {
+                event.preventDefault();
+                // 书签栏自身的右键菜单：显示策略 + 管理入口。
+                // 不复用主进程的 Menu.popup —— 那是给 webview 页面内容用的，
+                // 而这里是渲染层的 DOM，走原生菜单反而要绕一大圈 IPC。
+                setOverflowOpen(false);
+                setOpenFolderId('__bar__');
+            }}
+        >
+            <div ref={barRef} className="flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
+                {shown.map((node) => (
+                    <BookmarkBarItem
+                        key={node.id}
+                        node={node}
+                        onNavigate={onNavigate}
+                        onOpenInNewTab={onOpenInNewTab}
+                        onRemove={onRemove}
+                        open={openFolderId === node.id}
+                        onToggle={() => setOpenFolderId((prev) => (prev === node.id ? null : node.id))}
+                    />
+                ))}
+
+                {hidden.length > 0 && (
+                    <div className="relative shrink-0" data-bm-menu>
+                        <button
+                            ref={overflowBtnRef}
+                            onClick={() => setOverflowOpen((prev) => !prev)}
+                            className="flex h-6 w-7 items-center justify-center rounded text-slate-400 transition hover:bg-white/8 hover:text-slate-200"
+                            title={`还有 ${hidden.length} 项`}
+                        >
+                            <ChevronsRight className="h-3.5 w-3.5" />
+                        </button>
+                        {overflowOpen && (
+                            <BookmarkMenuPortal anchor={overflowBtnRef.current}>
+                                <BookmarkDropdown
+                                    nodes={hidden}
+                                    onNavigate={(url) => { onNavigate(url); setOverflowOpen(false); }}
+                                    onOpenInNewTab={(url) => { onOpenInNewTab(url); setOverflowOpen(false); }}
+                                    onRemove={onRemove}
+                                />
+                            </BookmarkMenuPortal>
+                        )}
+                    </div>
+                )}
+            </div>
+
+            <button
+                onClick={onOpenImport}
+                className="ml-1 flex h-6 w-6 shrink-0 items-center justify-center rounded text-slate-500 transition hover:bg-white/8 hover:text-indigo-300"
+                title="从 Edge 导入"
+            >
+                <Download className="h-3.5 w-3.5" />
+            </button>
+            <button
+                onClick={onOpenManager}
+                className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-slate-500 transition hover:bg-white/8 hover:text-slate-200"
+                title="书签管理器"
+            >
+                <Layers className="h-3.5 w-3.5" />
+            </button>
+
+            {openFolderId === '__bar__' && (
+                <div className="absolute left-2 top-8 z-40" data-bm-menu>
+                    <div className="w-52 overflow-hidden rounded-lg border border-white/10 bg-slate-900/98 py-1 shadow-2xl backdrop-blur">
+                        <div className="px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">书签栏显示</div>
+                        {([
+                            ['always', '始终显示'],
+                            ['newTab', '仅新标签页'],
+                            ['never', '从不显示'],
+                        ] as [BookmarkBarVisibility, string][]).map(([value, label]) => (
+                            <button
+                                key={value}
+                                onClick={() => { onVisibilityChange(value); setOpenFolderId(null); }}
+                                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-slate-300 transition hover:bg-white/8"
+                            >
+                                <span className="flex h-3.5 w-3.5 items-center justify-center">
+                                    {visibility === value && <Check className="h-3 w-3 text-indigo-400" />}
+                                </span>
+                                {label}
+                            </button>
+                        ))}
+                        <div className="my-1 h-px bg-white/8" />
+                        <button
+                            onClick={() => { onOpenManager(); setOpenFolderId(null); }}
+                            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-slate-300 transition hover:bg-white/8"
+                        >
+                            <Layers className="h-3 w-3" /> 书签管理器
+                        </button>
+                        <button
+                            onClick={() => { onOpenImport(); setOpenFolderId(null); }}
+                            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-slate-300 transition hover:bg-white/8"
+                        >
+                            <Download className="h-3 w-3" /> 从 Edge 导入
+                        </button>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
+/** 书签栏上的一个条目：网址直接跳转，文件夹点开下拉 */
+const BookmarkBarItem: React.FC<{
+    node: BookmarkNode;
+    onNavigate: (url: string) => void;
+    onOpenInNewTab: (url: string) => void;
+    onRemove: (id: string) => void;
+    open: boolean;
+    onToggle: () => void;
+}> = ({ node, onNavigate, onOpenInNewTab, onRemove, open, onToggle }) => {
+    const host = node.type === 'url' ? safeHostname(node.url || '') : '';
+    // 下拉要贴在这个按钮下面，而它自己被 overflow-hidden 裁着 —— 见 BookmarkMenuPortal
+    const btnRef = useRef<HTMLButtonElement | null>(null);
+
+    return (
+        <div className="relative shrink-0" data-bm-item data-bm-menu>
+            <button
+                ref={btnRef}
+                onClick={() => (node.type === 'folder' ? onToggle() : onNavigate(node.url || ''))}
+                onAuxClick={(event) => {
+                    if (event.button !== 1 || node.type !== 'url') return;
+                    event.preventDefault();
+                    onOpenInNewTab(node.url || '');
+                }}
+                title={node.type === 'url' ? node.url : `${node.title}（${(node.children || []).length} 项）`}
+                className={`flex h-6 max-w-[190px] items-center gap-1.5 rounded px-1.5 text-[11px] transition ${open ? 'bg-white/10 text-white' : 'text-slate-300 hover:bg-white/8 hover:text-white'
+                    }`}
+            >
+                {node.type === 'folder' ? (
+                    <FolderOpen className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                ) : (
+                    <SiteIcon host={host} favicon={node.icon || ''} className="h-3.5 w-3.5 text-[8px]" />
+                )}
+                <span className="truncate">{node.title}</span>
+            </button>
+
+            {open && node.type === 'folder' && (
+                <BookmarkMenuPortal anchor={btnRef.current}>
+                    <BookmarkDropdown
+                        nodes={node.children || []}
+                        onNavigate={(url) => { onNavigate(url); onToggle(); }}
+                        onOpenInNewTab={(url) => { onOpenInNewTab(url); onToggle(); }}
+                        onRemove={onRemove}
+                    />
+                </BookmarkMenuPortal>
+            )}
+        </div>
+    );
+};
+
+/**
+ * 书签下拉菜单（文件夹内容 / 溢出内容共用）。
+ *
+ * 文件夹用**嵌套子菜单**而不是平铺：Edge 与 Chrome 都是这个行为，而且平铺
+ * 会在深目录下变成一个几百项的长列表，反而找不到东西。
+ *
+ * **定位由 BookmarkMenuPortal 负责**，这里只画内容：调用方一律把它包在
+ * portal 里。自己带 `absolute` 的话会被书签栏的 overflow-hidden 裁掉。
+ */
+const BookmarkDropdown: React.FC<{
+    nodes: BookmarkNode[];
+    onNavigate: (url: string) => void;
+    onOpenInNewTab: (url: string) => void;
+    onRemove: (id: string) => void;
+}> = ({ nodes, onNavigate, onOpenInNewTab, onRemove }) => (
+    <div
+        className="custom-scrollbar max-h-[70vh] w-72 overflow-y-auto rounded-lg border border-white/10 bg-slate-900/98 py-1 shadow-2xl backdrop-blur"
+        data-bm-menu
+    >
+        {nodes.length === 0 ? (
+            <div className="px-3 py-2 text-[11px] text-slate-500">这个文件夹是空的</div>
+        ) : nodes.map((node) => (
+            <BookmarkDropdownRow
+                key={node.id}
+                node={node}
+                onNavigate={onNavigate}
+                onOpenInNewTab={onOpenInNewTab}
+                onRemove={onRemove}
+            />
+        ))}
+    </div>
+);
+
+const BookmarkDropdownRow: React.FC<{
+    node: BookmarkNode;
+    onNavigate: (url: string) => void;
+    onOpenInNewTab: (url: string) => void;
+    onRemove: (id: string) => void;
+}> = ({ node, onNavigate, onOpenInNewTab, onRemove }) => {
+    const [subOpen, setSubOpen] = useState(false);
+    const host = node.type === 'url' ? safeHostname(node.url || '') : '';
+    const rowRef = useRef<HTMLDivElement | null>(null);
+    const closeTimer = useRef<number | null>(null);
+
+    /**
+     * 子菜单是 portal 到 body 的，鼠标从这一行移到子菜单上时会先离开这一行。
+     * 直接 onMouseLeave 关掉的话，子菜单在鼠标抵达之前就没了 —— 表现为
+     * 「嵌套文件夹永远展不开」。所以关要延迟，且进入子菜单时取消。
+     */
+    const cancelClose = useCallback(() => {
+        if (closeTimer.current !== null) {
+            window.clearTimeout(closeTimer.current);
+            closeTimer.current = null;
+        }
+    }, []);
+    const scheduleClose = useCallback(() => {
+        cancelClose();
+        closeTimer.current = window.setTimeout(() => setSubOpen(false), 160);
+    }, [cancelClose]);
+    useEffect(() => cancelClose, [cancelClose]);
+
+    if (node.type === 'folder') {
+        return (
+            <div ref={rowRef} className="relative" onMouseEnter={() => { cancelClose(); setSubOpen(true); }} onMouseLeave={scheduleClose}>
+                <div className="flex items-center gap-2 px-3 py-1.5 text-[11px] text-slate-300 hover:bg-white/8">
+                    <FolderOpen className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                    <span className="min-w-0 flex-1 truncate">{node.title}</span>
+                    <ChevronRight className="h-3 w-3 shrink-0 text-slate-500" />
+                </div>
+                {subOpen && (
+                    // 同样必须 portal：父级下拉是 overflow-y-auto，留在里面会被裁掉
+                    <BookmarkMenuPortal anchor={rowRef.current} placement="right">
+                        <div onMouseEnter={cancelClose} onMouseLeave={scheduleClose}>
+                            <BookmarkDropdown
+                                nodes={node.children || []}
+                                onNavigate={onNavigate}
+                                onOpenInNewTab={onOpenInNewTab}
+                                onRemove={onRemove}
+                            />
+                        </div>
+                    </BookmarkMenuPortal>
+                )}
+            </div>
+        );
+    }
+
+    return (
+        <div className="group/row flex items-center gap-2 px-3 py-1.5 hover:bg-white/8">
+            <button
+                onClick={() => onNavigate(node.url || '')}
+                onAuxClick={(event) => { if (event.button === 1) { event.preventDefault(); onOpenInNewTab(node.url || ''); } }}
+                title={node.url}
+                className="flex min-w-0 flex-1 items-center gap-2 text-left"
+            >
+                <SiteIcon host={host} favicon={node.icon || ''} className="h-4 w-4 text-[9px]" />
+                <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[11px] text-slate-200">{node.title}</span>
+                    <span className="block truncate font-mono text-[9px] text-slate-500">{host}</span>
+                </span>
+            </button>
+            <button
+                onClick={() => onRemove(node.id)}
+                className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-slate-600 opacity-0 transition group-hover/row:opacity-100 hover:bg-rose-500/15 hover:text-rose-300"
+                title="移除"
+            >
+                <Trash2 className="h-3 w-3" />
+            </button>
+        </div>
+    );
+};
+
+/* ========================================================================== */
+/*                              书签管理器                                      */
+/* ========================================================================== */
+
+/**
+ * 书签管理器：左侧文件夹树 + 右侧条目列表。
+ *
+ * 拖拽用的是 HTML5 draggable 而不是自己算坐标：这里的拖放目标是"另一个列表项"，
+ * 而 dragover 事件天然带 preventDefault 语义（不 preventDefault 就不允许放置），
+ * 自己实现反而要额外处理滚动与自动展开。
+ *
+ * **拒绝拖进自己的子树**：判据走 BookmarkService 的 isDescendant。这是本面板
+ * 最需要防的事故 —— 朴素实现会把子树挂到自己里面，整块从书签里消失。
+ */
+const BookmarkManager: React.FC<{
+    tree: BookmarkNode;
+    onClose: () => void;
+    onNavigate: (url: string) => void;
+    onRemove: (id: string) => void;
+    onRename: (id: string, title: string) => void;
+    onUpdateUrl: (id: string, url: string) => void;
+    onAddFolder: (parentId: string, title: string) => void;
+    onMove: (id: string, targetFolderId: string, index?: number) => void;
+    onOpenImport: () => void;
+}> = ({ tree, onClose, onNavigate, onRemove, onRename, onUpdateUrl, onAddFolder, onMove, onOpenImport }) => {
+    const [selectedId, setSelectedId] = useState(tree.id);
+    const [query, setQuery] = useState('');
+    const [dragId, setDragId] = useState<string | null>(null);
+    const [editingId, setEditingId] = useState<string | null>(null);
+    const [draft, setDraft] = useState('');
+    const [newFolderMode, setNewFolderMode] = useState(false);
+
+    const selected = findNode(tree, selectedId) || tree;
+    const folders = useMemo(() => collectFolders(tree), [tree]);
+
+    /**
+     * 结构根的 id（"收藏夹栏 / 其他收藏夹" —— 虚拟根的直属孩子）。
+     *
+     * 它们删不得（removeBookmark 对根直接返回原树），所以之前挂在行上的删除键
+     * 点了毫无反应。这里直接不渲染那个键，而不是留一个点不动的按钮。
+     * 选中文件夹自身的删除走标题栏的「删除此文件夹」（见下面）。
+     */
+    const rootIds = useMemo(() => new Set((tree.children || []).map((c) => c.id)), [tree]);
+
+    /** 当前选中的是不是一个可删除的文件夹（虚拟根与结构根除外） */
+    const isSelectedDeletable = selected.type === 'folder' && selected.id !== tree.id && !rootIds.has(selected.id);
+
+    /** 删除选中的文件夹本身，并把选中态退到父级（删完停在空处会让人以为没删掉） */
+    const deleteSelectedFolder = () => {
+        if (!isSelectedDeletable) return;
+        const parent = findParent(tree, selected.id);
+        onRemove(selected.id);
+        setSelectedId(parent ? parent.id : tree.id);
+    };
+
+    /** 搜索结果：跨整个树，按标题与 url 匹配 */
+    const searchResults = useMemo(() => {
+        const keyword = query.trim().toLowerCase();
+        if (!keyword) return null;
+        return flattenUrls(tree).filter((entry) => {
+            const title = (entry.node.title || '').toLowerCase();
+            const url = (entry.node.url || '').toLowerCase();
+            return title.includes(keyword) || url.includes(keyword);
+        }).slice(0, 300);
+    }, [tree, query]);
+
+    const list = searchResults
+        ? searchResults.map((entry) => entry.node)
+        : (selected.children || []);
+
+    const commitEdit = () => {
+        if (!editingId) return;
+        if (editingId.startsWith('url:')) onUpdateUrl(editingId.slice(4), draft);
+        else onRename(editingId, draft);
+        setEditingId(null);
+    };
+
+    return (
+        <div className="absolute inset-0 z-30 flex flex-col bg-slate-950/98 backdrop-blur">
+            <div className="flex h-11 shrink-0 items-center gap-2 border-b border-white/8 px-3">
+                <Layers className="h-4 w-4 text-indigo-300" />
+                <span className="text-xs font-bold text-slate-200">书签管理器</span>
+                <span className="font-mono text-[10px] text-slate-500">
+                    {countNodes(tree)} 项
+                </span>
+                <div className="relative ml-3 min-w-0 flex-1 max-w-xs">
+                    <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-500" />
+                    <input
+                        value={query}
+                        onChange={(event) => setQuery(event.target.value)}
+                        placeholder="搜索书签…"
+                        className="w-full rounded-md border border-white/10 bg-slate-900/70 py-1 pl-7 pr-2 text-[11px] text-slate-200 outline-none placeholder:text-slate-600 focus:border-indigo-400/40"
+                    />
+                </div>
+                <button
+                    onClick={onOpenImport}
+                    className="flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 text-[10px] text-slate-300 transition hover:border-indigo-400/40 hover:text-indigo-200"
+                >
+                    <Download className="h-3 w-3" /> 从 Edge 导入
+                </button>
+                <button onClick={onClose} className="flex h-6 w-6 items-center justify-center rounded text-slate-500 transition hover:bg-white/8 hover:text-slate-200">
+                    <X className="h-3.5 w-3.5" />
+                </button>
+            </div>
+
+            <div className="flex min-h-0 flex-1">
+                {/* 左：文件夹树 */}
+                <div className="custom-scrollbar w-60 shrink-0 overflow-y-auto border-r border-white/8 py-2">
+                    <FolderTreeRow
+                        node={tree}
+                        depth={0}
+                        selectedId={selectedId}
+                        onSelect={(id) => { setSelectedId(id); setQuery(''); }}
+                        dragId={dragId}
+                        onDragStart={setDragId}
+                        onDropNode={(targetId) => {
+                            if (dragId && dragId !== targetId) onMove(dragId, targetId);
+                            setDragId(null);
+                        }}
+                    />
+                    {folders.filter((f) => f.node.id !== tree.id).map((folder) => (
+                        <FolderTreeRow
+                            key={folder.node.id}
+                            node={folder.node}
+                            depth={folder.depth}
+                            selectedId={selectedId}
+                            onSelect={(id) => { setSelectedId(id); setQuery(''); }}
+                            dragId={dragId}
+                            onDragStart={setDragId}
+                            onDropNode={(targetId) => {
+                                if (dragId && dragId !== targetId) onMove(dragId, targetId);
+                                setDragId(null);
+                            }}
+                        />
+                    ))}
+                </div>
+
+                {/* 右：条目列表 */}
+                <div className="flex min-w-0 flex-1 flex-col">
+                    <div className="flex h-9 shrink-0 items-center gap-2 border-b border-white/8 px-3">
+                        <span className="min-w-0 flex-1 truncate text-[11px] font-bold text-slate-300">
+                            {searchResults ? `搜索「${query}」` : selected.title}
+                        </span>
+                        {!searchResults && (
+                            <button
+                                onClick={() => { setNewFolderMode(true); }}
+                                className="flex items-center gap-1 rounded px-1.5 py-1 text-[10px] text-slate-400 transition hover:bg-white/8 hover:text-slate-200"
+                            >
+                                <FolderPlus className="h-3 w-3" /> 新建文件夹
+                            </button>
+                        )}
+                        {!searchResults && isSelectedDeletable && (
+                            <button
+                                onClick={deleteSelectedFolder}
+                                className="flex items-center gap-1 rounded px-1.5 py-1 text-[10px] text-slate-400 transition hover:bg-rose-500/15 hover:text-rose-300"
+                                title="删除当前选中的文件夹（含其中全部书签）"
+                            >
+                                <Trash2 className="h-3 w-3" /> 删除此文件夹
+                            </button>
+                        )}
+                    </div>
+
+                    {newFolderMode && (
+                        <div className="flex items-center gap-2 border-b border-white/8 px-3 py-1.5">
+                            <input
+                                autoFocus
+                                value={draft}
+                                onChange={(event) => setDraft(event.target.value)}
+                                onKeyDown={(event) => {
+                                    if (event.key === 'Enter') { onAddFolder(selected.id, draft); setDraft(''); setNewFolderMode(false); }
+                                    if (event.key === 'Escape') { setDraft(''); setNewFolderMode(false); }
+                                }}
+                                placeholder="文件夹名称，回车确认"
+                                className="min-w-0 flex-1 rounded border border-white/10 bg-slate-900/70 px-2 py-1 text-[11px] text-slate-200 outline-none focus:border-indigo-400/40"
+                            />
+                            <button
+                                onClick={() => { onAddFolder(selected.id, draft); setDraft(''); setNewFolderMode(false); }}
+                                className="rounded px-2 py-1 text-[10px] text-indigo-300 hover:bg-white/8"
+                            >
+                                创建
+                            </button>
+                        </div>
+                    )}
+
+                    <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto py-1">
+                        {list.length === 0 ? (
+                            <div className="flex h-full items-center justify-center text-[11px] text-slate-600">
+                                {searchResults ? '没有匹配的书签' : '这个文件夹是空的 —— 把书签拖进来即可'}
+                            </div>
+                        ) : list.map((node, index) => (
+                            <div
+                                key={node.id}
+                                draggable={!searchResults}
+                                onDragStart={() => setDragId(node.id)}
+                                onDragEnd={() => setDragId(null)}
+                                onDragOver={(event) => {
+                                    if (!dragId || dragId === node.id) return;
+                                    // 拖到文件夹上 → 放进该文件夹；拖到网址上 → 插到它前面
+                                    const source = findNode(tree, dragId);
+                                    if (!source) return;
+                                    if (node.type === 'folder' && isDescendant(source, node.id)) return;
+                                    event.preventDefault();
+                                }}
+                                onDrop={(event) => {
+                                    event.preventDefault();
+                                    if (!dragId || dragId === node.id) return;
+                                    const source = findNode(tree, dragId);
+                                    if (!source) return;
+                                    if (node.type === 'folder') {
+                                        if (isDescendant(source, node.id)) return;
+                                        onMove(dragId, node.id);
+                                    } else {
+                                        onMove(dragId, selected.id, index);
+                                    }
+                                    setDragId(null);
+                                }}
+                                className={`group/bm flex items-center gap-2 px-3 py-1.5 transition ${dragId === node.id ? 'opacity-40' : 'hover:bg-white/5'
+                                    }`}
+                            >
+                                {!searchResults && <GripVertical className="h-3 w-3 shrink-0 cursor-grab text-slate-700" />}
+                                {node.type === 'folder' ? (
+                                    <FolderOpen className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                                ) : (
+                                    <SiteIcon host={safeHostname(node.url || '')} favicon={node.icon || ''} className="h-4 w-4 text-[9px]" />
+                                )}
+
+                                {editingId === node.id || editingId === `url:${node.id}` ? (
+                                    <input
+                                        autoFocus
+                                        value={draft}
+                                        onChange={(event) => setDraft(event.target.value)}
+                                        onBlur={commitEdit}
+                                        onKeyDown={(event) => {
+                                            if (event.key === 'Enter') commitEdit();
+                                            if (event.key === 'Escape') setEditingId(null);
+                                        }}
+                                        className="min-w-0 flex-1 rounded border border-indigo-400/40 bg-slate-900/80 px-1.5 py-0.5 text-[11px] text-slate-100 outline-none"
+                                    />
+                                ) : (
+                                    <button
+                                        onClick={() => {
+                                            if (node.type === 'folder') { setSelectedId(node.id); setQuery(''); }
+                                            else onNavigate(node.url || '');
+                                        }}
+                                        className="min-w-0 flex-1 text-left"
+                                    >
+                                        <span className="block truncate text-[11px] text-slate-200">{node.title}</span>
+                                        {node.type === 'url' && (
+                                            <span className="block truncate font-mono text-[9px] text-slate-500">{node.url}</span>
+                                        )}
+                                        {node.type === 'folder' && (
+                                            <span className="block text-[9px] text-slate-500">{(node.children || []).length} 项</span>
+                                        )}
+                                    </button>
+                                )}
+
+                                <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover/bm:opacity-100">
+                                    <button
+                                        onClick={() => { setEditingId(node.id); setDraft(node.title); }}
+                                        className="flex h-5 w-5 items-center justify-center rounded text-slate-500 hover:bg-white/10 hover:text-slate-200"
+                                        title="重命名"
+                                    >
+                                        <Pencil className="h-3 w-3" />
+                                    </button>
+                                    {node.type === 'url' && (
+                                        <button
+                                            onClick={() => { setEditingId(`url:${node.id}`); setDraft(node.url || ''); }}
+                                            className="flex h-5 w-5 items-center justify-center rounded text-slate-500 hover:bg-white/10 hover:text-slate-200"
+                                            title="修改网址"
+                                        >
+                                            <Globe className="h-3 w-3" />
+                                        </button>
+                                    )}
+                                    {/* 结构根（收藏夹栏 / 其他收藏夹）删不得，不渲染删除键 ——
+                                        之前这里挂着点了没反应的按钮 */}
+                                    {!rootIds.has(node.id) && (
+                                        <button
+                                            onClick={() => onRemove(node.id)}
+                                            className="flex h-5 w-5 items-center justify-center rounded text-slate-500 hover:bg-rose-500/15 hover:text-rose-300"
+                                            title="删除"
+                                        >
+                                            <Trash2 className="h-3 w-3" />
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+/** 管理器左侧的文件夹树一行 */
+const FolderTreeRow: React.FC<{
+    node: BookmarkNode;
+    depth: number;
+    selectedId: string;
+    onSelect: (id: string) => void;
+    dragId: string | null;
+    onDragStart: (id: string) => void;
+    onDropNode: (targetId: string) => void;
+}> = ({ node, depth, selectedId, onSelect, dragId, onDragStart, onDropNode }) => {
+    const [over, setOver] = useState(false);
+    const isSelected = selectedId === node.id;
+
+    return (
+        <div
+            draggable={depth > 0}
+            onDragStart={() => onDragStart(node.id)}
+            onDragOver={(event) => { if (dragId && dragId !== node.id) { event.preventDefault(); setOver(true); } }}
+            onDragLeave={() => setOver(false)}
+            onDrop={(event) => { event.preventDefault(); setOver(false); onDropNode(node.id); }}
+            onClick={() => onSelect(node.id)}
+            style={{ paddingLeft: 8 + depth * 12 }}
+            className={`flex cursor-pointer items-center gap-1.5 py-1 pr-2 text-[11px] transition ${isSelected ? 'bg-indigo-500/15 text-indigo-200' : 'text-slate-300 hover:bg-white/6'
+                } ${over ? 'ring-1 ring-inset ring-indigo-400/60' : ''}`}
+        >
+            <FolderOpen className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+            <span className="min-w-0 flex-1 truncate">{node.title}</span>
+            <span className="shrink-0 font-mono text-[9px] text-slate-600">{countNodes(node)}</span>
+        </div>
+    );
+};
+
+/* ========================================================================== */
+/*                              Edge 导入面板                                   */
+/* ========================================================================== */
+
+/** 导入项开关的清单。**唯一真值** —— 文案、默认值、请求参数都从这里生成 */
+const EDGE_IMPORT_ITEMS: { key: string; label: string; hint: string; always?: boolean }[] = [
+    { key: 'bookmarks', label: '收藏夹', hint: '含文件夹层级与网站图标', always: true },
+    { key: 'favicons', label: '网站图标', hint: '从 Edge 的图标库取 16/32px 图' },
+    { key: 'history', label: '浏览历史', hint: '最近 3000 条' },
+    { key: 'autofill', label: '自动填充', hint: '表单里填过的名字与值' },
+    { key: 'accounts', label: '账号', hint: '各站点保存的用户名（不含密码）' },
+    { key: 'cookies', label: 'Cookie（含登录态）', hint: '需要完全退出 Edge' },
+    { key: 'searchEngine', label: '默认搜索引擎', hint: '只读取，不自动切换' },
+];
+
+/** 导入来的账号落盘键。裸键，与书签那几个键同一命名空间 */
+const EDGE_ACCOUNTS_STORE_KEY = 'react-player-edge-accounts';
+
+/**
+ * 导入来的账号存在 localStorage 里。
+ *
+ * 只显示在导入面板的结果里是不够的 —— 面板一关数字就没了，用户没法确认
+ * 到底导进来了什么，也没法拿去用。而账号是明文（密码才是解不开的那个），
+ * 存下来没有额外的安全损失：它们本来就在本机的 Edge 库里明文躺着。
+ */
+const loadStoredAccounts = (): EdgeAccountEntry[] => {
+    const saved = loadJSON<EdgeAccountEntry[]>(EDGE_ACCOUNTS_STORE_KEY, [], '');
+    return Array.isArray(saved) ? saved : [];
+};
+
+/**
+ * Edge 导入面板。
+ *
+ * 三处刻意的设计：
+ *
+ *  1. **密码不可导入且写明原因**。不是漏做 —— Edge 的密码库是 v20
+ *     （App-Bound Encryption），离线解密目前只做 Cookie（含登录态），
+ *     密码的派生细节未验证。给一个点了没反应的开关比不做更糟。
+ *  2. **逐项显示结果**。每个来源要么显示条数，要么显示失败原因。
+ *     静默跳过会让用户以为"Edge 里就这些"。
+ *  3. **Cookie 那条会明确提示先退出 Edge**。实测 Edge 关掉窗口后仍有后台进程
+ *     持有 Cookies 库的独占锁（三种读法全 EBUSY），不提示的话用户只会看到
+ *     一条莫名其妙的失败。
+ */
+const EdgeImportPanel: React.FC<{
+    onClose: () => void;
+    onImported: (result: EdgeImportResult) => MergeStats | null;
+}> = ({ onClose, onImported }) => {
+    const [detected, setDetected] = useState<EdgeDetectResult | null>(null);
+    const [profileId, setProfileId] = useState('Default');
+    const [enabled, setEnabled] = useState<Record<string, boolean>>({
+        bookmarks: true, favicons: true, history: true, autofill: true, accounts: true, cookies: true, searchEngine: true,
+    });
+    const [running, setRunning] = useState(false);
+    const [progress, setProgress] = useState('');
+    const [result, setResult] = useState<EdgeImportResult | null>(null);
+    /** 本次实际合并进书签树的统计（与 Edge 侧条数是两回事：重复导入时 Edge 条数不变） */
+    const [merge, setMerge] = useState<MergeStats | null>(null);
+    const [error, setError] = useState('');
+    const [accounts, setAccounts] = useState<EdgeAccountEntry[]>(loadStoredAccounts);
+    const [showAccounts, setShowAccounts] = useState(false);
+
+    useEffect(() => {
+        const api = getElectronAPI();
+        if (!api?.edge) { setError('读取不到 Edge 导入桥（preload 未加载），请重启应用。'); return; }
+        api.edge.detect()
+            .then((data) => {
+                setDetected(data);
+                if (data.profiles.length > 0) setProfileId(data.profiles[0].id);
+            })
+            .catch((e) => setError(e instanceof Error ? e.message : '探测 Edge 失败'));
+    }, []);
+
+    useEffect(() => {
+        const api = getElectronAPI();
+        if (!api?.edge) return;
+        return api.edge.onProgress((message) => setProgress(message));
+    }, []);
+
+    const run = async () => {
+        const api = getElectronAPI();
+        if (!api?.edge) return;
+        setRunning(true);
+        setError('');
+        setProgress('');
+        try {
+            const data = await api.edge.run({ profileId, include: enabled });
+            setResult(data);
+            // 账号要落盘才留得住 —— 面板一关数字就没了，用户无法确认导进来了什么
+            if (data.ok && data.accounts.length > 0) {
+                setAccounts(data.accounts);
+                saveJSON(EDGE_ACCOUNTS_STORE_KEY, data.accounts, '');
+            }
+            if (data.ok) setMerge(onImported(data));
+        } catch (e) {
+            setError(e instanceof Error ? e.message : '导入失败');
+        } finally {            setRunning(false);
+            setProgress('');
+        }
+    };
+
+    const profile = detected?.profiles.find((item) => item.id === profileId);
+
+    return (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-slate-950/80 p-6 backdrop-blur-sm">
+            <div className="flex max-h-full w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-white/10 bg-slate-900/98 shadow-2xl">
+                <div className="flex shrink-0 items-center gap-2 border-b border-white/8 px-4 py-3">
+                    <Download className="h-4 w-4 text-indigo-300" />
+                    <span className="text-xs font-bold text-slate-200">从 Edge 导入</span>
+                    <div className="flex-1" />
+                    <button onClick={onClose} className="flex h-6 w-6 items-center justify-center rounded text-slate-500 transition hover:bg-white/8 hover:text-slate-200">
+                        <X className="h-3.5 w-3.5" />
+                    </button>
+                </div>
+
+                <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-3">
+                    {error && (
+                        <div className="mb-3 flex items-start gap-2 rounded-lg border border-rose-500/25 bg-rose-500/8 px-3 py-2 text-[11px] text-rose-200">
+                            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                            <span>{error}</span>
+                        </div>
+                    )}
+
+                    {!detected && !error && (
+                        <div className="flex items-center gap-2 py-6 text-[11px] text-slate-500">
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" /> 正在探测 Edge…
+                        </div>
+                    )}
+
+                    {detected && !detected.available && (
+                        <div className="rounded-lg border border-amber-500/25 bg-amber-500/8 px-3 py-2 text-[11px] text-amber-200">
+                            {detected.reason || '没有找到 Edge。'}
+                        </div>
+                    )}
+
+                    {detected?.available && (
+                        <>
+                            <div className="mb-3 rounded-lg border border-white/8 bg-white/3 px-3 py-2">
+                                <div className="text-[11px] font-bold text-slate-200">
+                                    {detected.label} <span className="font-mono text-[10px] text-slate-500">{detected.version}</span>
+                                </div>
+                                <div className="mt-0.5 break-all font-mono text-[9px] text-slate-600">{detected.userDataDir}</div>
+                            </div>
+
+                            {detected.profiles.length > 1 && (
+                                <div className="mb-3">
+                                    <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">配置文件</div>
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {detected.profiles.map((item) => (
+                                            <button
+                                                key={item.id}
+                                                onClick={() => setProfileId(item.id)}
+                                                className={`rounded-md border px-2 py-1 text-[10px] transition ${profileId === item.id
+                                                    ? 'border-indigo-400/50 bg-indigo-500/15 text-indigo-200'
+                                                    : 'border-white/10 text-slate-400 hover:border-white/20 hover:text-slate-200'
+                                                    }`}
+                                            >
+                                                {item.name} · {item.bookmarkCount} 书签
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {profile && (
+                                <div className="mb-3 grid grid-cols-2 gap-1.5 text-[10px] text-slate-400">
+                                    <div className="rounded border border-white/8 px-2 py-1">收藏夹 <span className="font-mono text-slate-200">{profile.bookmarkCount}</span> 条 / <span className="font-mono text-slate-200">{profile.folderCount}</span> 个文件夹</div>
+                                    <div className="rounded border border-white/8 px-2 py-1">Cookie <span className={profile.hasCookies ? 'text-emerald-300' : 'text-slate-500'}>{profile.hasCookies ? '有' : '无'}</span></div>
+                                </div>
+                            )}
+
+                            <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">导入内容</div>
+                            <div className="space-y-1">
+                                {EDGE_IMPORT_ITEMS.map((item) => (
+                                    <label
+                                        key={item.key}
+                                        className={`flex cursor-pointer items-start gap-2 rounded-lg border border-white/8 px-2.5 py-1.5 transition hover:bg-white/4 ${item.always ? 'opacity-70' : ''}`}
+                                    >
+                                        <input
+                                            type="checkbox"
+                                            checked={item.always ? true : Boolean(enabled[item.key])}
+                                            disabled={Boolean(item.always)}
+                                            onChange={(event) => setEnabled((prev) => ({ ...prev, [item.key]: event.target.checked }))}
+                                            className="mt-0.5 h-3 w-3 shrink-0 accent-indigo-500"
+                                        />
+                                        <span className="min-w-0 flex-1">
+                                            <span className="block text-[11px] text-slate-200">{item.label}</span>
+                                            <span className="block text-[9px] text-slate-500">{item.hint}</span>
+                                        </span>
+                                    </label>
+                                ))}
+                            </div>
+
+                            <div className="mt-2 flex items-start gap-2 rounded-lg border border-white/8 bg-white/3 px-2.5 py-2 text-[10px] text-slate-500">
+                                <KeyRound className="mt-0.5 h-3 w-3 shrink-0 text-slate-600" />
+                                <span>
+                                    <span className="text-slate-400">密码无法导入（账号可以）。</span>
+                                    Edge 里用户名是明文存储的，所以上面「账号」那一项能正常导入；
+                                    但密码库用 App-Bound Encryption（v20）加密，密钥锁在系统级
+                                    DPAPI 里，只有 Edge 进程本身能解，浏览器调试接口也不提供密码。
+                                    这不是本应用的取舍，是 Windows 上的设计边界。
+                                </span>
+                            </div>
+
+                            {result && (
+                                <div className="mt-3 rounded-lg border border-white/8 bg-white/3 px-3 py-2">
+                                    <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">导入结果</div>
+                                    <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px]">
+                                        <span className="text-slate-400">收藏夹</span>
+                                        <span className="font-mono text-slate-200">{result.stats.bookmarks} 条 / {result.stats.folders} 文件夹</span>
+                                        <span className="text-slate-400">网站图标</span>
+                                        <span className="font-mono text-slate-200">{result.stats.favicons}</span>
+                                        <span className="text-slate-400">浏览历史</span>
+                                        <span className="font-mono text-slate-200">{result.stats.history}</span>
+                                        <span className="text-slate-400">自动填充</span>
+                                        <span className="font-mono text-slate-200">{result.stats.autofill}</span>
+                                        <span className="text-slate-400">账号</span>
+                                        <span className="font-mono text-slate-200">{result.stats.accounts}</span>
+                                        <span className="text-slate-400">Cookie</span>
+                                        <span className="font-mono text-slate-200">
+                                            {result.stats.cookies}
+                                            {typeof result.stats.cookiesApplied === 'number' && result.stats.cookiesApplied !== result.stats.cookies
+                                                ? `（写入 ${result.stats.cookiesApplied}）`
+                                                : ''}
+                                        </span>
+                                    </div>
+                                    {merge && (
+                                        <div className="mt-2 border-t border-white/8 pt-2 text-[10px] text-slate-400">
+                                            本次合并：新增 <span className="font-mono text-emerald-300">{merge.added}</span> 条，
+                                            跳过 <span className="font-mono text-slate-200">{merge.skipped}</span> 条（已存在）
+                                        </div>
+                                    )}
+                                    {result.warnings.length > 0 && (
+                                        <div className="mt-2 space-y-1 border-t border-white/8 pt-2">
+                                            {result.warnings.map((warning, index) => (
+                                                <div key={index} className="flex items-start gap-1.5 text-[10px] text-amber-300">
+                                                    <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                                                    <span>{warning.message}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+
+                                    {/* 账号列表可展开：只报一个数字，用户没法确认
+                                        到底导进来了哪些站点、哪些用户名 */}
+                                    {accounts.length > 0 && (
+                                        <div className="mt-2 border-t border-white/8 pt-2">
+                                            <button
+                                                onClick={() => setShowAccounts((prev) => !prev)}
+                                                className="flex w-full items-center gap-1 text-[10px] text-slate-400 transition hover:text-slate-200"
+                                            >
+                                                <ChevronDown className={`h-3 w-3 transition-transform ${showAccounts ? 'rotate-180' : ''}`} />
+                                                {showAccounts ? '收起账号列表' : `查看导入的 ${accounts.length} 个账号`}
+                                            </button>
+                                            {showAccounts && (
+                                                <div className="custom-scrollbar mt-1.5 max-h-52 space-y-0.5 overflow-y-auto">
+                                                    {accounts.map((entry, index) => (
+                                                        <div key={index} className="flex items-baseline gap-2 rounded px-1.5 py-1 hover:bg-white/5">
+                                                            <span className="min-w-0 flex-1 truncate text-[10px] text-slate-200">{entry.username}</span>
+                                                            <span className="min-w-0 flex-[1.2] truncate text-right font-mono text-[9px] text-slate-500">
+                                                                {safeHostname(entry.origin)}
+                                                            </span>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </>
+                    )}
+                </div>
+
+                <div className="flex shrink-0 items-center gap-2 border-t border-white/8 px-4 py-3">
+                    {progress && (
+                        <span className="flex items-center gap-1.5 text-[10px] text-slate-400">
+                            <Loader2 className="h-3 w-3 animate-spin" /> {progress}
+                        </span>
+                    )}
+                    <div className="flex-1" />
+                    <button onClick={onClose} className="rounded-lg border border-white/10 px-3 py-1.5 text-[11px] text-slate-300 transition hover:bg-white/6">
+                        关闭
+                    </button>
+                    <button
+                        onClick={run}
+                        disabled={running || !detected?.available}
+                        className="flex items-center gap-1.5 rounded-lg bg-indigo-500/90 px-3 py-1.5 text-[11px] font-bold text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                        {running ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                        {running ? '导入中…' : result ? '再导入一次' : '开始导入'}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+/* ========================================================================== */
 /*                                  首页                                       */
 /* ========================================================================== */
 
-const HomePage: React.FC<{
-    bookmarks: Bookmark[];
-    onNavigate: (url: string) => void;
-    onRemoveBookmark: (id: string) => void;
-}> = ({ bookmarks, onNavigate, onRemoveBookmark }) => (
+const HomePage: React.FC = () => (
     <div className="relative flex h-full w-full flex-col items-center justify-center overflow-hidden px-8">
         {/* 氛围光：两团低透明度的径向渐变，撑出纵深，不做成会动的背景（会分心） */}
         <div className="pointer-events-none absolute inset-0">
@@ -480,55 +1668,361 @@ const HomePage: React.FC<{
                 </h2>
                 <p className="max-w-md text-xs leading-relaxed text-slate-500">
                     内置 <span className="font-semibold text-indigo-300">AI 嗅探引擎</span>，
-                    自动分析并提取页面里的视频流媒体资源；右侧 Agent 可以直接在这页里动手。
+                    点击嗅探即可提取页面里的视频流媒体资源；右侧 Agent 可以直接在这页里动手。
                 </p>
-            </div>
-
-            <div className="w-full rounded-2xl border border-white/8 bg-white/[0.03] p-5 backdrop-blur-sm">
-                <div className="mb-3.5 flex items-center justify-between px-0.5">
-                    <h3 className="flex items-center gap-2 text-xs font-bold text-slate-400">
-                        <Compass className="h-3.5 w-3.5" />
-                        快速访问
-                    </h3>
-                    <span className="font-mono text-[11px] text-slate-600">{bookmarks.length} 个书签</span>
-                </div>
-
-                {bookmarks.length === 0 ? (
-                    <div className="rounded-xl border border-dashed border-white/8 py-8 text-center text-xs text-slate-600">
-                        还没有书签 —— 打开一个页面，点地址栏右边的星标即可收藏
-                    </div>
-                ) : (
-                    <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-4">
-                        {bookmarks.map((bookmark) => {
-                            const host = safeHostname(bookmark.url);
-                            return (
-                                <div
-                                    key={bookmark.id}
-                                    onClick={() => onNavigate(bookmark.url)}
-                                    title={bookmark.url}
-                                    className="group relative flex cursor-pointer items-center gap-3 rounded-xl border border-white/8 bg-white/[0.03] p-3 transition-all hover:-translate-y-0.5 hover:border-indigo-400/40 hover:bg-indigo-500/8 hover:shadow-[0_10px_28px_rgba(0,0,0,0.35)]"
-                                >
-                                    <SiteTile host={host} className="h-9 w-9 text-sm" />
-                                    <div className="min-w-0 flex-1">
-                                        <div className="truncate text-xs font-semibold text-slate-200">{bookmark.title}</div>
-                                        <div className="truncate font-mono text-[10px] text-slate-500">{host || bookmark.url}</div>
-                                    </div>
-                                    <button
-                                        onClick={(event) => { event.stopPropagation(); onRemoveBookmark(bookmark.id); }}
-                                        className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-slate-600 opacity-0 transition group-hover:opacity-100 hover:bg-rose-500/15 hover:text-rose-300"
-                                        title="移除书签"
-                                    >
-                                        <Trash2 className="h-3 w-3" />
-                                    </button>
-                                </div>
-                            );
-                        })}
-                    </div>
-                )}
             </div>
         </div>
     </div>
 );
+
+/* ========================================================================== */
+/*                            错误页 / 崩溃页                                   */
+/* ========================================================================== */
+
+/**
+ * 导航失败页。
+ *
+ * 与"白屏"的区别不只是好看：白屏让用户以为应用坏了，而错误页能说出
+ * 是断网、DNS 错、证书过期还是站点下线 —— 这四种的处理方式完全不同。
+ *
+ * 证书类错误单独换一条建议（"重试"对证书问题没有意义），
+ * 这是 classifyNavigationError 把 isCertificate 单独标出来的唯一原因。
+ */
+const ErrorPage: React.FC<{
+    error: NavigationError;
+    url: string;
+    onRetry: () => void;
+    onBack: () => void;
+    canGoBack: boolean;
+}> = ({ error, url, onRetry, onBack, canGoBack }) => (
+    <div className="flex h-full w-full flex-col items-center justify-center gap-4 bg-slate-950 px-8">
+        <div className="relative">
+            <div className="absolute -inset-3 rounded-[28px] bg-gradient-to-br from-rose-500/20 to-amber-400/10 blur-xl" />
+            <div className="relative flex h-14 w-14 items-center justify-center rounded-2xl border border-white/12 bg-slate-900/80 shadow-[0_16px_40px_rgba(0,0,0,0.5)]">
+                {error.isCertificate ? (
+                    <ShieldAlert className="h-6 w-6 text-amber-400" />
+                ) : (
+                    <AlertTriangle className="h-6 w-6 text-rose-400" />
+                )}
+            </div>
+        </div>
+
+        <div className="flex flex-col items-center gap-1.5 text-center">
+            <h2 className="text-lg font-bold text-slate-200">{error.title}</h2>
+            {error.host && (
+                <div className="font-mono text-[11px] text-slate-500">{error.host}</div>
+            )}
+            {error.hint && (
+                <p className="max-w-md text-xs leading-relaxed text-slate-500">{error.hint}</p>
+            )}
+            {error.isDns && (
+                <p className="max-w-md text-[11px] leading-relaxed text-slate-600">
+                    若本机用了代理，请确认设置里的代理端口正确 —— 代理不通时所有域名都会解析失败。
+                </p>
+            )}
+        </div>
+
+        {/* 原始错误码收在详情里：排查时有用，但不该是用户第一眼看到的东西 */}
+        <details className="group max-w-md">
+            <summary className="cursor-pointer list-none text-center text-[10px] text-slate-600 transition hover:text-slate-400">
+                错误详情
+            </summary>
+            <div className="mt-2 space-y-1 rounded-lg border border-white/8 bg-white/[0.03] p-2.5 font-mono text-[10px] leading-relaxed text-slate-500">
+                <div className="break-all">地址：{url || '（无）'}</div>
+                <div>错误码：{error.errorCode}</div>
+                {error.raw && <div className="break-all">描述：{error.raw}</div>}
+            </div>
+        </details>
+
+        <div className="flex items-center gap-2">
+            <button
+                onClick={onRetry}
+                className="flex h-8 items-center gap-1.5 rounded-lg bg-white px-3.5 text-[11px] font-bold text-slate-900 transition hover:bg-slate-100"
+            >
+                <RotateCw className="h-3 w-3" />
+                重试
+            </button>
+            {canGoBack && (
+                <button
+                    onClick={onBack}
+                    className="flex h-8 items-center gap-1.5 rounded-lg border border-white/12 bg-white/5 px-3.5 text-[11px] font-bold text-slate-300 transition hover:bg-white/10"
+                >
+                    <ArrowLeft className="h-3 w-3" />
+                    返回上一页
+                </button>
+            )}
+        </div>
+    </div>
+);
+
+/**
+ * 渲染进程崩溃页。
+ *
+ * 与错误页分开的理由：那个是"页面没拿到"，可以重试；这个是"渲染进程没了"，
+ * 重试没有意义 —— 必须重新加载。文案也不该说"重试"，那会让用户以为
+ * 再点几次就能好。
+ */
+const CrashPage: React.FC<{ url: string; onReload: () => void }> = ({ url, onReload }) => (
+    <div className="flex h-full w-full flex-col items-center justify-center gap-4 bg-slate-950 px-8">
+        <div className="relative">
+            <div className="absolute -inset-3 rounded-[28px] bg-gradient-to-br from-amber-500/20 to-rose-400/10 blur-xl" />
+            <div className="relative flex h-14 w-14 items-center justify-center rounded-2xl border border-white/12 bg-slate-900/80 shadow-[0_16px_40px_rgba(0,0,0,0.5)]">
+                <AlertTriangle className="h-6 w-6 text-amber-400" />
+            </div>
+        </div>
+
+        <div className="flex flex-col items-center gap-1.5 text-center">
+            <h2 className="text-lg font-bold text-slate-200">页面崩溃了</h2>
+            {url && <div className="max-w-md truncate font-mono text-[11px] text-slate-500">{url}</div>}
+            <p className="max-w-md text-xs leading-relaxed text-slate-500">
+                这个页面的渲染进程已退出（通常是内存不足或页面自身的问题）。
+                重新加载通常能恢复；反复崩溃的话，这个页面本身可能有问题。
+            </p>
+        </div>
+
+        <button
+            onClick={onReload}
+            className="flex h-8 items-center gap-1.5 rounded-lg bg-white px-3.5 text-[11px] font-bold text-slate-900 transition hover:bg-slate-100"
+        >
+            <RotateCw className="h-3 w-3" />
+            重新加载
+        </button>
+    </div>
+);
+
+/* ========================================================================== */
+/*                                 查找条                                       */
+/* ========================================================================== */
+
+/**
+ * 页面内查找条。
+ *
+ * **必须定位在 webview 之上、且不能包住它**：webview 的父链一动就会重载
+ * 页面（登录态、滚动位置、播放进度全丢）。所以它是一个绝对定位的兄弟层，
+ * 和拖动遮罩是同一个道理。
+ *
+ * 匹配数的来源是 `found-in-page` 事件而不是 findInPage 的返回值 ——
+ * webview 的 findInPage 只返回请求 id，**没有**匹配数。
+ */
+const FindBar: React.FC<{
+    query: string;
+    info: FindInfo;
+    onChange: (text: string) => void;
+    onNext: () => void;
+    onPrev: () => void;
+    onClose: () => void;
+}> = ({ query, info, onChange, onNext, onPrev, onClose }) => {
+    const inputRef = useRef<HTMLInputElement | null>(null);
+
+    // 打开就聚焦并全选：查找条是"按 Ctrl+F 立刻打字"的交互，
+    // 还要用户再点一下输入框是不能接受的
+    useEffect(() => {
+        inputRef.current?.focus();
+        inputRef.current?.select();
+    }, []);
+
+    return (
+        <div className="absolute right-4 top-3 z-30 flex items-center gap-1.5 rounded-xl border border-white/12 bg-slate-950/95 px-2 py-1.5 shadow-[0_16px_40px_rgba(0,0,0,0.6)] backdrop-blur-xl">
+            <Search className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+            <input
+                ref={inputRef}
+                value={query}
+                onChange={(event) => onChange(event.target.value)}
+                onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                        event.preventDefault();
+                        if (event.shiftKey) onPrev(); else onNext();
+                    }
+                    if (event.key === 'Escape') {
+                        event.preventDefault();
+                        onClose();
+                    }
+                }}
+                placeholder="在此页面中查找"
+                spellCheck={false}
+                className="w-44 bg-transparent text-xs text-slate-200 outline-none placeholder:text-slate-600"
+            />
+            <span className={`shrink-0 font-mono text-[10px] ${info.matches === 0 && query ? 'text-rose-400' : 'text-slate-500'}`}>
+                {query ? `${info.active}/${info.matches}` : ''}
+            </span>
+            <div className="flex shrink-0 items-center gap-0.5">
+                <button
+                    onClick={onPrev}
+                    disabled={info.matches === 0}
+                    className="flex h-5 w-5 items-center justify-center rounded text-slate-400 transition hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
+                    title="上一个（Shift+Enter）"
+                >
+                    <ChevronDown className="h-3 w-3 rotate-180" />
+                </button>
+                <button
+                    onClick={onNext}
+                    disabled={info.matches === 0}
+                    className="flex h-5 w-5 items-center justify-center rounded text-slate-400 transition hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
+                    title="下一个（Enter）"
+                >
+                    <ChevronDown className="h-3 w-3" />
+                </button>
+                <button
+                    onClick={onClose}
+                    className="flex h-5 w-5 items-center justify-center rounded text-slate-500 transition hover:bg-white/10 hover:text-white"
+                    title="关闭（Esc）"
+                >
+                    <X className="h-3 w-3" />
+                </button>
+            </div>
+        </div>
+    );
+};
+
+/* ========================================================================== */
+/*                                下载面板                                      */
+/* ========================================================================== */
+
+/** 字节数 → 人类可读。与搜索结果列表共用一份实现（services/SearchService） */
+const fmtBytes = (n: number): string => (n > 0 ? formatBytes(n) : '未知大小');
+
+/**
+ * 网页下载面板。
+ *
+ * 与嗅探下载的区别：那个是"我们发现了一个媒体地址，帮你下"，
+ * 这个是"页面自己触发了下载"。前者走 ffmpeg/直链引擎，后者走 Chromium
+ * 自带的下载栈 —— 所以进度、暂停、续传能力都不一样，界面也不该合并。
+ *
+ * 定位为覆盖层而不是常驻面板：下载是低频的，常驻会挤掉页面宽度。
+ */
+const DownloadsPanel: React.FC<{
+    downloads: DownloadsState;
+    onClose: () => void;
+}> = ({ downloads, onClose }) => {
+    const { items, actions } = downloads;
+
+    return (
+        <div className="absolute bottom-3 right-3 z-30 flex max-h-[70%] w-80 flex-col overflow-hidden rounded-xl border border-white/12 bg-slate-950/95 shadow-[0_16px_40px_rgba(0,0,0,0.6)] backdrop-blur-xl">
+            <div className="flex shrink-0 items-center gap-2 border-b border-white/8 px-3 py-2">
+                <Download className="h-3.5 w-3.5 text-slate-400" />
+                <span className="flex-1 text-xs font-bold text-slate-200">下载内容</span>
+                {items.some((d) => d.state !== 'progressing') && (
+                    <button
+                        onClick={actions.clearFinished}
+                        className="rounded px-1.5 py-0.5 text-[10px] text-slate-500 transition hover:bg-white/8 hover:text-slate-300"
+                        title="清掉已结束的记录（不删文件）"
+                    >
+                        清空已结束
+                    </button>
+                )}
+                <button
+                    onClick={onClose}
+                    className="flex h-5 w-5 items-center justify-center rounded text-slate-500 transition hover:bg-white/10 hover:text-white"
+                    title="关闭"
+                >
+                    <X className="h-3 w-3" />
+                </button>
+            </div>
+
+            <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto">
+                {items.length === 0 ? (
+                    <div className="px-3 py-8 text-center text-[11px] text-slate-600">
+                        还没有下载过东西。<br />
+                        页面里点「链接另存为」或直接点下载链接都会出现在这里。
+                    </div>
+                ) : (
+                    items.map((item) => {
+                        const done = item.state === 'completed';
+                        const dead = item.state === 'cancelled' || item.state === 'interrupted';
+                        return (
+                            <div key={item.id} className="border-b border-white/6 px-3 py-2.5 last:border-b-0">
+                                <div className="flex items-start gap-2">
+                                    <div className="min-w-0 flex-1">
+                                        <div className="truncate text-[11px] font-semibold text-slate-200" title={item.savePath || item.filename}>
+                                            {item.filename}
+                                        </div>
+                                        <div className="mt-0.5 font-mono text-[10px] text-slate-500">
+                                            {dead ? (
+                                                <span className="text-rose-400">
+                                                    {item.state === 'cancelled' ? '已取消' : '已中断'}
+                                                </span>
+                                            ) : done ? (
+                                                <span className="text-emerald-400">已完成 · {fmtBytes(item.receivedBytes)}</span>
+                                            ) : item.paused ? (
+                                                <span className="text-amber-400">已暂停 · {fmtBytes(item.receivedBytes)}</span>
+                                            ) : (
+                                                <>
+                                                    {fmtBytes(item.receivedBytes)} / {fmtBytes(item.totalBytes)}
+                                                    {item.speed > 0 && <span className="text-slate-600"> · {formatBytes(item.speed)}/s</span>}
+                                                </>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    <div className="flex shrink-0 items-center gap-0.5">
+                                        {item.state === 'progressing' && (
+                                            <>
+                                                <button
+                                                    onClick={() => (item.paused ? actions.resume(item.id) : actions.pause(item.id))}
+                                                    className="flex h-5 w-5 items-center justify-center rounded text-slate-400 transition hover:bg-white/10 hover:text-white"
+                                                    title={item.paused ? '继续' : '暂停'}
+                                                >
+                                                    {item.paused ? <Play className="h-3 w-3" /> : <Pause className="h-3 w-3" />}
+                                                </button>
+                                                <button
+                                                    onClick={() => actions.cancel(item.id)}
+                                                    className="flex h-5 w-5 items-center justify-center rounded text-slate-400 transition hover:bg-rose-500/15 hover:text-rose-300"
+                                                    title="取消下载"
+                                                >
+                                                    <X className="h-3 w-3" />
+                                                </button>
+                                            </>
+                                        )}
+                                        {done && (
+                                            <>
+                                                <button
+                                                    onClick={() => actions.open(item.id)}
+                                                    className="flex h-5 w-5 items-center justify-center rounded text-slate-400 transition hover:bg-white/10 hover:text-white"
+                                                    title="打开文件"
+                                                >
+                                                    <Play className="h-3 w-3" />
+                                                </button>
+                                                <button
+                                                    onClick={() => actions.reveal(item.id)}
+                                                    className="flex h-5 w-5 items-center justify-center rounded text-slate-400 transition hover:bg-white/10 hover:text-white"
+                                                    title="在文件夹中显示"
+                                                >
+                                                    <FolderOpen className="h-3 w-3" />
+                                                </button>
+                                            </>
+                                        )}
+                                        <button
+                                            onClick={() => actions.remove(item.id)}
+                                            className="flex h-5 w-5 items-center justify-center rounded text-slate-500 transition hover:bg-white/10 hover:text-white"
+                                            title="从列表移除（不删文件）"
+                                        >
+                                            <Trash2 className="h-3 w-3" />
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* 进度条。总长未知（服务器没给 Content-Length）时不画百分比 ——
+                                    画一条编出来的进度比不画更糟 */}
+                                {item.state === 'progressing' && (
+                                    <div className="mt-1.5 h-0.5 overflow-hidden rounded-full bg-white/8">
+                                        {item.percent >= 0 ? (
+                                            <div
+                                                className="h-full rounded-full bg-indigo-400 transition-[width] duration-200"
+                                                style={{ width: `${item.percent}%` }}
+                                            />
+                                        ) : (
+                                            <div className="bp-indeterminate h-full w-1/3 rounded-full bg-indigo-400/70" />
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })
+                )}
+            </div>
+        </div>
+    );
+};
 
 /* ========================================================================== */
 /*                                浏览视图                                      */
@@ -537,26 +2031,22 @@ const HomePage: React.FC<{
 const BrowserView: React.FC<{
     tabs: Tab[];
     activeTabId: string;
-    isElectron: boolean;
-    onLoadFinish: (id: string) => void;
-    bookmarks: BookmarksState['bookmarks'];
-    handleNavigate: (url: string) => void;
-    removeBookmark: (id: string) => void;
     snifferError: string;
     /** 稳定身份的 webview ref 回调工厂，见 useBrowse 内注释 */
     getWebviewRef: (tabId: string) => (el: WebviewElement | null) => void;
-    registerIframe: (id: string, el: HTMLIFrameElement | null) => void;
+    /** 重试加载（错误页的按钮） */
+    onRetry: (tabId: string) => void;
+    /** 重新加载崩溃的页面 */
+    onRevive: (tabId: string) => void;
+    onGoBack: (tabId: string) => void;
 }> = ({
     tabs,
     activeTabId,
-    isElectron,
-    onLoadFinish,
-    bookmarks,
-    handleNavigate,
-    removeBookmark,
     snifferError,
     getWebviewRef,
-    registerIframe,
+    onRetry,
+    onRevive,
+    onGoBack,
 }) => {
         const activeTab = tabs.find((tab) => tab.id === activeTabId);
 
@@ -567,45 +2057,56 @@ const BrowserView: React.FC<{
                 {tabs.map((tab) => (
                     <div key={tab.id} className={`absolute inset-0 ${tab.id === activeTabId ? 'z-10' : 'invisible z-0'}`}>
                         {tab.url ? (
-                            isElectron ? (
-                                tab.initialUrl ? (
-                                    <webview
-                                        // 必须用稳定身份的 ref：内联箭头每次渲染都是新函数，
-                                        // React 会先以 null 调旧 ref 再以元素调新 ref，
-                                        // 使 registerWebview 反复清空 ready 标记与刷新记账
-                                        // （表现为每渲染重载一次、地址栏换地址无效）。
-                                        ref={getWebviewRef(tab.id)}
-                                        src={tab.initialUrl}
-                                        className="h-full w-full border-none bg-white"
-                                        // 必须与主进程 electron/main.js 的 USER_AGENT **逐字一致**：
-                                        // 那里 onBeforeSendHeaders 会把这个 UA 写进真实请求头，
-                                        // 而这里决定 JS 里 navigator.userAgent 报什么。两者不一致时，
-                                        // "UA 头 / JS 里的 UA / 内核版本"三处互相矛盾，Cloudflare 的
-                                        // managed 挑战必失败（点击了也过不去、反复弹回挑战页）。
-                                        // 一致性由 scripts/test/mainstatic.test.js 静态校验。
-                                        useragent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-                                        // @ts-ignore: Electron 特有属性
-                                        // Electron 的 BooleanAttribute 是 hasAttribute() 语义，
-                                        // 属性存在即为真、与取值字符串无关。这里必须让属性存在，
-                                        // 否则 window.open 被内核直接丢弃，主进程的
-                                        // setWindowOpenHandler → navigate-to-url（新标签页）不会触发。
-                                        allowpopups=""
-                                        // @ts-ignore: Electron 特有属性
-                                        webpreferences="contextIsolation=yes"
-                                    />
-                                ) : null
-                            ) : tab.initialUrl ? (
-                                <iframe
-                                    ref={(el) => registerIframe(tab.id, el)}
+                            tab.initialUrl ? (
+                                <webview
+                                    // 必须用稳定身份的 ref：内联箭头每次渲染都是新函数，
+                                    // React 会先以 null 调旧 ref 再以元素调新 ref，
+                                    // 使 registerWebview 反复清空 ready 标记与刷新记账
+                                    // （表现为每渲染重载一次、地址栏换地址无效）。
+                                    ref={getWebviewRef(tab.id)}
                                     src={tab.initialUrl}
-                                    title={tab.title}
                                     className="h-full w-full border-none bg-white"
-                                    sandbox="allow-same-origin allow-scripts allow-forms allow-downloads"
-                                    onLoad={() => onLoadFinish(tab.id)}
+                                    // 必须与主进程 electron/main.js 的 USER_AGENT **逐字一致**：
+                                    // 那里 onBeforeSendHeaders 会把这个 UA 写进真实请求头，
+                                    // 而这里决定 JS 里 navigator.userAgent 报什么。两者不一致时，
+                                    // "UA 头 / JS 里的 UA / 内核版本"三处互相矛盾，Cloudflare 的
+                                    // managed 挑战必失败（点击了也过不去、反复弹回挑战页）。
+                                    // 一致性由 scripts/test/mainstatic.test.js 静态校验。
+                                    useragent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                                    // @ts-ignore: Electron 特有属性
+                                    // Electron 的 BooleanAttribute 是 hasAttribute() 语义，
+                                    // 属性存在即为真、与取值字符串无关。这里必须让属性存在，
+                                    // 否则 window.open 被内核直接丢弃，主进程的
+                                    // setWindowOpenHandler → navigate-to-url（新标签页）不会触发。
+                                    allowpopups=""
+                                    // @ts-ignore: Electron 特有属性
+                                    webpreferences="contextIsolation=yes"
                                 />
                             ) : null
                         ) : (
-                            <HomePage bookmarks={bookmarks} onNavigate={handleNavigate} onRemoveBookmark={removeBookmark} />
+                            <HomePage />
+                        )}
+
+                        {/* 错误页与崩溃页盖在 webview **之上**，而不是替换它。
+                            替换会让 webview 被卸载重挂 —— 那等于用户点一次重试
+                            就重新加载一次页面，而且失败原因被丢掉。
+                            盖着的话 webview 一直活着，重试只是让它再导航一次。 */}
+                        {tab.error && (
+                            <div className="absolute inset-0 z-20">
+                                <ErrorPage
+                                    error={tab.error}
+                                    url={tab.url}
+                                    onRetry={() => onRetry(tab.id)}
+                                    onBack={() => onGoBack(tab.id)}
+                                    canGoBack={tab.historyIndex > 0}
+                                />
+                            </div>
+                        )}
+
+                        {tab.crashed && !tab.error && (
+                            <div className="absolute inset-0 z-20">
+                                <CrashPage url={tab.url} onReload={() => onRevive(tab.id)} />
+                            </div>
                         )}
                     </div>
                 ))}
@@ -1589,7 +3090,7 @@ const JwtPanel: React.FC<{ title: string; tone: string; content: string }> = ({ 
 );
 
 /* ========================================================================== */
-/*                            Agent：对话流                                     */
+/*                            Agent：对话流                                   */
 /* ========================================================================== */
 
 /**
@@ -1856,11 +3357,198 @@ const ScriptList: React.FC<{
     );
 };
 
+/**
+ * 知识库面板。
+ *
+ * 这是给**人**看的浏览入口 —— Agent 走的是 kb 工具，不经过这里。
+ * 存在的理由是排查："模型说查不到"到底是没有这篇文章、还是路径配错了、
+ * 还是检索词没命中。这三件事在这一个页面上就能分辨。
+ *
+ * 状态与取数全在主进程（kbService），这里只展示 + 提交路径。
+ */
+const KbTab: React.FC = () => {
+    const [status, setStatus] = useState<KbStatus | null>(null);
+    const [query, setQuery] = useState('');
+    const [hits, setHits] = useState<KbSearchHit[] | null>(null);
+    const [preview, setPreview] = useState<{ path: string; text: string } | null>(null);
+    const [draftRoot, setDraftRoot] = useState('');
+    const [saveMsg, setSaveMsg] = useState('');
+    const [busy, setBusy] = useState(false);
+
+    // 索引缓存与 Agent 那份相互独立：面板按需重建，不跟 Agent 的缓存共享，
+    // 否则"面板改了路径"与"Agent 还在用旧索引"会打架
+    const indexRef = useRef<KbEntry[] | null>(null);
+
+    const refresh = useCallback(async () => {
+        const api = getAppWindow().electronAPI?.kb;
+        if (!api) return;
+        const next = await api.status();
+        setStatus(next);
+        setDraftRoot(next.root || '');
+        // 路径变了就必须丢掉索引：否则搜索还在用旧库
+        indexRef.current = null;
+    }, []);
+
+    useEffect(() => { void refresh(); }, [refresh]);
+
+    const ensureIndex = useCallback(async (): Promise<KbEntry[]> => {
+        if (indexRef.current) return indexRef.current;
+        const api = getAppWindow().electronAPI?.kb;
+        if (!api) return [];
+        const payload = await api.load();
+        const built = buildKbIndex(payload?.files || [], payload?.boardIndexes || {});
+        indexRef.current = built;
+        return built;
+    }, []);
+
+    const runSearch = useCallback(async () => {
+        if (!query.trim()) return;
+        setBusy(true);
+        try {
+            const entries = await ensureIndex();
+            setHits(searchKb(entries, query, 20));
+            setPreview(null);
+        } finally {
+            setBusy(false);
+        }
+    }, [query, ensureIndex]);
+
+    const openArticle = useCallback(async (path: string) => {
+        const api = getAppWindow().electronAPI?.kb;
+        if (!api) return;
+        const payload = await api.read(path);
+        setPreview({ path, text: payload?.content || payload?.error || '(空)' });
+    }, []);
+
+    const applyRoot = useCallback(async () => {
+        const api = getAppWindow().electronAPI?.kb;
+        if (!api) return;
+        const res = await api.setRoot(draftRoot);
+        setSaveMsg(res.message || '');
+        setStatus(res.status);
+        indexRef.current = null;
+        setHits(null);
+        setPreview(null);
+    }, [draftRoot]);
+
+    return (
+        <div className="space-y-2.5">
+            {/* 状态条：篇数与根目录。未就绪时明说原因，不显示"0 篇" —— 那会被读成库是空的 */}
+            <div className={`rounded-xl border px-2.5 py-2 ${status?.ready ? 'border-emerald-500/25 bg-emerald-950/25' : 'border-amber-500/25 bg-amber-950/25'}`}>
+                <div className="flex items-center gap-1.5">
+                    <BookOpen className={`h-3 w-3 shrink-0 ${status?.ready ? 'text-emerald-400' : 'text-amber-400'}`} />
+                    <span className={`text-[11px] font-bold ${status?.ready ? 'text-emerald-200' : 'text-amber-200'}`}>
+                        {status?.ready ? `已接入 · ${status.articles} 篇` : '未接入'}
+                    </span>
+                </div>
+                {status?.ready ? (
+                    <p className="mt-1 break-all font-mono text-[9px] leading-relaxed text-slate-500">{status.root}</p>
+                ) : (
+                    <p className="mt-1 text-[10px] leading-relaxed text-amber-200/80">
+                        {status?.error || '正在检查…'}
+                    </p>
+                )}
+            </div>
+
+            {/* 检索 */}
+            <div className="flex items-center gap-1.5">
+                <input
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === 'Enter') void runSearch(); }}
+                    placeholder="例如：付费墙 内容提取 / jwt 签名"
+                    className="min-w-0 flex-1 rounded-lg border border-white/10 bg-slate-950/70 px-2 py-1.5 text-[11px] text-slate-200 outline-none transition placeholder:text-slate-600 focus:border-indigo-400/40"
+                />
+                <button
+                    onClick={() => void runSearch()}
+                    disabled={busy || !query.trim()}
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-white/10 text-slate-300 transition hover:bg-white/15 disabled:opacity-40"
+                    title="检索"
+                >
+                    {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Search className="h-3 w-3" />}
+                </button>
+            </div>
+
+            {/* 结果 */}
+            {hits && (
+                hits.length === 0 ? (
+                    <p className="px-1 text-[10px] leading-relaxed text-slate-500">
+                        没有匹配。换个更完整的说法试试 —— 单个字符查不出东西。
+                    </p>
+                ) : (
+                    <div className="space-y-1.5">
+                        {hits.map((hit) => (
+                            <button
+                                key={hit.path}
+                                onClick={() => void openArticle(hit.path)}
+                                className={`w-full rounded-lg border px-2 py-1.5 text-left transition ${preview?.path === hit.path
+                                    ? 'border-indigo-400/40 bg-indigo-500/10'
+                                    : 'border-white/8 bg-white/[0.03] hover:bg-white/[0.06]'
+                                    }`}
+                            >
+                                <div className="flex items-start gap-1.5">
+                                    <span className="mt-0.5 shrink-0 rounded bg-white/8 px-1 font-mono text-[9px] text-slate-400">{hit.score}</span>
+                                    <span className="min-w-0 flex-1 text-[11px] font-bold leading-snug text-slate-200">{hit.title}</span>
+                                </div>
+                                <p className="mt-0.5 break-all font-mono text-[9px] text-slate-600">{hit.path}</p>
+                                {hit.summary && (
+                                    <p className="mt-1 line-clamp-2 text-[10px] leading-relaxed text-slate-500">{hit.summary}</p>
+                                )}
+                            </button>
+                        ))}
+                    </div>
+                )
+            )}
+
+            {/* 预览 */}
+            {preview && (
+                <div className="rounded-lg border border-white/10 bg-slate-950">
+                    <div className="flex items-center gap-1.5 border-b border-white/8 px-2 py-1.5">
+                        <span className="min-w-0 flex-1 break-all font-mono text-[9px] text-slate-500">{preview.path}</span>
+                        <button
+                            onClick={() => setPreview(null)}
+                            className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-slate-600 transition hover:text-slate-300"
+                            title="关闭"
+                        >
+                            <X className="h-3 w-3" />
+                        </button>
+                    </div>
+                    <pre className="custom-scrollbar max-h-64 overflow-auto whitespace-pre-wrap p-2 font-mono text-[10px] leading-relaxed text-slate-400">
+                        {preview.text}
+                    </pre>
+                </div>
+            )}
+
+            {/* 路径配置 */}
+            <div className="rounded-xl border border-white/8 bg-white/[0.02] p-2.5">
+                <p className="text-[10px] font-bold text-slate-400">知识库路径</p>
+                <p className="mt-1 text-[9px] leading-relaxed text-slate-600">
+                    留空则自动查找项目下以 open-reverselab 开头的目录。打包版需要手填绝对路径。
+                </p>
+                <input
+                    value={draftRoot}
+                    onChange={(event) => setDraftRoot(event.target.value)}
+                    placeholder="D:\\path\\to\\open-reverselab\\kb"
+                    className="mt-1.5 w-full rounded-lg border border-white/10 bg-slate-950/70 px-2 py-1.5 font-mono text-[10px] text-slate-300 outline-none transition placeholder:text-slate-700 focus:border-indigo-400/40"
+                />
+                <div className="mt-1.5 flex items-center gap-1.5">
+                    <button
+                        onClick={() => void applyRoot()}
+                        className="rounded-lg bg-white/10 px-2.5 py-1 text-[10px] font-bold text-slate-200 transition hover:bg-white/15"
+                    >
+                        保存并重新检查
+                    </button>
+                    {saveMsg && <span className="min-w-0 flex-1 break-all text-[9px] text-slate-500">{saveMsg}</span>}
+                </div>
+            </div>
+        </div>
+    );
+};
+
 /* ========================================================================== */
 /*                            Agent：侧边栏外壳                                 */
 /* ========================================================================== */
-
-type AgentTab = 'chat' | 'rules' | 'headers' | 'storage' | 'jwt' | 'scripts';
+type AgentTab = 'chat' | 'rules' | 'headers' | 'storage' | 'jwt' | 'scripts' | 'kb';
 
 const AGENT_TABS: { id: AgentTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
     { id: 'chat', label: '对话', icon: Bot },
@@ -1869,6 +3557,7 @@ const AGENT_TABS: { id: AgentTab; label: string; icon: React.ComponentType<{ cla
     { id: 'storage', label: '存储', icon: Globe },
     { id: 'jwt', label: 'JWT', icon: KeyRound },
     { id: 'scripts', label: '脚本', icon: Code },
+    { id: 'kb', label: '知识库', icon: BookOpen },
 ];
 
 const SIDEBAR_MIN = 320;
@@ -1897,7 +3586,15 @@ const AgentSidebar: React.FC<{
     agent: AgentState;
     tamper: TamperState;
     currentUrl: string;
-}> = ({ agent, tamper, currentUrl }) => {
+    /**
+     * 待填入输入框的文本（右键「让 Agent 分析这个元素」产生）。
+     *
+     * 带 seq 是因为同一个元素可能被连点两次右键：纯文本的第二次 setState
+     * 值相同，React 会跳过更新，effect 不跑 —— 用户已经删掉的输入框内容
+     * 不会被重新填上，看起来像"右键没反应"。
+     */
+    prefill?: { seq: number; text: string } | null;
+}> = ({ agent, tamper, currentUrl, prefill }) => {
     const { messages, scripts, status, error, streaming, actions, canEdit } = agent;
 
     const [prefs, setPrefs] = useState<SidebarPrefs>(() => {
@@ -1927,6 +3624,28 @@ const AgentSidebar: React.FC<{
         setPrefs(next);
         saveJSON(SIDEBAR_STORE_KEY, next, '');
     }, []);
+
+    /**
+     * 右键「让 Agent 分析这个元素」填进输入框。
+     *
+     * 只在输入框空着时才覆盖 —— 与回退（handleRewind）同一判据：
+     * 用户可能已经写好半句话，右键只是想再补一个元素的信息，
+     * 直接覆盖等于替他扔掉正在写的内容。
+     *
+     * 顺带把标签切到对话页并展开边栏：填进一个用户看不见的输入框
+     * 等于什么都没做。
+     */
+    useEffect(() => {
+        if (!prefill || !prefill.text) return;
+        setInput((prev) => (prev.trim() ? prev : prefill.text));
+        setActiveTab('chat');
+        setPrefs((prev) => {
+            if (prev.open) return prev;
+            const next = { ...prev, open: true };
+            saveJSON(SIDEBAR_STORE_KEY, next, '');
+            return next;
+        });
+    }, [prefill]);
 
     /**
      * Esc 退出全屏。
@@ -2204,7 +3923,7 @@ const AgentSidebar: React.FC<{
                         </button>
                     </div>
 
-                    {/* 标签：图标 + 文字两行。侧边栏最窄 320px，六个标签横排仍放得下 */}
+                    {/* 标签：图标 + 文字两行。侧边栏最窄 320px，七个标签横排仍放得下 */}
                     <div className="flex shrink-0 gap-0.5 border-b border-white/8 px-1.5 py-1.5">
                         {AGENT_TABS.map((tab) => {
                             const Icon = tab.icon;
@@ -2417,6 +4136,7 @@ const AgentSidebar: React.FC<{
                             {activeTab === 'scripts' && (
                                 <ScriptList scripts={scripts} onRemove={actions.removeScript} onToggle={actions.toggleScript} />
                             )}
+                            {activeTab === 'kb' && <KbTab />}
                         </div>
                     )}
                 </div>
@@ -2433,6 +4153,7 @@ interface BrowsePanelProps {
     onNavigateToPlayer: () => void;
     onNavigateToAudio: () => void;
     onNavigateToGallery: () => void;
+    onNavigateToTorrent: () => void;
     isVisible: boolean;
     browse: ReturnType<typeof useBrowse>;
     agent: AgentState;
@@ -2442,34 +4163,184 @@ export const BrowsePanel: React.FC<BrowsePanelProps> = ({
     onNavigateToPlayer,
     onNavigateToAudio,
     onNavigateToGallery,
+    onNavigateToTorrent,
     isVisible,
     browse,
     agent,
 }) => {
-    const { tabs: tabsHook, bookmarks: bookmarksHook, search, sniffer, interactions, tamper } = browse;
+    const { tabs: tabsHook, bookmarks: bookmarksHook, search, sniffer, interactions, tamper, downloads } = browse;
 
     const {
         inputUrl,
         setInputUrl,
         setInputFocused,
-        isElectron,
         isCurrentPageBookmarked,
         handleNavigate,
-        onLoadFinish,
         getWebviewRef,
-        registerIframe,
+        stopLoading,
+        findInPage,
+        setFindQuery,
+        findQuery,
+        findInfo,
+        zoomBy,
+        toggleMute,
+        reviveTab,
+        onUiAction,
     } = interactions;
 
     const { tabs, activeTabId, activeTab, actions: tabActions } = tabsHook;
     const { isAnalyzing, error } = sniffer;
-    const { bookmarks, removeBookmark, toggleBookmark } = bookmarksHook;
+    const {
+        tree: bookmarkTree,
+        barVisibility,
+        setBarVisibility,
+        removeBookmark,
+        toggleBookmark,
+        addFolder,
+        renameNode,
+        updateNodeUrl,
+        moveBookmark,
+        mergeImported,
+    } = bookmarksHook;
+
+    const [showDownloads, setShowDownloads] = useState(false);
+    /** 书签管理器（全屏覆盖层） */
+    const [showBookmarkManager, setShowBookmarkManager] = useState(false);
+    /** Edge 导入面板（居中弹窗） */
+    const [showEdgeImport, setShowEdgeImport] = useState(false);
+    const addressInputRef = useRef<HTMLInputElement | null>(null);
+    /**
+     * 待填入 Agent 输入框的文本（右键「让 Agent 分析这个元素」产生）。
+     *
+     * 用**递增序号 + 文本**而不是纯文本：用户可能对同一个元素连点两次右键，
+     * 而纯文本的第二次 setState 与第一次值相同，React 会跳过更新 ——
+     * effect 不跑，输入框里已经删掉的内容不会被重新填上。
+     */
+    const [agentPrefill, setAgentPrefill] = useState<{ seq: number; text: string } | null>(null);
+
+    /**
+     * 界面层的浏览器动作（Ctrl+L 聚焦地址栏 / 右键"让 Agent 分析这个元素"）。
+     *
+     * 这两件事的真值在这里 —— useBrowse 没有地址栏 input 的 ref，
+     * 也不该知道 Agent 输入框长什么样。所以那边原样转发，这边落地。
+     */
+    useEffect(() => onUiAction((command) => {
+        if (command.action === 'focusAddressBar') {
+            addressInputRef.current?.focus();
+            addressInputRef.current?.select();
+            return;
+        }
+        if (command.action === 'analyzeElement') {
+            // 右键命中的坐标 → 一段提示 → 填进 Agent 输入框。
+            //
+            // **只填不发**：分析一个元素通常还要补一句"它的数据从哪来"，
+            // 直接发出去等于替用户决定了问题。填进输入框他还能改。
+            const x = Number(command.arg?.x) || 0;
+            const y = Number(command.arg?.y) || 0;
+            setAgentPrefill((prev) => ({
+                seq: (prev?.seq || 0) + 1,
+                text: `分析页面上坐标 (${x}, ${y}) 处的这个元素：它是什么、数据从哪来、能不能改。`,
+            }));
+            return;
+        }
+        if (command.action === 'searchSelection') {
+            handleNavigate(String(command.arg?.text || ''));
+        }
+    }), [onUiAction, handleNavigate]);
+
+    /**
+     * Esc 关闭查找条。
+     *
+     * 挂在宿主页面而不是 webview 上，是因为主进程对 Esc 是**只通知不拦截**
+     * （页面自己也要用 Esc）—— 所以页面里的 Esc 不会到这里，只有焦点在
+     * 宿主界面（查找条自己的输入框）时才由这里处理。查找条自己的 onKeyDown
+     * 也处理了一次，两处都需要：一处管焦点在条上，一处管焦点被用户点走之后。
+     */
+    useEffect(() => {
+        if (!findQuery) return;
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') setFindQuery('');
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [findQuery, setFindQuery]);
+
+    /** 错误页的「重试」：清掉错误态再重新加载，否则错误页会一直盖着 */
+    const retryTab = useCallback((tabId: string) => {
+        tabActions.setTabError(tabId, null);
+        tabActions.setTabCrashed(tabId, false);
+        tabActions.reload(tabId);
+    }, [tabActions]);
+
+    /**
+     * 书签管理器的虚拟根。
+     *
+     * 管理器要能同时看到「收藏夹栏」与「其他收藏夹」两个根，但服务层的
+     * findNode / collectFolders / countNodes 都只认单一根。用一个虚拟根
+     * 把它们包起来，既复用了全部纯函数，又让管理器天然呈现出 Edge/Chrome
+     * 那样的两级结构 —— 而不是给服务层再加一套「多根」重载。
+     *
+     * 这个节点**只存在于界面上**，不落盘、不参与任何写操作（见下面的
+     * onAddFolder 重定向）。
+     */
+    const bookmarkRoot = useMemo<BookmarkNode>(() => ({
+        id: '__bookmark_root__',
+        type: 'folder',
+        title: '全部书签',
+        children: [bookmarkTree.bar, bookmarkTree.other],
+        createdAt: 0,
+    }), [bookmarkTree]);
+
+    /**
+     * Edge 导入结果落地。
+     *
+     * 这里只并**收藏夹**进树 —— 历史、自动填充、Cookie 各有各的去处
+     * （Cookie 由主进程直接写进会话，账号由导入面板自己落盘并列出），
+     * 书签树里没有它们的位置。
+     *
+     * `extras`（Edge 里非空的其它根，例如「移动收藏夹」）挂到「其他收藏夹」
+     * 下面而不是丢掉：那些是用户的真实数据，只是不在主栏上。
+     *
+     * 返回实际合并的统计（新增 / 因已存在跳过），调用方拿去展示 —— 重复导入时
+     * Edge 侧条数不变（"收藏夹 1336 条"），没有这行用户会以为"导了个寂寞"。
+     */
+    const applyEdgeImport = useCallback((result: EdgeImportResult): MergeStats | null => {
+        if (!result.bookmarks) return null;
+
+        // 分流而不是合并：Edge 的「收藏夹栏」进本应用的收藏夹栏，
+        // 「其他收藏夹」与其余非空根进「其他收藏夹」。全部倒进栏上会让
+        // 横栏瞬间塞满用户本来就没打算放出来的东西。
+        const toBar = result.bookmarks.bar.children || [];
+        const toOther = [
+            ...(result.bookmarks.other.children || []),
+            ...result.bookmarks.extras,
+        ];
+
+        const total: MergeStats = { added: 0, skipped: 0 };
+        if (toBar.length > 0) {
+            const s = mergeImported('bar', toBar);
+            total.added += s.added;
+            total.skipped += s.skipped;
+        }
+        if (toOther.length > 0) {
+            const s = mergeImported('other', toOther);
+            total.added += s.added;
+            total.skipped += s.skipped;
+        }
+        return total;
+    }, [mergeImported]);
 
     return (
         <div className="flex h-full w-full bg-slate-950" aria-hidden={!isVisible}>
             {/* 左：浏览器本体。侧边栏是它的兄弟节点，所以开合只挤压这一栏的宽度，
           webview 的父链保持不变 —— 这是"收起侧边栏不重载页面"的前提 */}
             <div className="flex min-w-0 flex-1 flex-col">
-                <TabsBar tabs={tabs} activeTabId={activeTabId} actions={tabActions} />
+                <TabsBar
+                    tabs={tabs}
+                    activeTabId={activeTabId}
+                    actions={tabActions}
+                    onToggleMute={toggleMute}
+                />
 
                 <AddressBar
                     activeTab={activeTab}
@@ -2487,25 +4358,102 @@ export const BrowsePanel: React.FC<BrowsePanelProps> = ({
                     onNavigateToPlayer={onNavigateToPlayer}
                     onNavigateToAudio={onNavigateToAudio}
                     onNavigateToGallery={onNavigateToGallery}
+                    onNavigateToTorrent={onNavigateToTorrent}
+                    onStop={() => stopLoading(activeTabId)}
+                    onZoom={(delta) => zoomBy(activeTabId, delta)}
+                    downloadCount={downloads.activeCount}
+                    onToggleDownloads={() => setShowDownloads((prev) => !prev)}
+                    inputRef={addressInputRef}
                 />
 
-                <BrowserView
-                    tabs={tabs}
-                    activeTabId={activeTabId}
-                    isElectron={isElectron}
-                    onLoadFinish={onLoadFinish}
-                    bookmarks={bookmarks}
-                    handleNavigate={handleNavigate}
-                    removeBookmark={removeBookmark}
-                    snifferError={error}
-                    getWebviewRef={getWebviewRef}
-                    registerIframe={registerIframe}
-                />
+                {/* 书签栏。位置是硬约束：必须在 AddressBar 与 webview 容器之间，
+                    作为同一根 flex 列的兄弟节点 —— 它绝不能成为 webview 的祖先，
+                    父链一变 React 就会把 webview 卸载重挂，页面重新加载。
+                    显示策略与 Edge/Chrome 一致，默认「仅新标签页」。 */}
+                {(barVisibility === 'always' || (barVisibility === 'newTab' && !activeTab.url)) && (
+                    <BookmarkBar
+                        tree={bookmarkTree.bar}
+                        visibility={barVisibility}
+                        onVisibilityChange={setBarVisibility}
+                        onNavigate={handleNavigate}
+                        onOpenInNewTab={(url) => tabActions.openInNewTab(url)}
+                        onRemove={removeBookmark}
+                        onOpenManager={() => setShowBookmarkManager(true)}
+                        onOpenImport={() => setShowEdgeImport(true)}
+                    />
+                )}
+
+                {/* 相对定位容器：查找条与下载面板都是它的绝对定位子层。
+                    它们**不能**包住 webview —— 父链一动就重载页面 */}
+                <div className="relative flex min-h-0 flex-1 flex-col">
+                    <BrowserView
+                        tabs={tabs}
+                        activeTabId={activeTabId}
+                        snifferError={error}
+                        getWebviewRef={getWebviewRef}
+                        onRetry={retryTab}
+                        onRevive={reviveTab}
+                        onGoBack={tabActions.goBack}
+                    />
+
+                    {findQuery !== '' && (
+                        <FindBar
+                            query={findQuery}
+                            info={findInfo}
+                            onChange={setFindQuery}
+                            onNext={() => findInPage(activeTabId, findQuery, { findNext: true, forward: true })}
+                            onPrev={() => findInPage(activeTabId, findQuery, { findNext: true, forward: false })}
+                            onClose={() => setFindQuery('')}
+                        />
+                    )}
+
+                    {showDownloads && (
+                        <DownloadsPanel
+                            downloads={downloads}
+                            onClose={() => setShowDownloads(false)}
+                        />
+                    )}
+
+                    {showBookmarkManager && (
+                        <BookmarkManager
+                            tree={bookmarkRoot}
+                            onClose={() => setShowBookmarkManager(false)}
+                            onNavigate={(url) => { handleNavigate(url); setShowBookmarkManager(false); }}
+                            onRemove={removeBookmark}
+                            onRename={renameNode}
+                            onUpdateUrl={updateNodeUrl}
+                            // 选中虚拟根时把新文件夹放进收藏夹栏 —— 虚拟根不落盘，
+                            // 直接传下去会找不到父节点，表现为「点了创建但什么都没发生」
+                            onAddFolder={(parentId, title) => addFolder(
+                                parentId === bookmarkRoot.id ? bookmarkTree.bar.id : parentId,
+                                title,
+                            )}
+                            // 同理：虚拟根不是真实节点，落点要改指收藏夹栏
+                            onMove={(id, targetId, index) => moveBookmark(
+                                id,
+                                targetId === bookmarkRoot.id ? bookmarkTree.bar.id : targetId,
+                                index,
+                            )}
+                            onOpenImport={() => { setShowBookmarkManager(false); setShowEdgeImport(true); }}
+                        />
+                    )}
+
+                    {showEdgeImport && (
+                        <EdgeImportPanel
+                            onClose={() => setShowEdgeImport(false)}
+                            onImported={applyEdgeImport}
+                        />
+                    )}
+                </div>
             </div>
 
-            {/* 右：Agent 工作区。非 Electron 下没有 webview，Agent 一步都做不了，
-          所以直接不给入口，而不是给一个点了没反应的按钮 */}
-            {isElectron && <AgentSidebar agent={agent} tamper={tamper} currentUrl={activeTab.url} />}
+            {/* 右：Agent 工作区 */}
+            <AgentSidebar
+                agent={agent}
+                tamper={tamper}
+                currentUrl={activeTab.url}
+                prefill={agentPrefill}
+            />
         </div>
     );
 };

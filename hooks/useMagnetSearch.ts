@@ -84,8 +84,6 @@ export const useMagnetSearch = () => {
     /** 已注册站点（来自引擎注册表，UI 据此渲染站点选择） */
     const sites: SiteDescriptor[] = useMemo(() => listSites(), []);
 
-    const isElectron = Boolean(getElectronAPI()?.torrent);
-
     /* ---------------------------- BT 任务进度 ---------------------------- */
 
     useEffect(() => {
@@ -168,7 +166,7 @@ export const useMagnetSearch = () => {
     const downloadHit = useCallback(async (hit: SearchHit, fileIndexes?: number[]) => {
         const api = getElectronAPI();
         if (!api?.torrent?.start) {
-            setError('当前环境不支持下载，请在 Electron 桌面端中运行');
+            setError('读取不到下载桥（preload 未加载），请重启应用。');
             return null;
         }
         setError(null);
@@ -205,7 +203,7 @@ export const useMagnetSearch = () => {
     const saveTorrentFile = useCallback(async (hit: SearchHit) => {
         const api = getElectronAPI();
         if (!api?.torrentFile?.fetchFile) {
-            setError('当前环境不支持保存种子文件，请在 Electron 桌面端中运行');
+            setError('读取不到种子保存桥（preload 未加载），请重启应用。');
             return null;
         }
         if (!hit.torrent) {
@@ -297,7 +295,6 @@ export const useMagnetSearch = () => {
             tasks,
             error,
             notice,
-            isElectron,
             sites,
         },
         actions: {

@@ -964,7 +964,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         if (!target) return;
         const electronAPI = getElectronAPI();
         if (!electronAPI?.acgmho?.probe) {
-            setAcgStatus('当前环境不支持直连抓取，请在桌面端应用中运行');
+            setAcgStatus('读取不到直连抓取桥（preload 未加载），请重启应用');
             return;
         }
         setIsAcgLoading(true);

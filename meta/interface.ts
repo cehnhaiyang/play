@@ -177,6 +177,54 @@ export interface Bookmark {
     /** 创建时间戳 (毫秒) */
     createdAt: number;
 }
+/**
+ * 书签节点：**树**结构，与 Edge / Chrome 的收藏夹同构。
+ *
+ * 为什么从扁平数组改成树：扁平列表能存「收藏了什么」，但存不了「收藏在哪个
+ * 文件夹里」。而收藏夹栏的核心用途恰恰是**按文件夹分层** —— 工具、资源、AI
+ * 各一个文件夹，是用户自己建立的信息架构。压平等于把它丢掉。
+ *
+ * url 节点与 folder 节点共用一个类型（而不是拆成两个接口）：渲染层的拖拽、
+ * 遍历、查找都希望「孩子」是同一种东西；拆开后每个递归函数都要先判类型再
+ * 分派，而判类型这件事 `node.type` 已经做了。
+ */
+export interface BookmarkNode {
+    /** 节点唯一 ID */
+    id: string;
+    /** 节点类型：网址或文件夹 */
+    type: 'url' | 'folder';
+    /** 显示标题 */
+    title: string;
+    /** 网址（仅 type === 'url'） */
+    url?: string;
+    /** 子节点（仅 type === 'folder'；允许空数组，空文件夹要保住） */
+    children?: BookmarkNode[];
+    /** 网站 Favicon（dataURL 或 http 地址，仅 type === 'url'） */
+    icon?: string;
+    /** 创建时间戳 (毫秒) */
+    createdAt: number;
+}
+
+/**
+ * 书签树的两个根。
+ *
+ * 与 Edge 一致：`bar` 是收藏夹栏（横栏展示），`other` 是其他收藏夹
+ * （只在管理器里出现，不占横栏）。两个根都必须是 folder。
+ */
+export interface BookmarkTree {
+    /** 收藏夹栏 */
+    bar: BookmarkNode;
+    /** 其他收藏夹 */
+    other: BookmarkNode;
+}
+
+/**
+ * 书签栏显示策略。
+ *
+ * 与 Edge / Chrome 出厂默认一致：只在没有打开网页时显示。
+ * 'always' 会压缩网页可视区，'never' 则让入口难以发现 —— 所以默认是 'newTab'。
+ */
+export type BookmarkBarVisibility = 'always' | 'newTab' | 'never';
 
 /**
  * ============================================================================
@@ -1006,10 +1054,20 @@ export interface WebviewElement extends HTMLElement {
     removeEventListener(type: string, listener: EventListenerOrEventListenerObject): void;
     /** 重新加载当前页面 */
     reload(): void;
+    /** 重新加载并**忽略缓存**（Ctrl+Shift+R）。普通 reload 会复用缓存，改不掉的旧资源要靠它 */
+    reloadIgnoringCache(): void;
+    /** 中止当前导航。加载卡住时唯一的出路 —— 不调它只能等超时 */
+    stop(): void;
     /** 获取当前 Webview URL */
     getURL(): string;
+    /** 当前页面标题 */
+    getTitle(): string;
+    /** 是否仍在加载资源 */
+    isLoading(): boolean;
     /** 导航加载指定 URL */
     loadURL(url: string): Promise<void>;
+    /** 触发一次下载（不导航）。右键菜单的「链接/图片另存为」用它 */
+    downloadURL(url: string): void;
     /** 页面后退 */
     goBack(): void;
     /** 页面前进 */
@@ -1020,6 +1078,35 @@ export interface WebviewElement extends HTMLElement {
     canGoForward(): boolean;
     /** 在 Webview 宿主上下文中执行 JavaScript 脚本 */
     executeJavaScript(code: string): Promise<any>;
+    /**
+     * 该 webview 对应 webContents 的数字 id。
+     *
+     * 主进程推来的浏览器命令带的是 webContents id（它只知道 webContents，
+     * 不知道标签页 id），靠这个方法把两者对上 —— 发声状态、右键菜单的
+     * "分析这个元素"都依赖这个映射。
+     */
+    getWebContentsId(): number;
+    /**
+     * 页面内查找。返回本次请求的 id，结果通过 `found-in-page` 事件回传
+     * （webview 元素上**没有**同步返回值可用，必须等事件）。
+     */
+    findInPage(text: string, options?: { forward?: boolean; findNext?: boolean; matchCase?: boolean }): number;
+    /** 结束查找。'clearSelection' 清掉高亮，'keepSelection' 把高亮转成普通选中 */
+    stopFindInPage(action: 'clearSelection' | 'keepSelection' | 'activateSelection'): void;
+    /** 缩放级别。与 setZoomFactor 的区别是它按 level 步进（每级 1.2 倍），Chrome 的 Ctrl+± 用的就是它 */
+    setZoomLevel(level: number): void;
+    getZoomLevel(): number;
+    setZoomFactor(factor: number): void;
+    getZoomFactor(): number;
+    /** 静音该页面 */
+    setAudioMuted(muted: boolean): void;
+    isAudioMuted(): boolean;
+    /** 此刻是否正在出声。标签页上的小喇叭图标靠它 —— 静音的视频不算 */
+    isCurrentlyAudible(): boolean;
+    /** 打开该页面的开发者工具 */
+    openDevTools(): void;
+    closeDevTools(): void;
+    isDevToolsOpened(): boolean;
     /** 是否允许弹窗属性 */
     allowpopups?: string;
     /** webpreferences 配置字符串 */
@@ -1327,6 +1414,10 @@ export interface AppSettingsSnapshot {
     proxyProtocol?: string;
     /** AI 服务配置（OpenAI 兼容协议） */
     ai: AiConfig;
+    /** 知识库根目录（'' 表示按默认位置查找） */
+    kbRoot: string;
+    /** 知识库当前可用状态，随设置一起回传，省掉界面一次额外往返 */
+    kb: KbStatus;
     message?: string;
 }
 
@@ -1345,6 +1436,336 @@ export interface SaveAiConfigResult {
     /** 归一化后真正落盘的配置；校验失败时回传当前生效的旧配置 */
     ai: AiConfig;
     message?: string;
+}
+
+/**
+ * 知识库当前状态。
+ *
+ * `ready` 为 false 时其余字段无意义 —— 界面据此显示"未接入"而不是"0 篇"，
+ * 后者会被读成"库是空的"，而实际是路径没找到。
+ */
+export interface KbStatus {
+    ready: boolean;
+    /** 实际生效的知识库根目录（绝对路径）；未就绪时为空串 */
+    root: string;
+    /** 文章篇数（只数 `<board>/techniques/**.md`，README 不算） */
+    articles: number;
+    /** 全部文章正文合计字节 */
+    bytes: number;
+    /** 未就绪时的原因，直接可展示给用户 */
+    error?: string;
+}
+
+/** 保存知识库路径的返回：status 是保存后的现查结果 */
+export interface SaveKbRootResult {
+    success: boolean;
+    kbRoot: string;
+    status: KbStatus;
+    message?: string;
+}
+
+/**
+ * 一份待索引的原始文件。主进程原样搬字节，解析在渲染层做。
+ */
+export interface KbSourceFile {
+    /** kb 根目录下的相对路径，'/' 分隔 */
+    path: string;
+    content: string;
+}
+
+/**
+ * 仓库自带 kb-index.json 的形状。只取我们用得到的两个字段：
+ * 这份索引不作为唯一真相（它有实测缺口），只当作**一路加权信号**。
+ */
+export interface KbBoardIndex {
+    entries?: { id?: string; signals?: string[]; files?: string[] }[];
+}
+
+/** 主进程 kb.load() 的返回 */
+export interface KbLoadPayload {
+    root: string;
+    files: KbSourceFile[];
+    boardIndexes: Record<string, KbBoardIndex>;
+    /** 因超限或读失败被跳过的文件数 */
+    skipped?: number;
+    error?: string;
+}
+
+/** 主进程 kb.read() 的返回 */
+export interface KbReadPayload {
+    path?: string;
+    content?: string;
+    error?: string;
+}
+
+/**
+ * Electron 注入到渲染层的知识库 API。
+ *
+ * 主进程只搬字节，解析 / 检索 / 切片全在 services/KbService（纯 TS，可单测）。
+ */
+export interface ElectronKbAPI {
+    /** 整库一次读完（约 3MB）。渲染层长期驻留，之后检索不再往返 IPC */
+    load: () => Promise<KbLoadPayload>;
+    /** 读单篇正文 */
+    read: (path: string) => Promise<KbReadPayload>;
+    /** 轻量状态：根目录 / 篇数 / 是否就绪 */
+    status: () => Promise<KbStatus>;
+    /** 保存 kb 根目录，返回里带新的 status */
+    setRoot: (value: string) => Promise<SaveKbRootResult>;
+}
+
+/**
+ * 主进程能下发的浏览器动作。
+ *
+ * **这张清单与 electron/browserService.js 的 BROWSER_ACTIONS 逐字对应**，
+ * 两边漂移的症状是"按了没反应"——渲染层收到一个自己不认识的动作名，
+ * switch 落到 default 就静默忽略了。所以有一处静态断言逐字比对两份清单
+ * （scripts/test/browser.test.js）。
+ *
+ * 分三段，与主进程那边的 BROWSER_KEY_ACTIONS / BROWSER_MENU_ACTIONS /
+ * BROWSER_PUSH_ACTIONS 一一对应。分类是有意义的：只有第一段会经过
+ * `before-input-event` 的 preventDefault 路径。
+ */
+export type BrowserAction =
+    /* 由键盘触发（唯一需要 preventDefault 的一批） */
+    // 标签页
+    | 'newTab' | 'closeTab' | 'reopenTab' | 'nextTab' | 'prevTab' | 'selectTabIndex' | 'lastTab'
+    // 地址与导航
+    | 'focusAddressBar' | 'reload' | 'hardReload' | 'stop' | 'back' | 'forward' | 'home'
+    // 页面能力
+    | 'find' | 'findNext' | 'findPrev' | 'escape'
+    | 'zoomIn' | 'zoomOut' | 'zoomReset'
+    // 其它
+    | 'toggleBookmark' | 'toggleDevTools'
+    /* 由右键菜单触发（不是按键，不经过 preventDefault） */
+    | 'analyzeElement' | 'openInBackgroundTab' | 'searchSelection'
+    /* 主进程推送的状态变更（不是用户操作，是 webContents 事件） */
+    | 'audibleChanged';
+
+/** 主进程下发的浏览器命令 */
+export interface BrowserCommand {
+    action: BrowserAction;
+    /** 动作参数：selectTabIndex 是下标，analyzeElement 是 {x,y}，其余多为空 */
+    arg?: any;
+    /**
+     * 命令来源的 webContents id（0 表示无来源）。
+     *
+     * 用来把命令路由到**发出它的那个标签页**，而不是一律当成当前标签页。
+     * 发声状态尤其需要它：后台标签页开始放音频时，当前标签页根本没变。
+     */
+    webContentsId?: number;
+}
+
+/**
+ * 网页自身触发的下载（区别于嗅探下载 / 画廊下载 / BT）。
+ *
+ * 这些字段全部由主进程**当场取值**组成快照 —— DownloadItem 是 Electron
+ * 对象，塞进 IPC 会直接抛 "An object could not be cloned"。
+ */
+export interface BrowserDownload {
+    id: string;
+    filename: string;
+    /** 落盘绝对路径。设不上保存路径时为空串（退回系统保存对话框） */
+    savePath: string;
+    url: string;
+    mimeType: string;
+    totalBytes: number;
+    receivedBytes: number;
+    /** 0–100；总长未知时为 -1，界面据此画不定进度条 */
+    percent: number;
+    state: 'progressing' | 'completed' | 'cancelled' | 'interrupted';
+    paused: boolean;
+    canResume: boolean;
+    /** 平均速度（字节/秒）。非进行中为 0 */
+    speed: number;
+    startedAt: number;
+    endedAt: number;
+}
+
+/** 下载操作：暂停 / 继续 / 取消 / 定位 / 打开 / 从列表移除 */
+export type BrowserDownloadAction = 'pause' | 'resume' | 'cancel' | 'reveal' | 'open' | 'remove';
+
+/** Edge 里一个 profile 的数据概览（探测阶段返回，不打开任何数据库） */
+export interface EdgeProfileSummary {
+    /** 目录名：Default / Profile 1 … */
+    id: string;
+    /** Local State 里记录的可读名字，例如「您的 Chrome」 */
+    name: string;
+    /** profile 绝对路径 */
+    dir: string;
+    /** 目录是否真的存在 */
+    exists: boolean;
+    /** 收藏夹里的网址条数 */
+    bookmarkCount: number;
+    /** 收藏夹里的文件夹个数 */
+    folderCount: number;
+    /** 是否有 Cookies 库 */
+    hasCookies: boolean;
+    /** 是否有 History 库 */
+    hasHistory: boolean;
+}
+
+/** Edge 探测结果 */
+export interface EdgeDetectResult {
+    /** 本机是否装了 Edge 并找到 User Data */
+    available: boolean;
+    /** 找不到时的原因（直接展示给用户） */
+    reason?: string;
+    /** 发行版 id：stable / beta / dev / canary */
+    channel?: string;
+    /** 发行版显示名 */
+    label?: string;
+    /** Edge 版本号 */
+    version?: string;
+    /** User Data 根目录 */
+    userDataDir?: string;
+    /** msedge.exe 路径 */
+    executable?: string;
+    /** 各 profile */
+    profiles: EdgeProfileSummary[];
+}
+
+/**
+ * 导入项开关。
+ *
+ * 没有「密码」这一项 —— 不是漏了，是 Edge 的密码库（v20 / App-Bound）
+ * 在第三方进程里解不开，而 CDP 也没有暴露密码的接口。界面里写明原因，
+ * 而不是给一个点了没反应的开关。
+ */
+export interface EdgeImportInclude {
+    bookmarks?: boolean;
+    favicons?: boolean;
+    history?: boolean;
+    autofill?: boolean;
+    /** 账号（用户名）。**能导** —— 用户名在 Edge 里是明文，加密的只有密码 */
+    accounts?: boolean;
+    cookies?: boolean;
+    searchEngine?: boolean;
+}
+
+/** 导入请求参数 */
+export interface EdgeImportOptions {
+    /** 要导入的 profile 目录名，默认 Default */
+    profileId?: string;
+    /** 覆盖 User Data 根目录（一般不用传，探测结果里已经带了） */
+    userDataDir?: string;
+    /** 逐项开关，缺省视为全开 */
+    include?: EdgeImportInclude;
+    /** 历史条数上限 */
+    historyLimit?: number;
+    /** 自动填充条数上限 */
+    autofillLimit?: number;
+    /** 账号条数上限 */
+    accountLimit?: number;
+}
+
+/** 导入过程中某一项失败/降级的原因。**绝不静默跳过**，每一条都要能展示 */
+export interface EdgeImportWarning {
+    /** 出问题的类别：bookmarks / favicons / history / autofill / cookies / searchEngine */
+    category: string;
+    /** 人话说明 */
+    message: string;
+}
+
+/** 一条浏览器历史 */
+export interface EdgeHistoryEntry {
+    url: string;
+    title: string;
+    visitCount: number;
+    /** 最后访问时间（毫秒时间戳，0 表示未知） */
+    lastVisit: number;
+}
+
+/** 一条自动填充记录 */
+export interface EdgeAutofillEntry {
+    name: string;
+    value: string;
+    /** Edge 记录的累计使用次数 */
+    count: number;
+}
+
+/**
+ * 一条账号记录。
+ *
+ * 只有用户名，**没有密码** —— 密码是 v20 App-Bound Encryption，密钥锁在
+ * SYSTEM DPAPI 里，只有 Edge 进程本身能解，CDP 也不提供密码接口。
+ * 用户名则是明文存储，所以这一项能导。
+ */
+export interface EdgeAccountEntry {
+    /** 这条登录记录属于哪个站点 */
+    origin: string;
+    /** 用户名（明文） */
+    username: string;
+    /** Edge 记录的累计使用次数 */
+    timesUsed: number;
+    /** 最后使用时间（毫秒时间戳，0 表示未知） */
+    lastUsed: number;
+}
+
+/** 一条待写入会话的 Cookie（值已是明文） */
+export interface EdgeCookieEntry {
+    url: string;
+    name: string;
+    value: string;
+    domain: string;
+    path: string;
+    secure: boolean;
+    httpOnly: boolean;
+    sameSite: string;
+    expirationDate?: number;
+}
+
+/** 导入结果统计 */
+export interface EdgeImportStats {
+    bookmarks: number;
+    folders: number;
+    favicons: number;
+    history: number;
+    autofill: number;
+    accounts: number;
+    cookies: number;
+    /** 实际写入会话的 Cookie 条数（主进程填） */
+    cookiesApplied?: number;
+}
+
+/** 导入结果 */
+export interface EdgeImportResult {
+    ok: boolean;
+    /** ok 为 false 时的原因 */
+    error?: string;
+    /** 数据来源信息 */
+    edge?: { label: string; version: string; profileId: string; userDataDir: string };
+    /** 收藏夹树（含 extras：Edge 里非空的其它根，如「移动收藏夹」） */
+    bookmarks?: { bar: BookmarkNode; other: BookmarkNode; extras: BookmarkNode[] } | null;
+    history: EdgeHistoryEntry[];
+    autofill: EdgeAutofillEntry[];
+    accounts: EdgeAccountEntry[];
+    cookies: EdgeCookieEntry[];
+    searchEngine: { keyword: string; shortName: string; url: string } | null;
+    warnings: EdgeImportWarning[];
+    stats: EdgeImportStats;
+}
+
+/** Electron 注入到渲染层的 Edge 导入 API */
+export interface ElectronEdgeAPI {
+    /** 探测本机 Edge 与各 profile（只读文件，不打开数据库） */
+    detect: () => Promise<EdgeDetectResult>;
+    /** 执行导入。返回逐项结果与 warnings */
+    run: (options?: EdgeImportOptions) => Promise<EdgeImportResult>;
+    /** 导入过程中的阶段提示，返回取消订阅函数 */
+    onProgress: (callback: (message: string) => void) => () => void;
+}
+
+/** Electron 注入到渲染层的浏览器外壳 API */
+export interface ElectronBrowserAPI {
+    /** 浏览器动作命令（新建标签、查找、缩放…）。返回取消订阅函数 */
+    onCommand: (callback: (command: BrowserCommand) => void) => () => void;
+    /** 下载进度 / 完成 / 中断。返回取消订阅函数 */
+    onDownload: (callback: (download: BrowserDownload) => void) => () => void;
+    /** 取当前全部下载记录（面板首次打开时补齐历史） */
+    downloads: () => Promise<BrowserDownload[]>;
+    /** 对某条下载执行操作 */
+    downloadAction: (id: string, action: BrowserDownloadAction) => Promise<{ success: boolean; message?: string }>;
 }
 
 /**
@@ -1394,6 +1815,8 @@ export interface ElectronAPI {
     onNavigateToUrl: (callback: (url: string) => void) => () => void;
     /** 监听网络层嗅探到的媒体流或文件 */
     onSniffedMedia: (callback: (media: FoundLink) => void) => () => void;
+    /** 打开/关闭主进程网络层嗅探推送（默认关闭，由"持续嗅探"开关控制） */
+    setSnifferEnabled: (enabled: boolean) => Promise<{ success: boolean; armed: boolean }>;
     /** 获取当前宿主转码与下载能力 (如 FFmpeg) */
     getDownloadCapabilities: () => Promise<DownloadCapabilities>;
     /** 调用原生下载引擎保存媒体文件 */
@@ -1410,22 +1833,20 @@ export interface ElectronAPI {
     removeCookie: (url: string, name: string) => Promise<void>;
     /** ACGMHO 画册下载服务 API (可选模块) */
     acgmho?: ElectronAcgmhoAPI;
-    /** 应用设置 API (可选模块，纯浏览器环境不存在) */
+    /** 应用设置 API (可选模块) */
     settings?: ElectronSettingsAPI;
+    /** 知识库 API (可选模块) */
+    kb?: ElectronKbAPI;
+    /** 浏览器外壳 API (可选模块) */
+    browser?: ElectronBrowserAPI;
+    /** Edge 数据导入 API (可选模块) */
+    edge?: ElectronEdgeAPI;
     /** Sukebei / Nyaa 资源搜索与种子 API (可选模块) */
     torrentFile?: ElectronTorrentFileAPI;
     /** 内置 BT 下载引擎 API (可选模块) */
     torrent?: ElectronTorrentAPI;
-    /** 单文件 .gallery 打包保存 API (可选模块，纯浏览器环境不存在) */
+    /** 单文件 .gallery 打包保存 API (可选模块) */
     galleryPack?: ElectronGalleryPackAPI;
-}
-
-/**
- * Electron 渲染进程环境信息
- */
-export interface ElectronProcessEnv {
-    /** 是否处于 Electron 桌面运行容器中 */
-    isElectron?: boolean;
 }
 
 /**
@@ -1434,8 +1855,6 @@ export interface ElectronProcessEnv {
 export interface AppWindow extends Window {
     /** Electron 桥接 API 实例 */
     electronAPI?: ElectronAPI;
-    /** 进程环境信息 */
-    process?: ElectronProcessEnv;
 }
 
 /**
@@ -1447,8 +1866,11 @@ export const getAppWindow = (): AppWindow => {
 };
 
 /**
- * 安全获取注入的 ElectronAPI 实例
- * @returns ElectronAPI 对象，若处于纯 Web 浏览器环境则返回 undefined
+ * 安全获取注入的 ElectronAPI 实例。
+ *
+ * 返回 undefined 只意味着一件事：**preload 桥没加载**（加载故障）。
+ * 它不是"另一种合法的运行环境"—— 本应用是桌面应用，永远在 Electron 里跑。
+ * 所以调用点必须把 undefined 当故障报出来（提示重启），而不是静默降级。
  */
 export const getElectronAPI = (): ElectronAPI | undefined => {
     return getAppWindow().electronAPI;

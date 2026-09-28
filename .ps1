@@ -35,6 +35,26 @@ $ErrorActionPreference = 'Continue'
 $Root = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 Set-Location $Root
 
+# Self-elevation: everything launched from this menu (dev app, build,
+# package) must run as administrator -- the Edge App-Bound cookie key can
+# only be unwrapped with a SYSTEM token, which needs SeDebugPrivilege.
+# If not elevated, relaunch elevated (UAC) and exit this instance.
+# ASCII-only block: this file has no BOM, non-ASCII breaks under GBK read.
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host 'Requesting administrator privileges (UAC)...'
+    try {
+        if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) {
+            Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"" -Verb RunAs -WorkingDirectory $Root -ErrorAction Stop
+        } else {
+            Start-Process -FilePath (Join-Path $Root '.bat') -Verb RunAs -WorkingDirectory $Root -ErrorAction Stop
+        }
+    } catch {
+        Write-Host 'Elevation cancelled or failed; cannot run without administrator privileges.'
+        exit 1
+    }
+    exit
+}
+
 # ── 输出辅助（前缀统一 3 列，便于左对齐）────────────────────
 function Write-Step([string]$Msg) { Write-Host "[·] $Msg" -ForegroundColor Yellow }
 function Write-Ok([string]$Msg)   { Write-Host "[✓] $Msg" -ForegroundColor Green }
