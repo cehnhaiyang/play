@@ -1184,10 +1184,16 @@ export interface InteractionsState {
 
     /** 当前查找状态（按标签页）。查找条据此显示 "3/17" */
     findInfo: FindInfo;
-    /** 当前正在查找的词（空串表示查找条关着） */
+    /** 当前正在查找的词（空串表示还没打词，条可能开着等输入） */
     findQuery: string;
+    /** 查找条是否开着（与词分离：刚按 Ctrl+F 时开着但词为空） */
+    findOpen: boolean;
     /** 打开/关闭查找条。传空串等于关闭 */
     setFindQuery: (text: string) => void;
+    /** 只打开查找条不等输入（Ctrl+F）；已开着时保持不动 */
+    openFind: () => void;
+    /** 关闭查找条并清掉高亮 */
+    closeFind: () => void;
     /**
      * 订阅**只属于界面层**的浏览器动作（聚焦地址栏 / 让 Agent 分析元素 /
      * 用选中文字搜索）。真值在 BrowsePanel（它持有地址栏 input 的 ref 与
@@ -1566,11 +1572,17 @@ const useTabs = (): TabsState => {
      * 旧实现在这里把标题覆写成 hostname，导致标签页永远显示域名。
      */
     const syncTabUrl = useCallback((tabId: string, url: string, historyIndex?: number) => {
-        setState((prev) => mapTab(prev, tabId, (tab) => ({
-            ...tab,
-            url,
-            historyIndex: historyIndex !== undefined ? historyIndex : tab.historyIndex,
-        })));
+        setState((prev) => mapTab(prev, tabId, (tab) => {
+            // 成功导航（did-navigate）必须清掉上一页的错误/崩溃态：
+            // 后退/前进走的正是这条路，不清的话错误页会一直盖在新页面上。
+            const cleared = url !== tab.url ? { error: null, crashed: false } : {};
+            return {
+                ...tab,
+                ...cleared,
+                url,
+                historyIndex: historyIndex !== undefined ? historyIndex : tab.historyIndex,
+            };
+        }));
     }, []);
 
     const clearPendingNavigation = useCallback((tabId: string) => {
@@ -1596,10 +1608,16 @@ const useTabs = (): TabsState => {
     }, []);
 
     const setTabError = useCallback((tabId: string, error: NavigationError | null) => {
-        setState((prev) => mapTab(prev, tabId, (tab) => (
-            // 同码同地址的错误不重复写入：did-fail-load 在重试时会连发多次
-            (tab.error === null && error === null) ? tab : { ...tab, error }
-        )));
+        setState((prev) => mapTab(prev, tabId, (tab) => {
+            // 同码同地址的错误不重复写入：did-fail-load 在重试时会连发多次，
+            // 每次都换新对象会让下游所有依赖 tabs 的 memo/effect 每帧重算。
+            if (tab.error === null && error === null) return tab;
+            if (tab.error && error
+                && tab.error.errorCode === error.errorCode
+                && tab.error.raw === error.raw
+                && tab.error.host === error.host) return tab;
+            return { ...tab, error };
+        }));
     }, []);
 
     const setTabCrashed = useCallback((tabId: string, crashed: boolean) => {
@@ -2084,6 +2102,16 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
             webviewReadyRefs.current.add(tabId);
             tabActions.setTabLoading(tabId, false);
 
+            // webview 是原生标签：挂载前经 zoomBy/toggleMute 改的只是 React 状态，
+            // 此刻把它们补到真实页面上，否则"没加载完就按 Ctrl+±/点静音"会静默丢失。
+            try {
+                const current = tabsRef.current.find((t) => t.id === tabId);
+                if (current) {
+                    if (current.zoomLevel) webview.setZoomFactor?.(zoomLevelToFactor(current.zoomLevel));
+                    if (current.muted) webview.setAudioMuted?.(true);
+                }
+            } catch { /* webview 已卸载 */ }
+
             broadcastPageReady(tabId, webview);
 
             const pendingUrl = pendingNavigations.current.get(tabId);
@@ -2401,6 +2429,15 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
     const [findQuery, setFindQueryState] = useState('');
     const [findInfo, setFindInfo] = useState<FindInfo>({ matches: 0, active: 0 });
     const findQueryRef = useRef('');
+    /**
+     * 查找条开合（与查找词分离）。
+     *
+     * 原先以 `findQuery !== ''` 兼任"开着"：Ctrl+F 下发 `find` 时只能
+     * setFindQuery('')，结果是"按 Ctrl+F 反而把查找条关掉"，从没打开过。
+     * 开合单独记一笔：有词必开着，无词时可能是"开着等输入"（刚按 Ctrl+F）。
+     */
+    const [findOpen, setFindOpenState] = useState(false);
+    const findOpenRef = useRef(false);
 
     useEffect(() => {
         findReporterRef.current = (tabId, info) => {
@@ -2445,6 +2482,9 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
         const prev = findQueryRef.current;
         findQueryRef.current = next;
         setFindQueryState(next);
+        // 有词必开着；清空=关闭（输入框删空与 Esc/右上角 X 同义）
+        findOpenRef.current = next !== '';
+        setFindOpenState(next !== '');
 
         if (!next) {
             setFindInfo({ matches: 0, active: 0 });
@@ -2455,11 +2495,38 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
         findInPage(tabId, next, { findNext: prev === next });
     }, [findInPage, stopFindInPage]);
 
+    /** 打开查找条（Ctrl+F）：只开不搜，等用户打字；已开着时保持不动 */
+    const openFind = useCallback(() => {
+        findOpenRef.current = true;
+        setFindOpenState(true);
+    }, []);
+
+    /** 关闭查找条：清词、清高亮、收条三件套 */
+    const closeFind = useCallback(() => {
+        const tabId = activeTabIdRef.current;
+        const prev = findQueryRef.current;
+        findQueryRef.current = '';
+        setFindQueryState('');
+        findOpenRef.current = false;
+        setFindOpenState(false);
+        setFindInfo({ matches: 0, active: 0 });
+        if (prev) stopFindInPage(tabId);
+    }, [stopFindInPage]);
+
     /** 切标签页时把查找条收掉：查找是针对具体页面的，跟着切会找错页 */
     useEffect(() => {
         if (!findQueryRef.current) return;
         findQueryRef.current = '';
         setFindQueryState('');
+        setFindInfo({ matches: 0, active: 0 });
+    }, [activeTabId]);
+
+    /** 切标签页时同样收掉"开着但还没打词"的空查找条（与上面有词的分支互补） */
+    useEffect(() => {
+        if (!findOpenRef.current) return;
+        if (findQueryRef.current) return;
+        findOpenRef.current = false;
+        setFindOpenState(false);
         setFindInfo({ matches: 0, active: 0 });
     }, [activeTabId]);
 
@@ -2631,7 +2698,9 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
                     zoomBy(activeId, 0);
                     break;
                 case 'find':
-                    setFindQuery('');
+                    // Ctrl+F 是"打开查找条等输入"，不是"清空并关闭"。
+                    // 原先调 setFindQuery('') 语义恰好反了：条关着时按了仍关着。
+                    openFind();
                     break;
                 case 'findNext':
                     if (findQueryRef.current) {
@@ -2645,8 +2714,19 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
                     break;
                 case 'escape':
                     // Esc 只通知不拦截（页面自己也要用），所以这里必须判"我现在
-                    // 有没有东西可以关" —— 没有就什么都不做，把按键让给页面
-                    if (findQueryRef.current) setFindQuery('');
+                    // 有没有东西可以关" —— 没有就什么都不做，把按键让给页面。
+                    // 优先级：查找条开着先关条；否则正在加载则停掉（Chrome 行为），
+                    // 否则放行给页面（关弹窗/退出全屏）。
+                    if (findOpenRef.current || findQueryRef.current) {
+                        closeFind();
+                        break;
+                    }
+                    {
+                        const current = tabs.find((t) => t.id === activeId);
+                        if (current && current.isLoading) {
+                            stopLoading(activeId);
+                        }
+                    }
                     break;
                 case 'toggleDevTools':
                     // F12 / Ctrl+Shift+I 已由主进程直接 toggleDevTools，不会到这里。
@@ -2713,14 +2793,17 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
         reviveTab,
         findInfo,
         findQuery,
+        findOpen,
         setFindQuery,
+        openFind,
+        closeFind,
         onUiAction,
     }), [
         inputUrl, isCurrentPageBookmarked, handleNavigate, handleOpenInNewTab,
         getWebviewRef, getActiveWebview, getWebview,
         onPageReady, forEachWebview, setInputFocused,
         stopLoading, findInPage, stopFindInPage, zoomBy, toggleMute, reviveTab,
-        findInfo, findQuery, setFindQuery, onUiAction,
+        findInfo, findQuery, findOpen, setFindQuery, openFind, closeFind, onUiAction,
     ]);
 };
 

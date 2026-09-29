@@ -354,6 +354,16 @@ function reviewWebviewPreferences(webPreferences, params) {
         webPreferences.allowRunningInsecureContent = false;
         stripped.push('allowRunningInsecureContent');
     }
+    // 历史遗留的高危项：旧版 Electron 的 webview 允许它们，开启等于把 Node 能力
+    // 直接递给页面脚本（与 nodeIntegration 同级风险）。默认即关闭，显式开启才剥。
+    if (webPreferences.nodeIntegrationInWorker) {
+        webPreferences.nodeIntegrationInWorker = false;
+        stripped.push('nodeIntegrationInWorker');
+    }
+    if (webPreferences.enableRemoteModule) {
+        webPreferences.enableRemoteModule = false;
+        stripped.push('enableRemoteModule');
+    }
 
     const src = String((params && params.src) || '');
     if (src) {
@@ -399,16 +409,34 @@ function uniqueSavePath(dir, filename) {
         candidate = path.join(dir, base + ' (' + n + ')' + ext);
         n += 1;
     }
+    // 同名文件超过 9999 个时上面的编号已耗尽：此时 candidate 仍然存在，
+    // 直接返回会覆盖用户已有文件。用时间戳后缀保证不覆盖。
+    if (fs.existsSync(candidate)) {
+        candidate = path.join(dir, base + ' (' + Date.now() + ')' + ext);
+    }
     return candidate;
 }
 
 /** 文件名清洗：去掉路径分隔符与控制字符，避免写到下载目录之外 */
 function sanitizeDownloadName(name) {
-    const cleaned = String(name || '')
+    let cleaned = String(name || '')
         .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_')
         .replace(/\s+/g, ' ')
         .trim();
-    return cleaned || 'download';
+    if (!cleaned) return 'download';
+    // Windows 保留名（CON/PRN/AUX/NUL/COM1-9/LPT1-9）不能直接作文件名：
+    // 落盘会失败并退回保存对话框。加前缀避开，扩展名保持不变。
+    const ext = path.extname(cleaned);
+    const base = ext ? cleaned.slice(0, cleaned.length - ext.length) : cleaned;
+    if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(base)) {
+        cleaned = '_' + cleaned;
+    }
+    // Windows 不允许末尾的点与空格（会被静默截掉，导致重名判断错位）
+    const loneDotExt = ext === '.';
+    const effectiveExt = loneDotExt ? '' : ext;
+    const base2 = effectiveExt ? cleaned.slice(0, cleaned.length - effectiveExt.length) : cleaned;
+    const trimmedBase = base2.replace(/[. ]+$/, '') || 'download';
+    return trimmedBase + effectiveExt || 'download';
 }
 
 /**
@@ -494,12 +522,16 @@ function buildContextMenuTemplate(ctx) {
     }
 
     /* ------------------------------ 媒体 ------------------------------ */
-    if (!params.linkURL && params.mediaType && params.mediaType !== 'none') {
+    // 带链接的图片/视频同样要给媒体项（在新标签页中打开图片、图片另存为…）：
+    // 之前用 !linkURL 整体跳过，右键点"带链接的图片"时只能存链接存不下图。
+    // srcURL 与 linkURL 不同时才展开，避免纯链接被重复刷两遍打开项。
+    if (params.mediaType && params.mediaType !== 'none') {
         const kind = params.mediaType === 'image' ? '图片'
             : params.mediaType === 'video' ? '视频'
                 : params.mediaType === 'audio' ? '音频'
                     : params.mediaType === 'canvas' ? '画布' : '媒体';
-        if (params.srcURL) {
+        // src 与链接同地址时不重复展开（存链接与存媒体效果相同，避免刷两遍）
+        if (params.srcURL && params.srcURL !== params.linkURL) {
             if (h.openLink) add({ label: '在新标签页中打开' + kind, click: () => h.openLink(params.srcURL, 'foreground-tab') });
             if (h.saveMedia) add({ label: kind + '另存为…', click: () => h.saveMedia(params.srcURL) });
             sep();
@@ -751,7 +783,12 @@ async function actOnDownload(id, action) {
                 record.paused = true;
                 break;
             case 'resume':
-                if (item.canResume()) item.resume();
+                // 服务器不支持断点续传时 canResume 为 false：此时 resume() 是空操作，
+                // 若仍按成功返回并把 paused 置 false，界面会显示"下载中"而实际卡死。
+                if (!item.canResume()) {
+                    return { success: false, message: '服务器不支持断点续传，无法继续' };
+                }
+                item.resume();
                 record.paused = false;
                 break;
             case 'cancel':
@@ -800,7 +837,7 @@ function popupContextMenu(webContents, params) {
     const handlers = {
         openLink: (url, disposition) => {
             if (disposition === 'background-tab') {
-                sendCommand({ action: 'openInBackgroundTab', arg: { url } });
+                sendCommand({ action: 'openInBackgroundTab', arg: { url } }, webContents);
                 return;
             }
             // 前台打开复用既有的 navigate-to-url 通道：那条链路渲染层已经在用，
@@ -811,7 +848,7 @@ function popupContextMenu(webContents, params) {
         saveLink: (url) => { try { webContents.downloadURL(url); } catch (e) { console.error(e); } },
         saveMedia: (url) => { try { webContents.downloadURL(url); } catch (e) { console.error(e); } },
         copyText: (text) => clipboard.writeText(String(text || '')),
-        searchText: (text) => sendCommand({ action: 'searchSelection', arg: { text: String(text || '') } }),
+        searchText: (text) => sendCommand({ action: 'searchSelection', arg: { text: String(text || '') } }, webContents),
         edit: (command) => {
             try {
                 if (typeof webContents[command] === 'function') webContents[command]();
@@ -823,7 +860,8 @@ function popupContextMenu(webContents, params) {
         navigate: (action) => {
             // 走渲染层而不是直接 webContents.goBack()：标签页的 history/loading
             // 记账在渲染层，直接调会让两边状态漂移（按钮灰着但页面已经动了）
-            sendCommand({ action });
+            // 带上来源 webContents：发声/分析类命令靠它按页路由，这里保持一致
+            sendCommand({ action }, webContents);
         },
         reloadHost: () => {
             const win = windowGetter();
@@ -832,7 +870,7 @@ function popupContextMenu(webContents, params) {
         inspect: () => {
             try { webContents.inspectElement(params.x, params.y); } catch (e) { console.error(e); }
         },
-        analyzeElement: (x, y) => sendCommand({ action: 'analyzeElement', arg: { x, y } }),
+        analyzeElement: (x, y) => sendCommand({ action: 'analyzeElement', arg: { x, y } }, webContents),
     };
 
     const template = buildContextMenuTemplate({

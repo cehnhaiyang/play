@@ -1441,7 +1441,8 @@ const EdgeImportPanel: React.FC<{
             if (data.ok) setMerge(onImported(data));
         } catch (e) {
             setError(e instanceof Error ? e.message : '导入失败');
-        } finally {            setRunning(false);
+        } finally {
+            setRunning(false);
             setProgress('');
         }
     };
@@ -4181,6 +4182,8 @@ export const BrowsePanel: React.FC<BrowsePanelProps> = ({
         findInPage,
         setFindQuery,
         findQuery,
+        findOpen,
+        closeFind,
         findInfo,
         zoomBy,
         toggleMute,
@@ -4257,13 +4260,13 @@ export const BrowsePanel: React.FC<BrowsePanelProps> = ({
      * 也处理了一次，两处都需要：一处管焦点在条上，一处管焦点被用户点走之后。
      */
     useEffect(() => {
-        if (!findQuery) return;
+        if (!findOpen && !findQuery) return;
         const onKeyDown = (event: KeyboardEvent) => {
-            if (event.key === 'Escape') setFindQuery('');
+            if (event.key === 'Escape') closeFind();
         };
         window.addEventListener('keydown', onKeyDown);
         return () => window.removeEventListener('keydown', onKeyDown);
-    }, [findQuery, setFindQuery]);
+    }, [findOpen, findQuery, closeFind]);
 
     /** 错误页的「重试」：清掉错误态再重新加载，否则错误页会一直盖着 */
     const retryTab = useCallback((tabId: string) => {
@@ -4396,14 +4399,14 @@ export const BrowsePanel: React.FC<BrowsePanelProps> = ({
                         onGoBack={tabActions.goBack}
                     />
 
-                    {findQuery !== '' && (
+                    {findOpen && (
                         <FindBar
                             query={findQuery}
                             info={findInfo}
                             onChange={setFindQuery}
                             onNext={() => findInPage(activeTabId, findQuery, { findNext: true, forward: true })}
                             onPrev={() => findInPage(activeTabId, findQuery, { findNext: true, forward: false })}
-                            onClose={() => setFindQuery('')}
+                            onClose={() => closeFind()}
                         />
                     )}
 
