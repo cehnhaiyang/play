@@ -1,0 +1,126 @@
+[0.0s] profile = C:\Users\q1505\AppData\Local\Temp\play-cf-focus-MHStKm
+UA = Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36
+[2.1s] 抓到验证窗口，show + focus + 移到 (60,60)
+[6.3s] phase=initial title=请稍候…
+[16.9s] 激活复选框 第1次（挑战页静置 11s）
+[16.9s] cloudflare 子帧 1 个，帧内脚本无返回（可能已跨进程分离）
+[16.9s] cdp 盒模型 @(16,304) 300x65 
+[16.9s] 点击点 left-center（候选 3 个，第 1 个）
+[17.6s] mouse click at (40, 337) via cdp
+[18.3s] phase=verifying title=请稍候…
+[20.1s] 焦点丢了 vis=visible title=请稍候… → 再 focus 一次
+[21.3s] phase=initial title=请稍候…
+[21.3s] 激活复选框 第2次（挑战页静置 15s）
+[21.3s] 未找到 cloudflare 子帧
+[21.4s] CDP 与 host 扫描都拿不到盒模型 → frame-js click
+[21.4s] 未找到 cloudflare 子帧
+[21.4s] keyboard Tab/Space
+[22.6s] 已拿到站点域 cf_clearance → 带 cookie 重新请求（第1次）
+[24.4s] phase=initial title=请稍候…
+[27.2s] 已拿到站点域 cf_clearance → 带 cookie 重新请求（第2次）
+[37.4s] 激活复选框 第3次（挑战页静置 10s）
+[37.4s] cloudflare 子帧 1 个，帧内脚本无返回（可能已跨进程分离）
+[37.4s] cdp 盒模型 @(16,304) 300x65 
+[37.4s] 点击点 mid（候选 3 个，第 3 个）
+[38.1s] mouse click at (106, 337) via cdp
+[38.8s] phase=verifying title=请稍候…
+[40.2s] 焦点丢了 vis=visible title=请稍候… → 再 focus 一次
+[41.7s] 激活复选框 第4次（挑战页静置 14s）
+[41.7s] 未找到 cloudflare 子帧
+[41.7s] CDP 与 host 扫描都拿不到盒模型 → frame-js click
+[41.7s] 未找到 cloudflare 子帧
+[41.7s] keyboard Tab/Space
+[42.9s] phase=verifying title=请稍候…
+[44.2s] phase=initial title=请稍候…
+[46.3s] 激活复选框 第5次（挑战页静置 19s）
+[46.3s] cloudflare 子帧 1 个，帧内脚本无返回（可能已跨进程分离）
+[46.3s] cdp 盒模型 @(16,304) 300x65 
+[46.3s] 点击点 left-center-2（候选 3 个，第 2 个）
+[47.0s] mouse click at (56, 337) via cdp
+[47.7s] phase=initial title=请稍候…
+[50.7s] 激活复选框 第6次（挑战页静置 23s）
+[50.7s] cloudflare 子帧 1 个，帧内脚本无返回（可能已跨进程分离）
+[50.7s] cdp 盒模型 @(16,304) 300x65 
+[50.7s] 点击点 mid（候选 3 个，第 3 个）
+[51.4s] mouse click at (106, 337) via cdp
+[52.1s] phase=verifying title=请稍候…
+[52.2s] 焦点丢了 vis=visible title=请稍候… → 再 focus 一次
+[54.2s] 焦点丢了 vis=visible title=请稍候… → 再 focus 一次
+[54.9s] 激活复选框 第7次（挑战页静置 28s）
+[54.9s] 未找到 cloudflare 子帧
+[55.0s] CDP 与 host 扫描都拿不到盒模型 → frame-js click
+[55.0s] 未找到 cloudflare 子帧
+[55.0s] keyboard Tab/Space
+[56.2s] phase=verifying title=请稍候…
+[59.0s] 激活复选框 第8次（挑战页静置 32s）
+[59.0s] 未找到 cloudflare 子帧
+[59.1s] CDP 与 host 扫描都拿不到盒模型 → frame-js click
+[59.1s] 未找到 cloudflare 子帧
+[59.1s] keyboard Tab/Space
+[60.2s] phase=verifying title=请稍候…
+[61.4s] phase=initial title=请稍候…
+[63.7s] 激活复选框 第9次（挑战页静置 36s）
+[63.8s] cloudflare 子帧 1 个，帧内脚本无返回（可能已跨进程分离）
+[63.8s] cdp 盒模型 @(16,304) 300x65 
+[63.8s] 点击点 mid（候选 3 个，第 3 个）
+[64.5s] mouse click at (106, 337) via cdp
+[65.2s] phase=initial title=请稍候…
+[68.1s] 激活复选框 第10次（挑战页静置 41s）
+[68.1s] cloudflare 子帧 1 个，帧内脚本无返回（可能已跨进程分离）
+[68.1s] cdp 盒模型 @(16,304) 300x65 
+[68.1s] 点击点 left-center（候选 3 个，第 1 个）
+[68.8s] mouse click at (40, 337) via cdp
+[69.5s] phase=verifying title=请稍候…
+[70.5s] 焦点丢了 vis=visible title=请稍候… → 再 focus 一次
+[72.3s] 焦点丢了 vis=visible title=请稍候… → 再 focus 一次
+[72.3s] 激活复选框 第11次（挑战页静置 45s）
+[72.3s] 未找到 cloudflare 子帧
+[72.4s] CDP 与 host 扫描都拿不到盒模型 → frame-js click
+[72.4s] 未找到 cloudflare 子帧
+[72.4s] keyboard Tab/Space
+[73.6s] phase=verifying title=请稍候…
+[76.4s] 激活复选框 第12次（挑战页静置 49s）
+[76.4s] 未找到 cloudflare 子帧
+[76.5s] CDP 与 host 扫描都拿不到盒模型 → frame-js click
+[76.5s] 未找到 cloudflare 子帧
+[76.5s] keyboard Tab/Space
+[77.7s] phase=verifying title=请稍候…
+[77.7s] 自动点击次数用尽（12 次），继续等待放行
+[78.4s] phase=verifying title=请稍候…
+[78.4s] 自动点击次数用尽（12 次），继续等待放行
+[79.1s] phase=verifying title=请稍候…
+[79.1s] 自动点击次数用尽（12 次），继续等待放行
+[79.8s] phase=verifying title=请稍候…
+[79.8s] 自动点击次数用尽（12 次），继续等待放行
+[80.5s] phase=verifying title=请稍候…
+[80.5s] 自动点击次数用尽（12 次），继续等待放行
+[81.3s] phase=verifying title=请稍候…
+[81.3s] 自动点击次数用尽（12 次），继续等待放行
+[82.0s] phase=verifying title=请稍候…
+[82.0s] 自动点击次数用尽（12 次），继续等待放行
+[82.7s] phase=verifying title=请稍候…
+[82.7s] 自动点击次数用尽（12 次），继续等待放行
+[83.4s] phase=verifying title=请稍候…
+[83.4s] 自动点击次数用尽（12 次），继续等待放行
+[84.1s] phase=verifying title=请稍候…
+[84.1s] 自动点击次数用尽（12 次），继续等待放行
+[85.4s] phase=initial title=请稍候…
+[85.4s] 自动点击次数用尽（12 次），继续等待放行
+[86.1s] phase=initial title=请稍候…
+[86.1s] 自动点击次数用尽（12 次），继续等待放行
+[86.8s] phase=initial title=请稍候…
+[86.8s] 自动点击次数用尽（12 次），继续等待放行
+[87.5s] phase=initial title=请稍候…
+[87.5s] 自动点击次数用尽（12 次），继续等待放行
+[88.2s] phase=initial title=请稍候…
+[88.2s] 自动点击次数用尽（12 次），继续等待放行
+[89.1s] phase=initial title=请稍候…
+[89.1s] 自动点击次数用尽（12 次），继续等待放行
+[89.8s] phase=initial title=请稍候…
+[89.8s] 自动点击次数用尽（12 次），继续等待放行
+[90.5s] phase=initial title=请稍候…
+[90.5s] 自动点击次数用尽（12 次），继续等待放行
+[90.5s] solver threw: 站点验证未自动通过（Cloudflare 挑战 90s 未放行，已自动点击 12 次，最后状态=initial）。请检查网络（代理/VPN）后重试
+[90.5s] html bytes = 0
+
+RESULT {"pass":false,"costSec":90.4,"error":"站点验证未自动通过（Cloudflare 挑战 90s 未放行，已自动点击 12 次，最后状态=initial）。请检查网络（代理/VPN）后重试"}

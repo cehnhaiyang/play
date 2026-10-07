@@ -1,0 +1,16 @@
+[0.0s] hostmap = 开（MAP brunhild→104.18.95.41）
+[0.0s] proxy = 跟随系统
+[2.9s] OK   script  200 :: challenges.cloudflare.com/turnstile/v0/g/4df4a60fa397/api.js?onload=zeEi4&render=explicit
+[5.2s] OK   subFrame  200 :: challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/f/av0/rch/w63od/0x4AAAAAAADnP
+[6.4s] OK   xhr  200 :: challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/fo/984726910:1791334824:pVK7lOmnK3Nt2z-
+[6.8s] OK   xhr  401 :: challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/pat/a4693e1f9a61e38a/1791337697817/d659
+[6.9s] OK   image  200 :: challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/ci/a4693e1f9a61e38a/1791337697818/TKX0c
+[8.0s] OK   xhr  204 :: brunhild.challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/i/a4693e1f9a61e38a/LiQ89zmfY0k
+[40.1s] 汇总：cloudflare 成功 6 类 / 失败 0 类
+[40.1s]   OK  x1  200 :: challenges.cloudflare.com/turnstile/v0/g/4df4a60fa397/api.js?onload=zeEi4&render=explicit
+[40.1s]   OK  x1  200 :: challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/f/av0/rch/w63od/0x4AAAAAAADnP
+[40.1s]   OK  x2  200 :: challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/fo/984726910:1791334824:pVK7lOmnK3Nt2z-
+[40.1s]   OK  x1  401 :: challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/pat/a4693e1f9a61e38a/1791337697817/d659
+[40.1s]   OK  x1  200 :: challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/ci/a4693e1f9a61e38a/1791337697818/TKX0c
+[40.1s]   OK  x1  204 :: brunhild.challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/i/a4693e1f9a61e38a/LiQ89zmfY0k
+[40.1s] 顶层页面 = 请稍候… | 28993

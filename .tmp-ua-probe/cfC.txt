@@ -1,0 +1,66 @@
+[0.0s] mode = prod
+[0.0s] session UA = Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36
+[0.1s] identity = {"ua":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36","brands":null,"platform":null,"chromeKeys":[],"plugins":5,"webdriver":false}
+[0.1s] proxy = 跟随系统（不设 fixed_servers）
+[0.1s] url = https://www.acgmho.com/q/%E5%8F%98%E6%80%81%E8%80%81%E7%88%B7%E7%88%B7%E7%9A%84%E5%BF%8F%E6%82%94%E5%AE%A4%E6%97%A5%E8%AE%B0-1.html
+[7.6s] phase=initial title=请稍候…
+[17.6s] 激活复选框 第1次（挑战页静置 10s）
+[17.6s] cloudflare 子帧 1 个，帧内脚本无返回（可能已跨进程分离）
+[17.6s] cdp 盒模型 @(16,304) 300x65 
+[17.6s] 点击点 left-center（候选 3 个，第 1 个）
+[38.3s] phase=initial title=请稍候…
+[38.3s] 激活复选框 第2次（挑战页静置 31s）
+[38.3s] cloudflare 子帧 1 个，帧内脚本无返回（可能已跨进程分离）
+[38.3s] cdp 盒模型 @(16,304) 300x65 
+[38.3s] 点击点 left-center-2（候选 3 个，第 2 个）
+[38.6s] mouse click at (40, 337) via cdp
+[38.6s] mouse click at (56, 337) via sendInputEvent（CDP 不可用）
+[39.7s] phase=initial title=请稍候…
+[42.5s] 激活复选框 第3次（挑战页静置 35s）
+[42.5s] cloudflare 子帧 1 个，帧内脚本无返回（可能已跨进程分离）
+[42.5s] cdp 盒模型 @(16,304) 300x65 
+[42.5s] 点击点 mid（候选 3 个，第 3 个）
+[63.2s] phase=initial title=请稍候…
+[63.2s] 激活复选框 第4次（挑战页静置 56s）
+[63.2s] cloudflare 子帧 1 个，帧内脚本无返回（可能已跨进程分离）
+[63.2s] cdp 盒模型 @(16,304) 300x65 
+[63.2s] 点击点 left-center（候选 3 个，第 1 个）
+[63.5s] mouse click at (106, 337) via cdp
+[63.6s] mouse click at (40, 337) via sendInputEvent（CDP 不可用）
+[64.6s] phase=initial title=请稍候…
+[67.5s] 激活复选框 第5次（挑战页静置 60s）
+[67.5s] cloudflare 子帧 1 个，帧内脚本无返回（可能已跨进程分离）
+[67.5s] cdp 盒模型 @(16,304) 300x65 
+[67.5s] 点击点 left-center-2（候选 3 个，第 2 个）
+[88.2s] phase=initial title=请稍候…
+[88.2s] 激活复选框 第6次（挑战页静置 81s）
+[88.2s] cloudflare 子帧 1 个，帧内脚本无返回（可能已跨进程分离）
+[88.2s] cdp 盒模型 @(16,304) 300x65 
+[88.2s] 点击点 mid（候选 3 个，第 3 个）
+[88.5s] mouse click at (56, 337) via cdp
+[88.5s] mouse click at (106, 337) via sendInputEvent（CDP 不可用）
+[89.6s] phase=initial title=请稍候…
+[92.4s] 激活复选框 第7次（挑战页静置 85s）
+[92.4s] cloudflare 子帧 1 个，帧内脚本无返回（可能已跨进程分离）
+[92.4s] cdp 盒模型 @(16,304) 300x65 
+[92.4s] 点击点 left-center（候选 3 个，第 1 个）
+[113.1s] phase=initial title=请稍候…
+[113.1s] 激活复选框 第8次（挑战页静置 106s）
+[113.1s] cloudflare 子帧 1 个，帧内脚本无返回（可能已跨进程分离）
+[113.1s] cdp 盒模型 @(16,304) 300x65 
+[113.1s] 点击点 left-center-2（候选 3 个，第 2 个）
+[113.5s] mouse click at (40, 337) via cdp
+[113.5s] mouse click at (56, 337) via sendInputEvent（CDP 不可用）
+[114.6s] phase=initial title=请稍候…
+[117.4s] 激活复选框 第9次（挑战页静置 110s）
+[117.4s] cloudflare 子帧 1 个，帧内脚本无返回（可能已跨进程分离）
+[117.4s] cdp 盒模型 @(16,304) 300x65 
+[117.4s] 点击点 mid（候选 3 个，第 3 个）
+[137.4s] solver threw: 站点验证未自动通过（Cloudflare 挑战 137s 未放行，已自动点击 9 次，最后状态=initial）。请检查网络（代理/VPN）后重试
+[137.4s] solved in 137.3s, finalUrl = https://www.acgmho.com/q/%E5%8F%98%E6%80%81%E8%80%81%E7%88%B7%E7%88%B7%E7%9A%84%E5%BF%8F%E6%82%94%E5%AE%A4%E6%97%A5%E8%AE%B0-1.html
+[137.4s] html bytes = 0
+[137.4s] still challenge page? n/a
+[137.4s] parsed items = 0
+
+RESULT {"mode":"prod","pass":false,"costSec":137.3,"itemCount":0,"error":"站点验证未自动通过（Cloudflare 挑战 137s 未放行，已自动点击 9 次，最后状态=initial）。请检查网络（代理/VPN）后重试"}
+[137.4s] mouse click at (106, 337) via sendInputEvent（CDP 不可用）

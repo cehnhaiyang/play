@@ -1,0 +1,10 @@
+[0.5s] phase=verifying title=请稍候…
+[6.6s] 激活复选框 第1次（挑战页静置 6s）
+[6.6s] cf帧=1 rect=(16,19) 26x26 文案="正在完成安全检查…"
+[6.6s] cdp 盒模型 @(60,368) 300x65 
+[6.6s] 点击点 frame-rect（候选 4 个，第 1 个）
+[7.3s] mouse click at (89, 400) via cdp
+[7.7s] 放行，等待 HTML 长度稳定
+[8.1s] 放行成功（8s）: 搜索结果
+[8.1s] RESULT pass=true htmlLen=8882 error=undefined
+[8.1s] RESULT click=(89,400)

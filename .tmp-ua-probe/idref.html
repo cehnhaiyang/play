@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>idref</title>
+<body><pre id="out">pending</pre>
+<script>
+const uad = navigator.userAgentData;
+const rows = {
+    ua: navigator.userAgent,
+    uaDataExists: !!uad,
+    brands: uad ? JSON.stringify(uad.brands) : null,
+    mobile: uad ? uad.mobile : null,
+    platform: uad ? uad.platform : null,
+    chromeExists: !!window.chrome,
+    chromeKeys: window.chrome ? Object.keys(window.chrome).sort().join(',') : null,
+    runtimeApp: window.chrome && window.chrome.runtime ? String(!!window.chrome.runtime.id) : null,
+    plugins: navigator.plugins.length,
+    mimeTypes: navigator.mimeTypes.length,
+    webdriver: String(navigator.webdriver),
+    languages: navigator.languages.join(','),
+    hw: navigator.hardwareConcurrency,
+    mem: navigator.deviceMemory,
+    pdfViewer: navigator.pdfViewerEnabled,
+    doNotTrack: String(navigator.doNotTrack),
+    connType: navigator.connection ? navigator.connection.effectiveType : null,
+};
+(async () => {
+    if (uad && uad.getHighEntropyValues) {
+        try {
+            const hv = await uad.getHighEntropyValues(['fullVersionList', 'platformVersion', 'architecture', 'bitness', 'model', 'uaFullVersion']);
+            rows.fullVersionList = JSON.stringify(hv.fullVersionList);
+            rows.platformVersion = hv.platformVersion;
+            rows.architecture = hv.architecture;
+            rows.bitness = hv.bitness;
+        } catch (e) { rows.highEntropyError = String(e); }
+    }
+    rows.hasSct = 'Sec-CH-Prefers-Color-Scheme' in {};
+    document.getElementById('out').textContent = JSON.stringify(rows, null, 1);
+})();
+</script>

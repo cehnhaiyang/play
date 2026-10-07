@@ -1,0 +1,34 @@
+# SearchQA with the local OpenAI-compatible endpoint.
+#
+# Endpoint / credentials come from .env:
+#   AZURE_OPENAI_ENDPOINT=http://127.0.0.1:7863/v1
+#   AZURE_OPENAI_API_KEY=1
+#   AZURE_OPENAI_AUTH_MODE=openai_compatible
+#
+# The skill document is the trainable artifact and already has a built-in seed:
+#   env.skill_init = skillopt/envs/searchqa/skills/initial.md
+# To start from your own skill, either overwrite that file, change env.skill_init
+# below, or pass --skill_init <path.md> to scripts/train.py.
+#
+# Request volume (all inherited from default.yaml unless overridden here):
+#   train_size 400 / batch_size 40 / num_epochs 4  ->  40 training steps
+#   baseline + per-step gate evaluation run on the FULL selection set
+#     (sel_env_num: 0 means "all" -> 200 val items each time)
+#   final evaluation runs on the FULL test set
+#     (test_env_num: 0 means "all" -> 1400 test items, x3 rounds)
+# To shrink it, run the one-click script with -Smoke, or override here, e.g.:
+#   train:      {num_epochs: 1, train_size: 80, batch_size: 8}
+#   evaluation: {sel_env_num: 20, test_env_num: 40}
+#   gradient:   {analyst_workers: 4}
+#   env:        {workers: 8}
+#
+# Run:
+#   .\run_all.ps1 -Config configs/searchqa/local.yaml
+_base_: default.yaml
+
+model:
+  optimizer: global:deepseek-v4.1-flash
+  target: global:deepseek-v4.1-flash
+  optimizer_backend: openai_chat
+  target_backend: openai_chat
+  reasoning_effort: medium

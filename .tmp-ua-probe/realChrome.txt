@@ -1,0 +1,27 @@
+[0.5s] browser = Chrome/154.0.8037.98
+[0.5s] ua = Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36
+[0.8s] url = https://www.acgmho.com/q/%E5%8F%98%E6%80%81%E8%80%81%E7%88%B8%E7%88%B8%E7%9A%84%E5%BF%8F%E6%82%94%E5%AE%A4%E6%97%A5%E8%AE%B0-1.html
+[3.1s] 顶层文档 403 :: https://search.acgmho.com/q/%E5%8F%98%E6%80%81%E8%80%81%E7%88%B8%E7%88%B8%E7%9A%84%E5%BF%8
+[7.2s] title=请稍候… len=29214  url=https://search.acgmho.com/q/%E5%8F%98%E6%80%81%E8%80%81%E7%8
+[15.3s] 点击 #1：顶层找不到 cf iframe → 用截图点位 (238,315)
+[17.4s] 顶层文档 200 :: https://search.acgmho.com/q/%E5%8F%98%E6%80%81%E8%80%81%E7%88%B8%E7%88%B8%E7%9A%84%E5%BF%8
+[19.6s] title=搜索"变态老爸爸的忏悔室日记"的漫画和动漫 【第1页】| ACG漫画网 len=6353  url=https://search.acgmho.com/q/%E5%8F%98%E6%80%81%E8%80%81%E7%8
+[19.6s] 放行
+[19.7s] 截图已存 realChrome.png
+[19.7s] cloudflare 记录 = [
+ {
+  "key": "https://challenges.cloudflare.com/turnstile/v0/g/4df4a60fa397/api.js?onload=zeEi4&render=explicit",
+  "status": "200",
+  "n": 1,
+  "pat": false,
+  "wa": ""
+ },
+ {
+  "key": "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/f/av0/rch/biesu/0x4AAAAAAADnPIDROrmt1Wwj/light/fbE/new/normal?lang=auto",
+  "status": "200",
+  "n": 1,
+  "pat": false,
+  "wa": ""
+ }
+]
+[19.7s] RESULT {"pass":true,"browser":"Chrome/154.0.8037.98","patRequests":0,"patRetriedWithToken":false,"costSec":19.7}

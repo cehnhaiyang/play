@@ -1,0 +1,13 @@
+[0.0s] profile = C:\Users\q1505\AppData\Local\Temp\play-cf-nocdp-BRNC9y
+[0.1s] 调试器是否 attach = false
+[0.1s] url = https://www.acgmho.com/q/%E5%8F%98%E6%80%81%E8%80%81%E7%88%B7%E7%88%B7%E7%9A%84%E5%BF%8F%E6%82%94%E5%AE%A4%E6%97%A5%E8%AE%B0-1.html
+[10.4s] title=请稍候… len=28848
+[18.0s] 点击 #1：cf帧树=["https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/f/av0/rch/ftnye/0x4AAAAAAADnPIDROrmt1Wwj/light/fbE/new/normal?lang=auto"] 帧内=读不到 盒=无
+[30.1s] 点击 #2：cf帧树=["https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/f/av0/rch/ftnye/0x4AAAAAAADnPIDROrmt1Wwj/light/fbE/new/normal?lang=auto"] 帧内=读不到 盒=无
+[42.3s] 点击 #3：cf帧树=["https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/f/av0/rch/ftnye/0x4AAAAAAADnPIDROrmt1Wwj/light/fbE/new/normal?lang=auto"] 帧内=读不到 盒=无
+[54.4s] 点击 #4：cf帧树=["https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/f/av0/rch/ftnye/0x4AAAAAAADnPIDROrmt1Wwj/light/fbE/new/normal?lang=auto"] 帧内=读不到 盒=无
+[66.5s] 点击 #5：cf帧树=["https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/f/av0/rch/ftnye/0x4AAAAAAADnPIDROrmt1Wwj/light/fbE/new/normal?lang=auto"] 帧内=读不到 盒=无
+[78.7s] 点击 #6：cf帧树=["https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/f/av0/rch/ftnye/0x4AAAAAAADnPIDROrmt1Wwj/light/fbE/new/normal?lang=auto"] 帧内=读不到 盒=无
+[84.7s] 调试器是否 attach（结束）= false
+
+RESULT {"pass":false,"clicks":6,"costSec":75}

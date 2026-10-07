@@ -1,0 +1,70 @@
+
+### process.versions
+{"electron":"44.4.5","chrome":"152.0.7977.130","node":"24.21.0"}
+### defaultSession.getUserAgent()
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ua-probe/0.0.0 Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36
+### OUTBOUND headers
+{
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ua-probe/0.0.0 Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36",
+  "Sec-Fetch-Site": "none",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Dest": "document",
+  "Accept-Language": "zh-CN"
+}
+### OUTBOUND headers
+{
+  "sec-ch-ua-platform": "\"Windows\"",
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ua-probe/0.0.0 Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36",
+  "sec-ch-ua": "\"Not?A_Brand\";v=\"24\", \"Chromium\";v=\"152\"",
+  "sec-ch-ua-mobile": "?0",
+  "Sec-Fetch-Site": "same-origin",
+  "Sec-Fetch-Mode": "no-cors",
+  "Sec-Fetch-Dest": "script",
+  "Accept-Language": "zh-CN"
+}
+### PAGE-SIDE identity
+{
+  "navigatorUserAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ua-probe/0.0.0 Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36",
+  "userAgentData": {
+    "brands": [
+      {
+        "brand": "Not?A_Brand",
+        "version": "24"
+      },
+      {
+        "brand": "Chromium",
+        "version": "152"
+      }
+    ],
+    "platform": "Windows",
+    "mobile": false
+  }
+}
+### after override, session UA
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36
+### OUTBOUND headers
+{
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ua-probe/0.0.0 Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36",
+  "Sec-Fetch-Site": "none",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Dest": "document",
+  "Accept-Language": "zh-CN"
+}
+### PAGE-SIDE identity (UA overridden to 122)
+{
+  "navigatorUserAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ua-probe/0.0.0 Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36",
+  "userAgentData": {
+    "brands": [
+      {
+        "brand": "Not?A_Brand",
+        "version": "24"
+      },
+      {
+        "brand": "Chromium",
+        "version": "152"
+      }
+    ],
+    "platform": "Windows",
+    "mobile": false
+  }
+}

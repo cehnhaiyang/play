@@ -1,0 +1,36 @@
+
+### process.versions
+{"electron":"44.4.5","chrome":"152.0.7977.130"}
+### default UA
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36
+### derived
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36
+### outbound [/]
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36
+### outbound [/s.js]
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36
+sec-ch-ua: "Not?A_Brand";v="24", "Chromium";v="152"
+sec-ch-ua-mobile: ?0
+sec-ch-ua-platform: "Windows"
+### A page (default)
+{
+ "navUA": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36",
+ "brands": [
+  {
+   "brand": "Not?A_Brand",
+   "version": "24"
+  },
+  {
+   "brand": "Chromium",
+   "version": "152"
+  }
+ ]
+}
+### outbound [/]
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36
+### probe failed
+Error: ERR_FAILED (-2) loading 'https://example.com/?b'
+    at rejectAndCleanup (node:electron/js2c/browser_init:1:94793)
+    at finishListener (node:electron/js2c/browser_init:1:94955)
+    at WebContents.stopLoadingListener (node:electron/js2c/browser_init:1:95342)
+    at WebContents.emit (node:events:526:24)

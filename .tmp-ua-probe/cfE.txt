@@ -1,0 +1,9 @@
+[30.3s] 主帧 dump = {"url":"chrome-error://chromewebdata/","bodyLen":0,"txt":"","frames":[],"cands":[],"dpr":1,"iw":504,"ih":535,"sy":0}
+[30.3s] Target 列表 1: page@https://www.acgmho.com/q/%E5%8F%98%E6%80%81%E8%80%81%E7%88%B
+[30.3s] 子会话[page https://www.acgmho.com/q/%E5%8F%98%E6%80%81%E8%80%81%E7%88%B7%E7%88%B7] frameId=CF2D8E75F25CC958CB30CE9E54B2E9E0 → {"url":"chrome-error://chromewebdata/","bodyLen":0,"txt":"","frames":[],"cands":[],"dpr":1,"iw":504,"ih":535,"sy":0}
+[30.3s] hitTest(40,336) → nodeId=undefined
+[30.3s] hitTest(38,362) → nodeId=undefined
+[30.3s] hitTest(60,336) → nodeId=undefined
+[30.3s] hitTest(200,336) → nodeId=undefined
+[30.3s] hitTest(40,320) → nodeId=undefined
+[30.3s] FAILED: Error: UnknownVizError

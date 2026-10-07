@@ -1,0 +1,22 @@
+
+### default UA
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36
+
+### canon (kernel-matching)
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36
+
+### control-no-override
+loaded
+page: {"ua":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36","brands":[{"brand":"Not?A_Brand","version":"24"},{"brand":"Chromium","version":"152"}]}
+server: [
+ {
+  "p": "/page?tag=control-no-override",
+  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36"
+ },
+ {
+  "p": "/xhr",
+  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36",
+  "ch": "\"Not?A_Brand\";v=\"24\", \"Chromium\";v=\"152\"",
+  "chP": "\"Windows\""
+ }
+]

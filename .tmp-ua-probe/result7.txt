@@ -1,0 +1,33 @@
+
+### session default UA
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36
+
+### A 无覆写 page identity
+{"navUA":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36","brands":[{"brand":"Not?A_Brand","version":"24"},{"brand":"Chromium","version":"152"}]}
+
+### A 无覆写 server received
+[
+ {
+  "p": "/p?t=1790926150956&tag=A%20%E6%97%A0%E8%A6%86%E5%86%99",
+  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36"
+ },
+ {
+  "p": "/xhr?t=0.6658599210826577",
+  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36",
+  "ch": "\"Not?A_Brand\";v=\"24\", \"Chromium\";v=\"152\""
+ }
+]
+
+### B 无覆写 load ERROR
+ERR_FAILED (-2) loading 'http://127.0.0.1:52142/p?t=1790926151583&tag=B 无覆写'
+
+### B 无覆写 js error
+Object has been destroyed
+
+### B 无覆写 server received
+[
+ {
+  "p": "/p?t=1790926151583&tag=B%20%E6%97%A0%E8%A6%86%E5%86%99",
+  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36"
+ }
+]

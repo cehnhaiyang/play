@@ -1,0 +1,14 @@
+[1.0s] 组件真实位置 = {"left":60,"top":368,"width":300,"height":65}
+[1.7s] probe: cf帧=1 rect=(16,19) 26x26 文案="请验证您是真人"
+[1.7s] 子帧 rect={"h":26,"tag":"INPUT.","w":26,"x":16,"y":19} 文案="请验证您是真人"
+[1.7s] CDP 盒={"left":60,"top":368,"width":300,"height":65}
+[1.7s] 兜底盒={"left":60,"top":368,"width":400,"height":65,"tag":"DIV","id":"cf-turnstile-host","cls":"","isFrame":false,"hits":6308,"union":{"left":6,"top":53.5,"width":493,"height":451}}
+[1.7s] 进程分布 main=4 anchor=5 跨进程=true
+[1.7s] act: cf帧=1 rect=(16,19) 26x26 文案="请验证您是真人"
+[1.7s] act: cdp 盒模型 @(60,368) 300x65 
+[1.7s] act: 点击点 frame-rect（候选 4 个，第 1 个）
+[2.4s] act: mouse click at (89, 400) via cdp
+[2.9s] AFTER_CDP [{"detail":1,"trusted":true}]
+[2.9s] fallback point = {"x":84,"y":401}
+[3.5s] AFTER_FALLBACK [{"detail":1,"trusted":true},{"detail":1,"trusted":true}]
+[3.5s] EXPECTED_POINT {"x":89,"y":400}

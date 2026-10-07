@@ -1,0 +1,2 @@
+
+[16708:1007/095930.553:ERROR:gpu\ipc\client\command_buffer_proxy_impl.cc:490] GPU state invalid after WaitForGetOffsetInRange.

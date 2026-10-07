@@ -1,0 +1,21 @@
+[0.0s] session UA = Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36
+[2.1s] https 页 = {
+ "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36",
+ "uaDataType": "object",
+ "brands": "[{\"brand\":\"Not?A_Brand\",\"version\":\"24\"},{\"brand\":\"Chromium\",\"version\":\"152\"}]",
+ "platform": "Windows",
+ "chromeExists": true,
+ "chromeKeys": "",
+ "loadTimes": "undefined",
+ "csi": "undefined",
+ "appType": "undefined",
+ "plugins": 5,
+ "webdriver": "false",
+ "languages": "zh-CN,zh-Hans-CN,ja",
+ "hw": 12,
+ "mem": 16,
+ "pdf": true,
+ "secure": true,
+ "dns": "https:"
+}
+[2.1s] highEntropy = {"architecture":"x86","bitness":"64","brands":[{"brand":"Not?A_Brand","version":"24"},{"brand":"Chromium","version":"152"}],"fullVersionList":[{"brand":"Not?A_Brand","version":"24.0.0.0"},{"brand":"Chromium","version":"152.0.7977.130"}],"mobile":false,"model":"","platform":"Windows","platformVersion":"10.0.0"}

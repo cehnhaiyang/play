@@ -1,0 +1,33 @@
+
+### expected canon UA
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36
+
+### session UA after apply
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36
+
+### plain window page
+{"ua":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36","brands":[{"brand":"Not?A_Brand","version":"24"},{"brand":"Chromium","version":"152"}]}
+
+### plain window server
+[{"p":"/?case=plain","ua":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36","ch":null,"chMobile":null,"chPlatform":null}]
+
+### webview guest (no useragent attr)
+{"loaded":false,"code":"TIMEOUT"}
+
+### guest server received
+[
+ {
+  "p": "/?case=host",
+  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+  "ch": null,
+  "chMobile": null,
+  "chPlatform": null
+ },
+ {
+  "p": "/?case=guest",
+  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+  "ch": null,
+  "chMobile": null,
+  "chPlatform": null
+ }
+]

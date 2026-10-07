@@ -1,0 +1,6 @@
+
+### host page identity
+{"ua":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36","brands":[{"brand":"Not?A_Brand","version":"24"},{"brand":"Chromium","version":"152"}]}
+
+### guest identity
+ERR Failed to read a named property 'navigator' from 'Window': Blocked a frame with origin "http://127.0.0.1:8791" from accessing a cross-origin frame.
