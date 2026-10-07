@@ -1,3 +1,0 @@
-
-(node:1800) DeprecationWarning: getBitmap() is deprecated, use toBitmap() instead.
-(Use `electron --trace-deprecation ...` to show where the warning was created)

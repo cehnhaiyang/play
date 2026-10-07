@@ -1,8 +1,0 @@
-[12.1s] 挂钩 {"msgs":0,"focus":false,"vis":"visible"}
-[16.1s] 基线 {"msgs":5,"focus":false,"vis":"visible"}
-[16.1s] 基线消息 [{"org":"https://challenges.cloudflare.com","d":"[object Object]"},{"org":"https://challenges.cloudflare.com","d":"[object Object]"},{"org":"https://challenges.cloudflare.com","d":"[object Object]"},{"org":"https://challenges.cloudflare.com","d":"[object Object]"},{"org":"https://challenges.cloudflare.com","d":"[object Object]"}]
-[16.2s] 点击前复选框区 = 35x32 h=2904082432 dark=164
-[16.4s] 已点击 (36,336) focus=true
-[18.4s] +2s 状态={"msgs":8,"focus":false,"vis":"visible"} 复选框区=35x32 h=624961361 dark=127
-[18.4s] +2s 消息=[{"org":"https://challenges.cloudflare.com","d":"[object Object]"},{"org":"https://challenges.cloudflare.com","d":"[object Object]"},{"org":"https://challenges.cloudflare.com","d":"[object Object]"},{"org":"https://challenges.cloudflare.com","d":"[object Object]"},{"org":"https://challenges.cloudflare.com","d":"[object Object]"},{"org":"https://challenges.cloudflare.com","d":"[object Object]"},{"org":"https://challenges.cloudflare.com","d":"[object Object]"},{"org":"https://challenges.cloudflare.com","d":"[object Object]"}]
-[21.4s] FAILED: Error: UnknownVizError

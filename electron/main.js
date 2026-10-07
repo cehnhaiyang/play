@@ -1,6 +1,6 @@
 const { app, BrowserWindow, ipcMain, shell, webContents, dialog } = require('electron');
 const { probeGallery, downloadGallery, saveGalleryImages, fetchGalleryPages, normalizeGid, galleryTaskKey, galleryKeyMatches, GALLERY_CHANNELS, fetchChannelList, buildChannelListResult, channelListUrl, deriveListPageUrl, isCloudflareChallengePage, isCloudflareErrorPage, setUserAgent: pushUserAgentToSite } = require('./acgmhoService');
-const { solveChallengeWithBrowser } = require('./challengeSolver');
+const { fetchHtmlWithRealBrowser } = require('./externalBrowserSolver');
 const { getSettings, saveProxyPort, saveKbRoot, saveAiConfig, testAiConnection } = require('./settings');
 const { loadKbSource, readKbArticle, kbStatus } = require('./kbService');
 const { detectEdgeProfiles, importEdgeData } = require('./edgeImportService');
@@ -1782,22 +1782,57 @@ function loadSearchPageViaBrowser(url) {
     return run;
 }
 
-// 全文搜索被 Cloudflare 挑战拦下时的兜底：交给自动求解器（可见小窗，无需用户操作）。
-// 挑战能否通过取决于浏览器指纹是否真实一致：会话 UA 在 ready 时就覆写成内核派生值
-// （见 electron/userAgent.js），Client Hints 交回 Chromium 自己发，
-// 所以这个窗口的 UA 头 / navigator / sec-ch-ua 三处天然同源，且与 Node 直抓用的是同一个值。
-// 通过后 cf_clearance 落在会话里，Node 直抓（走代理 + 同 UA）即可复用。
+// 全文搜索被 Cloudflare 挑战拦下时的兜底：用本机真实浏览器静默取回渲染好的 HTML。
+//
+// 为什么只有这一条路（实测数据见 electron/externalBrowserSolver.js 顶部）：
+// 挑战放不放行取决于客户端身份是否自洽，而 Electron 内核的 UA-CH 品牌列表里
+// 没有 "Google Chrome"（UA 字符串却自称 Chrome/152.0.7977.130），window.chrome
+// 是空对象，私有状态令牌 /pat/ 拿 401。这三条在 Electron 内部无法补齐：
+// CDP 的 userAgentMetadata 四种参数形状全部 Invalid parameters，也就是说
+// 没有任何接口能改 UA-CH。所以应用内窗口过验证实测 120s/90s/71s 三连败，
+// 那条退路已经连同 challengeSolver.js 一起删掉了 —— 没有真实浏览器就直接报错，
+// 不再用一个必然失败的可见窗口把"站点没放行"和"这台机器没装浏览器"混成一件事。
+//
+// 取回内容这条路不改写任何 UA：浏览器的身份由它自己给，把 Chrome 的 UA 抄给
+// Node 直抓只会制造新的不一致（cf_clearance 与 UA 绑定，两边都对不上）。
+
+/**
+ * 外部浏览器要用的代理，直接问当前会话已经生效的那条路。
+ *
+ * 不重读设置、不解析端口字符串、更不写死某个端口：会话怎么出网，浏览器就怎么出网，
+ * 否则会出现"应用里通了、取内容的浏览器没通"这种两边配置不一致的坑。
+ * @returns {Promise<string>} 形如 http://127.0.0.1:10810；直连时返回空串（跟随系统/TUN）
+ */
+async function proxyServerForExternalBrowser(url) {
+    const { session } = require('electron');
+    let resolved = '';
+    try {
+        resolved = await session.defaultSession.resolveProxy(url);
+    } catch (_e) {
+        return '';
+    }
+    // resolveProxy 可能回一串候选："PROXY a:1; SOCKS5 b:2"，取第一个可用的
+    for (const piece of String(resolved || '').split(';')) {
+        const [kind, hostPort] = String(piece).trim().split(/\s+/);
+        if (!hostPort || /direct/i.test(kind || '')) continue;
+        const proto = /socks/i.test(kind || '') ? 'socks5' : 'http';
+        return `${proto}://${hostPort}`;
+    }
+    return '';
+}
+
 async function loadSearchPageViaBrowserOnce(url) {
-    const { html, finalUrl, userAgent } = await solveChallengeWithBrowser({
-        url,
-        isChallengePage: isCloudflareChallengePage,
-        isErrorPage: isCloudflareErrorPage,
-        log: (msg) => {
-            console.log('[cf-auto]', msg);
-            flowLog('[solver]', msg);
-        },
+    const log = (msg) => {
+        console.log('[cf-auto]', msg);
+        flowLog('[solver]', msg);
+    };
+    // 没装 Chrome/Edge 时 fetchHtmlWithRealBrowser 自己抛"本机没有安装 Chrome 或 Edge…"，
+    // 这里不再包一层：失败原因由那个模块给，避免同一个错误有两个来源。
+    const proxyServer = await proxyServerForExternalBrowser(url);
+    const { html, finalUrl } = await fetchHtmlWithRealBrowser({
+        url, isChallengePage: isCloudflareChallengePage, isErrorPage: isCloudflareErrorPage,
+        log, proxyServer,
     });
-    if (userAgent) setUserAgent(userAgent);
     return { html, finalUrl };
 }
 

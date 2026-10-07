@@ -120,6 +120,8 @@ const GLOBALS = new Set([
     'Object', 'Map', 'Set', 'WeakMap', 'WeakSet', 'RegExp', 'Error', 'TypeError', 'RangeError',
     'SyntaxError', 'EvalError', 'URIError', 'ReferenceError', 'Symbol', 'Proxy', 'Reflect', 'BigInt',
     'Function', 'URL', 'URLSearchParams', 'TextEncoder', 'TextDecoder', 'AbortController',
+    // WebSocket 是 Node 22 / Electron 主进程自带的全局（外部浏览器的 CDP 客户端用它）
+    'WebSocket',
     'AbortSignal', 'fetch', 'structuredClone', 'performance', 'Uint8Array', 'Int8Array',
     'Uint8ClampedArray', 'Uint16Array', 'Int16Array', 'Uint32Array', 'Int32Array', 'Float32Array',
     'Float64Array', 'BigInt64Array', 'BigUint64Array', 'ArrayBuffer', 'DataView', 'SharedArrayBuffer',
@@ -269,7 +271,9 @@ function run() {
         'electron/main.js': mainSrc,
         'electron/userAgent.js': uaSrc,
         'electron/acgmhoService.js': fs.readFileSync(path.join(ELECTRON_DIR, 'acgmhoService.js'), 'utf8'),
-        'electron/challengeSolver.js': fs.readFileSync(path.join(ELECTRON_DIR, 'challengeSolver.js'), 'utf8'),
+        // 外部浏览器模块也在扫描范围内：它是后来人最容易顺手加 UA 覆写的地方
+        'electron/externalBrowserSolver.js': fs.existsSync(path.join(ELECTRON_DIR, 'externalBrowserSolver.js'))
+            ? fs.readFileSync(path.join(ELECTRON_DIR, 'externalBrowserSolver.js'), 'utf8') : '',
         'components/BrowsePanel.tsx': browseSrc,
     };
     for (const [name, src] of Object.entries(scannedIdentityFiles)) {
@@ -284,7 +288,6 @@ function run() {
         'electron/userAgent.js': uaSrc,
         'electron/browserService.js': fs.existsSync(path.join(ELECTRON_DIR, 'browserService.js'))
             ? fs.readFileSync(path.join(ELECTRON_DIR, 'browserService.js'), 'utf8') : '',
-        'electron/challengeSolver.js': scannedIdentityFiles['electron/challengeSolver.js'],
         'components/BrowsePanel.tsx': browseSrc,
     };
     for (const [name, src] of Object.entries(overrideFiles)) {
@@ -307,52 +310,43 @@ function run() {
         identityProblems.push('main.js 应把会话实际 UA 推给站点模块（cf_clearance 与 UA 绑定）');
     }
 
+    /**
+     * 7) 外部真实浏览器模块不许伪造身份、不许绑死代理端口。
+     *
+     * 这个模块的全部价值在于"它就是台干净的真浏览器"：
+     *   · 传 --user-agent 或 CDP 的 userAgentMetadata 等于把伪造搬进唯一可信的那一环
+     *     （实测 Electron 侧 userAgentMetadata 四种形状全部 Invalid parameters，
+     *      改不动才是对的 —— 见 electron/externalBrowserSolver.js 顶部数据）；
+     *   · 写死某个代理端口会把"站点没放行"和"用户的代理没开"混成一件事，
+     *       端口只能从会话已生效的那条路问出来（proxyServerForExternalBrowser）。
+     */
+    const extSrc = scannedIdentityFiles['electron/externalBrowserSolver.js'] || '';
+    // 只看代码骨架：这个模块的注释里记着"哪些做法已被实测否掉"，
+    // 直接对原文匹配会让注释把检查点着（自己解释自己的历史 = 永远修不掉的假故障）。
+    const extCode = stripLiterals(extSrc);
+    if (extSrc && /--user-agent|userAgentMetadata/.test(extCode)) {
+        identityProblems.push('外部浏览器模块开始伪造 UA/UA-CH 了（它的可信度就是靠不伪造）');
+    }
+    if (extSrc && /127\.0\.0\.1:\d{2,5}/.test(extCode)) {
+        identityProblems.push('外部浏览器模块写死了代理端点（有代理才用，没有就跟随系统）');
+    }
+
+    /**
+     * 8) 调试端口必须是"分配出来的具体值"，不能交回浏览器自己选。
+     *
+     * 实测（其余参数完全一致、两轮交替采样）：--remote-debugging-port=0 两次都卡满 78s
+     * 未放行，固定端口两次都 14s 放行 —— 这个开关比前面任何一条参数都关键，
+     * 所以只认 allocateDebugPort 这一条路（模板串里的字面量在 extCode 里不可见，
+     * 因此这里查的是"还在不在用分配函数"，改成写死 0 就是把它拆掉了）。
+     */
+    if (extSrc && !/=\s*await allocateDebugPort\(\)/.test(extCode)) {
+        identityProblems.push('外部浏览器模块不再自己分配具体调试端口了（实测端口 0 过不了验证）');
+    }
+
     if (identityProblems.length > 0) {
         failed += 1;
         console.log('  FAIL  浏览器身份（UA/Client Hints）不一致：');
         for (const p of identityProblems) console.log(`          ${p}`);
-    }
-
-    /**
-     * CF 自动过验证的"会点"不变量。
-     *
-     * 实测事故：求解器只按**顶层页面**文案判 interactive，而"请验证您是真人"
-     * 渲染在 challenges.cloudflare.com 的**跨域子帧**里，顶层 outerHTML 永远不含它
-     * → 激活分支一次都进不去，窗口里明明摆着复选框，程序只是看着它，
-     * 128 秒里 0 次点击（日志里连一条 frame probe 都没有）。
-     *
-     * 第二个坑在输入通道：`wc.sendInputEvent` 只递给**主帧的渲染进程**，
-     * 跨进程子帧（OOPIF，CF 组件正是这种）一个事件都收不到；
-     * 同页探针实测：同一个坐标，同进程子帧点得到、跨进程子帧直接丢弃。
-     * 必须走 CDP `Input.dispatch*`（在浏览器进程做命中测试与路由）。
-     *
-     * 这两条都不报错、只是"永远不动"，所以只能靠静态断言钉住。
-     */
-    checks += 1;
-    const solverSrc = fs.readFileSync(path.join(ELECTRON_DIR, 'challengeSolver.js'), 'utf8');
-    const solverProblems = [];
-    if (!/=\s*isInteractiveChallengeHtml\(html\)\s*\|\|\s*frameInteractive/.test(solverSrc)) {
-        solverProblems.push('interactive 判据没有并上子帧结果（只看顶层文案 = 永远不点）');
-    }
-    if (!/frameInteractive\s*=\s*INTERACTIVE_RE\.test\(probe\.text\)/.test(solverSrc)) {
-        solverProblems.push('没有从子帧文案得出 frameInteractive');
-    }
-    if (!/f\s*!==\s*wc\.mainFrame/.test(solverSrc)) {
-        solverProblems.push('子帧探测没排除主帧（顶层 #challenge-stage 的 rect 会把点击推到组件外）');
-    }
-    if (!/silentStallMs/.test(solverSrc) || !/if\s*\(!interactive\s*&&\s*now\s*-\s*challengeSeenAt\s*<\s*silentStallMs\)\s*continue/.test(solverSrc)) {
-        solverProblems.push('缺少"挑战页静置超时后主动点一次"的兜底（CF 换 UI 或读不到帧文案时会卡死）');
-    }
-    if (!/Input\.dispatchMouseEvent/.test(solverSrc) || !/Input\.dispatchKeyEvent/.test(solverSrc)) {
-        solverProblems.push('鼠标/键盘事件没走 CDP Input.dispatch*（sendInputEvent 进不了跨进程子帧）');
-    }
-    if (!/const inside = \(x, y\)/.test(solverSrc)) {
-        solverProblems.push('点击点没有约束在组件盒内（帧内 rect 与盒模型不同源时会点到盒外，点了等于没点）');
-    }
-    if (solverProblems.length > 0) {
-        failed += 1;
-        console.log('  FAIL  CF 求解器不会自动点击：');
-        for (const p of solverProblems) console.log(`          ${p}`);
     }
 
     /**
