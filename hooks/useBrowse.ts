@@ -47,8 +47,21 @@ import {
     replaceNode,
     type MergeStats,
 } from '../services/BookmarkService';
-import { loadJSON, loadStr, saveJSON, saveStr } from '../utils/persist';
-import { MEDIA_EXTENSIONS, generateId, isAcgUrl, isGenericTitle, isHlsSegmentPath, isLinkFromPage, isRealUrl, requiresFfmpeg, HLS_SEGMENT_RE_SOURCE } from '../utils/utils';
+import {
+    generateId,
+    HLS_SEGMENT_RE_SOURCE,
+    isAcgUrl,
+    isGenericTitle,
+    isHlsSegmentPath,
+    isLinkFromPage,
+    isRealUrl,
+    loadJSON,
+    loadStr,
+    MEDIA_EXTENSIONS,
+    requiresFfmpeg,
+    saveJSON,
+    saveStr,
+} from '../const';
 
 /**
  * webview 方法是否可用。
@@ -105,13 +118,13 @@ const SNIFF_EXCLUDED_EXTS = new Set(['aibook']);
 
 /**
  * 按媒体类型归并的后缀表。
- * 唯一真值来自 utils.MEDIA_EXTENSIONS —— 播放器的类型判定与嗅探的扫描清单
- * 必须一致，各写一份必然会漂移（合并前此处、页内脚本、utils 共三份）。
+ * 唯一真值来自 const.ts 的 MEDIA_EXTENSIONS —— 播放器的类型判定与嗅探的扫描清单
+ * 必须一致，各写一份必然会漂移（合并前此处、页内脚本、const.ts 共三份）。
  *
  * 页内脚本的 streamExts 也直接用这一份（含 `ts`），不再单独排除：
  * 排除是因为旧逻辑"先定类型再判分片"，`.ts` 会在分片判定前就被标成 stream；
  * 现在的顺序是「定类型 → 丢分片 → 按标签兜底」，分片照样被丢，
- * 整段 .ts 视频却能正确归为 stream，与 utils 完全同源。
+ * 整段 .ts 视频却能正确归为 stream，与 const.ts 完全同源。
  */
 const CATEGORIES: Record<MediaType, string[]> = (() => {
     const map: Record<MediaType, string[]> = {
@@ -287,7 +300,7 @@ const IN_PAGE_INSPECTOR_SCRIPT = `
     }
 
     // 过滤 TS 切片分段。
-    // 判据源码来自 utils.HLS_SEGMENT_RE_SOURCE（与文本兜底、主进程同一份语义），
+    // 判据源码来自 const.ts 的 HLS_SEGMENT_RE_SOURCE（与文本兜底、主进程同一份语义），
     // 这里 new RegExp 是因为脚本整体是模板字符串，没法 import 正则对象。
     if (ext === 'ts') {
       if (hlsSegmentRe.test(pathname) && !url.includes('playlist')) return null;

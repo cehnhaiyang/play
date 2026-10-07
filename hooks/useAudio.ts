@@ -7,8 +7,7 @@ import { BrowserAudioEngine } from '../services/AudioService/audioEngine';
 import type { SPGWarning } from '../services/AudioService/audioEngine/parser';
 import { exportProjectBundle, bufferToWave } from '../services/AudioService/utils';
 import { generateSyntax, fixSyntax } from '../services/AiService';
-import { loadJSON, saveJSON, removeStored } from '../utils/persist';
-import { downloadBlob } from '../utils/utils';
+import { downloadBlob, loadJSON, removeStored, saveJSON } from '../const';
 
 interface UseAudioParams {
     initialProjectId?: string | null;

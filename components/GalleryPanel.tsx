@@ -32,7 +32,7 @@ import {
 } from '../hooks';
 import type { AcgSaveTask } from '../hooks';
 import type { AcgmhoGalleryItem, GalleryPageItem, MediaType } from '../meta';
-import { isAcgUrl, resolveProbeMedia } from '../utils/utils';
+import { isAcgUrl, resolveProbeMedia } from '../const';
 
 /* -------------------------------------------------------------------------- */
 /*                                Types & Props                               */

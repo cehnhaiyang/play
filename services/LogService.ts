@@ -1,4 +1,4 @@
-import { loadJSON, saveJSON } from '../utils/persist';
+import { loadJSON, saveJSON } from '../const';
 
 /**
  * ============================================================================

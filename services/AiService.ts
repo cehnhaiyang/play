@@ -13,8 +13,7 @@ import type {
     ReasoningEffort,
 } from '../meta';
 import { getElectronAPI } from '../meta';
-import { loadStr, saveStr } from '../utils/persist';
-import { splitDataUrl, fileToDataUrl } from '../utils/utils';
+import { fileToDataUrl, loadStr, saveStr, splitDataUrl } from '../const';
 import { PRESET_NAMES } from './AudioService/audioEngine/presets';
 import { DRUM_NAMES } from './AudioService/audioEngine/drums';
 import { CHORD_QUALITY_NAMES } from './AudioService/audioEngine/chords';

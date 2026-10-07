@@ -923,14 +923,14 @@ const USER_AGENT = kernelUserAgent();
 /**
  * 必须交给 ffmpeg 才能得到可用文件的后缀。
  *
- * 与嗅探的 stream 分类**同一份清单**（utils.MEDIA_EXTENSIONS 的 stream 类），
- * 也就是 utils.requiresFfmpeg 判据里"后缀"那一半的派生副本：
+ * 与嗅探的 stream 分类**同一份清单**（const.ts 的 MEDIA_EXTENSIONS stream 类），
+ * 也就是 const.ts 里 requiresFfmpeg 判据"后缀"那一半的派生副本：
  * 嗅探把 m3u8 / m3u / mpd / ts / flv / f4v 归为 stream，界面据此打上
  * 「ffmpeg 下载」徽章、并在 ffmpeg 缺失时拦住下载。这里少列一个，
  * 同一个文件就会"界面说要 ffmpeg、实际走裸 HTTP 直存"——
  * 落盘的 .ts / .flv 是播放器（本应用靠 hls.js / flv.js 才认）打不开的裸流。
  *
- * test/sniffer.test.js 会比对这张表与 utils 的分类，漂移即失败。
+ * test/sniffer.test.js 会比对这张表与 const.ts 的分类，漂移即失败。
  */
 const STREAM_EXTENSIONS = new Set(['m3u8', 'm3u', 'mpd', 'ts', 'flv', 'f4v']);
 const MEDIA_HTTP_HEADERS = {
@@ -1349,7 +1349,7 @@ async function handleMediaDownload(_event, payload) {
     }
 
     // 走不走 ffmpeg：**后缀与渲染层判定的类型，任一为 stream 即走**。
-    // 与 utils.requiresFfmpeg 同判据（那边是唯一真值，这里是派生副本）。
+    // 与 const.ts 的 requiresFfmpeg 同判据（那边是唯一真值，这里是派生副本）。
     //
     // 两个都要看，各自补对方的漏：
     //  - 只看后缀会漏：AI 提取出的地址常常没有可辨识的路径后缀
@@ -2794,7 +2794,7 @@ function setupSniffer(sess) {
     const filter = { urls: ['<all_urls>'] };
 
     // ACG 专属资源不进嗅探：图集封面/动画/有声走画廊流程，
-    // 否则翻一本漫画就刷几十条封面进嗅探列表。与渲染层 utils.isAcgUrl 保持同口径
+    // 否则翻一本漫画就刷几十条封面进嗅探列表。与渲染层 const.ts 的 isAcgUrl 保持同口径
     const ACG_SNIFF_EXCLUDE_SUFFIXES = ['acgmho.com', 'acgnngca.com', 'acgnfl.com', 'acg-hentai.com'];
     const isAcgExcluded = (u) => {
         if (!u || typeof u !== 'string') return false;
@@ -2807,12 +2807,12 @@ function setupSniffer(sess) {
     };
 
     /**
-     * 后缀表。主进程是独立进程、不能 import utils（TS），所以这里是**派生副本**。
+     * 后缀表。主进程是独立进程、不能 import const.ts，所以这里是**派生副本**。
      *
-     * 与 utils.MEDIA_EXTENSIONS 的分工：
+     * 与 const.ts 的 MEDIA_EXTENSIONS 的分工：
      *  - 只列"媒体"后缀：嗅探的目的就是发现可下载媒体，
      *    document 类（md/txt/pdf/json）与 aibook/gallery 不在此列，也从不推送；
-     *  - **分类必须与 utils 一致**。曾经 `ts` 被放在 videoExts 里，
+     *  - **分类必须与 const.ts 一致**。曾经 `ts` 被放在 videoExts 里，
      *    于是同一个 .ts 地址：网络层推 type='video'、页内扫描判 'stream'。
      *    后果是筛选栏里它出现在"视频"下、徽章文案错，
      *    且下载时 `type !== 'stream'` 让它**跳过 ffmpeg 检查** ——
@@ -2825,7 +2825,7 @@ function setupSniffer(sess) {
     const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico', 'tiff', 'heic', 'avif'];
 
     /**
-     * HLS 分片路径判据。与 utils.HLS_SEGMENT_RE_SOURCE **逐字同源**
+     * HLS 分片路径判据。与 const.ts 的 HLS_SEGMENT_RE_SOURCE **逐字同源**
      * （独立进程不能 import TS，只能复制；test/sniffer.test.js 盯着不漂移）。
      *
      * 单独一份而不是内联在回调里：分片判据只对 .ts 生效，但它决定了
@@ -2923,8 +2923,8 @@ function setupSniffer(sess) {
                 detectedType = 'stream';
                 ext = 'flv';
             } else if (contentType.includes('mp2t')) {
-                // MPEG-TS。必须与 utils 同口径判成 stream、后缀归一为 'ts'：
-                // utils 的 MEDIA_EXTENSIONS 里 'ts' 属 stream，若这里照搬 content-type
+                // MPEG-TS。必须与 const.ts 同口径判成 stream、后缀归一为 'ts'：
+                // const.ts 的 MEDIA_EXTENSIONS 里 'ts' 属 stream，若这里照搬 content-type
                 // 的字面量（'mp2t'）判成 video，同一个地址就会两条路径两个结论 ——
                 // 筛选栏归错类，界面按 type 判 ffmpeg 徽章而主进程按 ext 判下载方式。
                 detectedType = 'stream';

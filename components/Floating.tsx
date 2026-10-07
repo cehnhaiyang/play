@@ -43,7 +43,7 @@ import type {
     MediaDownloadProgress,
 } from '../meta';
 import { getElectronAPI } from '../meta';
-import { isLinkFromPage, requiresFfmpeg } from '../utils/utils';
+import { isLinkFromPage, loadJSON, requiresFfmpeg, saveJSON } from '../const';
 import { formatBytes } from '../services/SearchService';
 import {
     AI_PROVIDERS,
@@ -56,7 +56,6 @@ import {
     testAiConnection,
     type AiProviderPreset,
 } from '../services/AiService';
-import { loadJSON, saveJSON } from '../utils/persist';
 import {
     LOG_BUFFER_CAP,
     LOG_PERSIST_CAP,
@@ -634,7 +633,7 @@ const SniffResults: React.FC<SnifferResultsProps> = ({ sniffer, onPlay, onAiAnal
                     </EmptyHint>
                 ) : (
                     filteredLinks.map((link, index) => {
-                        // 判据与主进程、与 useBrowse 的 download 同源（utils.requiresFfmpeg）：
+                        // 判据与主进程、与 useBrowse 的 download 同源（const.ts 的 requiresFfmpeg）：
                         // 只看 type 会漏掉"ext=flv 但 type=video"这类 AI 提取产物，
                         // 界面按钮照常可点、主进程却会走 ffmpeg，点下去才报错。
                         const needsFfmpeg = requiresFfmpeg(link.type, link.ext);

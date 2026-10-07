@@ -24,7 +24,7 @@
     "../services/KbService/**/*.ts",
     "../services/LogService.ts",
     "../services/SearchService/**/*.ts",
-    "../utils/**/*.ts",
+    "../const.ts",
     "../meta/**/*.ts"
   ]
 }

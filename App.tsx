@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { usePlay, useBrowse, useAgent } from './hooks';
 import { BrowsePanel, PlayPanel, Floating, AudioPanel, GalleryPanel, TorrentPanel } from './components';
 import { FoundLink, MediaType, getAppWindow } from './meta';
-import { getMediaType } from './utils/utils';
+import { getMediaType } from './const';
 
 type ViewMode = 'sniffer' | 'player' | 'audio' | 'gallery' | 'torrent';
 

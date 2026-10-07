@@ -28,7 +28,7 @@ const BROWSE_SRC = fs.readFileSync(
     process.env.BROWSE_SRC || path.join(ROOT, 'hooks', 'useBrowse.ts'), 'utf8');
 const MAIN_SRC = fs.readFileSync(path.join(ROOT, 'electron', 'main.js'), 'utf8');
 const AI_SRC = fs.readFileSync(path.join(ROOT, 'services', 'AiService.ts'), 'utf8');
-const UTILS = require('./build/utils/utils.js');
+const CONST = require('./build/const.js');
 
 let pass = 0;
 const fails = [];
@@ -63,17 +63,17 @@ const loadInspector = () => {
     assert(!template.includes('`'), '页内脚本里出现了反引号，本测试的求值前提已不成立');
     assert(!template.includes('\\${'), '页内脚本里出现了转义的 ${，本测试的求值前提已不成立');
 
-    // 后缀表：与产品同源（utils.MEDIA_EXTENSIONS 去掉 SNIFF_EXCLUDED_EXTS）
+    // 后缀表：与产品同源（const.ts 的 MEDIA_EXTENSIONS 去掉 SNIFF_EXCLUDED_EXTS）
     const excluded = new Set(['aibook']);
     const CATEGORIES = { stream: [], video: [], audio: [], image: [], document: [], gallery: [], other: [] };
-    for (const [ext, type] of Object.entries(UTILS.MEDIA_EXTENSIONS)) {
+    for (const [ext, type] of Object.entries(CONST.MEDIA_EXTENSIONS)) {
         if (!excluded.has(ext)) CATEGORIES[type].push(ext);
     }
 
     const script = new Function(
         'CATEGORIES', 'HLS_SEGMENT_RE_SOURCE',
         `return \`${template}\`;`,
-    )(CATEGORIES, UTILS.HLS_SEGMENT_RE_SOURCE);
+    )(CATEGORIES, CONST.HLS_SEGMENT_RE_SOURCE);
 
     assert(typeof script === 'string' && script.includes('getMediaInfo'),
         '页内脚本求值结果不像一段脚本');
@@ -212,20 +212,20 @@ const run = () => {
 
     check('isHlsSegmentPath 与页内脚本同判据', () => {
         for (const p of ['/a/seg1.ts', '/a/000.ts', '/ts/9.ts', '/a/x-1.ts', '/a/chunk_2.ts']) {
-            assert(UTILS.isHlsSegmentPath(p), `${p} 应判为分片`);
+            assert(CONST.isHlsSegmentPath(p), `${p} 应判为分片`);
         }
         for (const p of ['/video/2024/lecture.ts', '/movie.ts', '/a/b.m3u8', '/a/seg.mp4']) {
-            assert(!UTILS.isHlsSegmentPath(p), `${p} 不该判为分片`);
+            assert(!CONST.isHlsSegmentPath(p), `${p} 不该判为分片`);
         }
-        assert(!UTILS.isHlsSegmentPath(''), '空路径不该判为分片');
+        assert(!CONST.isHlsSegmentPath(''), '空路径不该判为分片');
     });
 
     check('HLS_SEGMENT_RE_SOURCE 不含会破坏模板插值的字符', () => {
         // 源码要经 JSON.stringify 插进模板字符串，反斜杠会被模板吃一层；
         // 真正的保障是它**只含双反斜杠转义**（JSON.stringify 出来仍是合法正则源码）。
-        const re = new RegExp(UTILS.HLS_SEGMENT_RE_SOURCE, 'i');
+        const re = new RegExp(CONST.HLS_SEGMENT_RE_SOURCE, 'i');
         assert(re.test('/a/seg1.ts'), '插值后的正则源码应当可用');
-        assert(UTILS.HLS_SEGMENT_RE_SOURCE.includes('\\d'), '源码里应保留 \\d 转义');
+        assert(CONST.HLS_SEGMENT_RE_SOURCE.includes('\\d'), '源码里应保留 \\d 转义');
     });
 
     /* ====================================================================== */
@@ -233,12 +233,12 @@ const run = () => {
     /* ====================================================================== */
 
     /**
-     * 主进程的后缀分类必须与 utils 一致。
+     * 主进程的后缀分类必须与 const.ts 一致。
      *
-     * 主进程不能 import utils（TS），后缀表是派生副本；副本漂移的后果是
+     * 主进程不能 import const.ts（TS），后缀表是派生副本；副本漂移的后果是
      * 同一个地址两条路径两个结论。这里比对**两边都有**的后缀。
      */
-    check('主进程后缀分类与 utils 同源', () => {
+    check('主进程后缀分类与 const.ts 同源', () => {
         const grabList = (name) => {
             const i = MAIN_SRC.indexOf(`const ${name} = [`);
             assert(i > 0, `main.js 里找不到 ${name}`);
@@ -250,21 +250,21 @@ const run = () => {
             ['audioExts', 'audio'], ['imageExts', 'image']];
         for (const [name, type] of pairs) {
             for (const ext of grabList(name)) {
-                const expected = UTILS.MEDIA_EXTENSIONS[ext];
+                const expected = CONST.MEDIA_EXTENSIONS[ext];
                 if (!expected) continue;   // 主进程刻意只列媒体后缀，缺项不算漂移
                 assert(expected === type,
-                    `${ext} 分类漂移：utils=${expected} main.js=${type}`);
+                    `${ext} 分类漂移：const.ts=${expected} main.js=${type}`);
             }
         }
     });
 
     /**
-     * 主进程的分片正则必须与 utils.HLS_SEGMENT_RE_SOURCE **逐字同源**。
+     * 主进程的分片正则必须与 const.ts 的 HLS_SEGMENT_RE_SOURCE **逐字同源**。
      *
      * 两边各写一份的话，页内丢分片、网络层不丢（或反之）——
      * 表现为"列表里还是刷满了 segNNN.ts"。
      */
-    check('主进程分片正则与 utils 同源', () => {
+    check('主进程分片正则与 const.ts 同源', () => {
         const start = MAIN_SRC.indexOf('const hlsSegmentRe = new RegExp(');
         assert(start > 0, 'main.js 里找不到 hlsSegmentRe');
         const end = MAIN_SRC.indexOf("'i'", start);
@@ -272,12 +272,12 @@ const run = () => {
         const literal = MAIN_SRC.slice(start, end);
 
         // 逐条比对四个分支的源码文本（去掉引号与拼接符后比对片段）
-        const parts = UTILS.HLS_SEGMENT_RE_SOURCE.split('|');
+        const parts = CONST.HLS_SEGMENT_RE_SOURCE.split('|');
         for (const part of parts) {
             // 主进程源码里是 JS 字符串字面量，反斜杠写成 \\
             const asLiteral = part.replace(/\\/g, '\\\\');
             assert(literal.includes(asLiteral),
-                `主进程分片正则缺少分支：${part}\n（utils 改了源码而 main.js 没跟上）`);
+                `主进程分片正则缺少分支：${part}\n（const.ts 改了源码而 main.js 没跟上）`);
         }
     });
 
@@ -348,7 +348,7 @@ const run = () => {
     /**
      * mp2t 必须归一成 stream/'ts'。
      *
-     * 早先照搬 content-type 的字面量得到 ext='mp2t'，而 utils 表里只有 'ts' ——
+     * 早先照搬 content-type 的字面量得到 ext='mp2t'，而 const.ts 表里只有 'ts' ——
      * 同一个地址网络层判 video、页内判 stream，筛选栏与 ffmpeg 判定全跟着错。
      */
     check('主进程把 video/mp2t 归一成 stream/ts', () => {
@@ -356,7 +356,7 @@ const run = () => {
         assert(start > 0, '找不到 mp2t 分支');
         const body = MAIN_SRC.slice(start, start + 600);
         assert(/detectedType = 'stream'/.test(body), 'mp2t 应判成 stream');
-        assert(/ext = 'ts'/.test(body), "mp2t 的后缀应归一为 'ts'（utils 表里只有 ts）");
+        assert(/ext = 'ts'/.test(body), "mp2t 的后缀应归一为 'ts'（const.ts 表里只有 ts）");
     });
 
     /**
@@ -456,8 +456,8 @@ const run = () => {
      * 只看 ext 会漏 `/api/play?format=hls`（没有可辨识后缀，ext 回落 mp4）。
      */
     check('requiresFfmpeg 同时看 type 与后缀', () => {
-        const f = UTILS.requiresFfmpeg;
-        assert(typeof f === 'function', 'utils 没有导出 requiresFfmpeg');
+        const f = CONST.requiresFfmpeg;
+        assert(typeof f === 'function', 'const.ts 没有导出 requiresFfmpeg');
 
         assert(f('stream', 'mp4'), 'type=stream 就该走 ffmpeg（哪怕后缀像普通视频）');
         assert(f('video', 'flv'), 'ext=flv 就该走 ffmpeg（哪怕模型说它是 video）');
@@ -470,10 +470,10 @@ const run = () => {
         assert(!f(undefined, undefined), '两样都没有时不该走 ffmpeg');
     });
 
-    check('requiresFfmpeg 的后缀表就是 utils 的 stream 类', () => {
-        for (const [ext, type] of Object.entries(UTILS.MEDIA_EXTENSIONS)) {
+    check('requiresFfmpeg 的后缀表就是 const.ts 的 stream 类', () => {
+        for (const [ext, type] of Object.entries(CONST.MEDIA_EXTENSIONS)) {
             const expected = type === 'stream';
-            assert(UTILS.requiresFfmpeg('video', ext) === expected,
+            assert(CONST.requiresFfmpeg('video', ext) === expected,
                 `${ext} 的 ffmpeg 判定与 MEDIA_EXTENSIONS 不一致（表里是 ${type}）`);
         }
     });
@@ -502,7 +502,7 @@ const run = () => {
         assert(/requiresFfmpeg\(link\.type, link\.ext\) \? '正在使用 ffmpeg/.test(BROWSE_SRC),
             'useBrowse 的下载文案没有用 requiresFfmpeg');
 
-        // 主进程：两半都要在（与 utils 同判据的派生副本）
+        // 主进程：两半都要在（与 const.ts 同判据的派生副本）
         const start = MAIN_SRC.indexOf('const isStream = STREAM_EXTENSIONS.has(ext)');
         assert(start > 0, '找不到主进程的 isStream');
         const line = MAIN_SRC.slice(start, MAIN_SRC.indexOf('\n', start));
@@ -517,8 +517,8 @@ const run = () => {
      * 标题为文件名的条目永远升不了级（更新那份只看 Media_ 前缀）。
      */
     check('isGenericTitle 认出没信息量的标题', () => {
-        const g = UTILS.isGenericTitle;
-        assert(typeof g === 'function', 'utils 没有导出 isGenericTitle');
+        const g = CONST.isGenericTitle;
+        assert(typeof g === 'function', 'const.ts 没有导出 isGenericTitle');
 
         for (const t of ['Media_stream', 'media_123', 'index.m3u8', 'playlist.m3u8',
             'stream.mp4', 'chunk_1.ts', 'hls_720', 'detected', '', undefined, null]) {

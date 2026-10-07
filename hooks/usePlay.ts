@@ -1,8 +1,21 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import Hls from 'hls.js';
 import { PlayerState, PlaylistState, PlaybackMode, ObjectFitMode, VideoFile, MediaType } from '../meta';
-import { createVideoFile, createStreamFile, revokeVideoFile, STORAGE_KEYS, generateId, detectGalleryFolders, dirOfFile, galleryNameFromMarker, signAcgHlsUrl } from '../utils/utils';
-import { loadJSON, saveJSON, loadStr, saveStr } from '../utils/persist';
+import {
+    createStreamFile,
+    createVideoFile,
+    detectGalleryFolders,
+    dirOfFile,
+    galleryNameFromMarker,
+    generateId,
+    loadJSON,
+    loadStr,
+    revokeVideoFile,
+    saveJSON,
+    saveStr,
+    signAcgHlsUrl,
+    STORAGE_KEYS,
+} from '../const';
 
 /* -------------------------------------------------------------------------- */
 /* 播放列表落盘：只存可重建的在线条目（type==='file' 的本地 File/Blob 重进    */
@@ -1001,7 +1014,7 @@ export const usePlay = (): UsePlayReturn => {
                 // 继承到变体请求上（RFC 3986 非空相对路径丢弃 base 的 query），
                 // 缺签名的变体一律 403，表现为各画质全部 403。
                 // 这里按站点同款口径补齐 m/t/from；仅对 ACG 域 + 带 m= 令牌的
-                // master 生效，其它站点的流原样放行（见 utils.signAcgHlsUrl）。
+                // master 生效，其它站点的流原样放行（见 const.ts 的 signAcgHlsUrl）。
                 xhrSetup: (xhr, url) => {
                     const signed = signAcgHlsUrl(url, currentFile.url);
                     if (signed !== url) xhr.open('GET', signed, true);

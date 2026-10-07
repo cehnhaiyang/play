@@ -87,12 +87,13 @@ import {
     buildCookieData,
     collectDroppedRules,
     decodeJwt,
+    exportAgentSession,
     findCookieByKey,
     generateId,
+    loadJSON,
     pickJwtCandidates,
-} from '../utils/utils';
-import { exportAgentSession } from '../utils/agentExport';
-import { loadJSON, saveJSON } from '../utils/persist';
+    saveJSON,
+} from '../const';
 import { formatBytes } from '../services/SearchService';
 import { zoomLevelToPercent, isEditableTarget, type NavigationError } from '../services/BrowserService';
 import {
@@ -2291,7 +2292,7 @@ const useTamperDraft = (tamper: TamperState): TamperDraft => {
     /**
      * 启用中的规则里，有几条会被引擎跳过（目标键 / Header 名为空）。
      *
-     * 判据走 utils 里的 collectDroppedRules —— 与 Agent 的 tamper_rules 工具
+     * 判据走 const.ts 的 collectDroppedRules —— 与 Agent 的 tamper_rules 工具
      * 共用同一份实现。各写一份的话，面板说"3 条被跳过"、工具说"2 条"，
      * 而用户和模型都没法判断该信哪个。
      *
@@ -3004,7 +3005,7 @@ const parseSafe = (raw: string): Record<string, unknown> => {
 /**
  * JWT 调试页。
  *
- * 解码走 utils 里的 decodeJwt —— 与 Agent 的 tokens 工具是**同一份实现**。
+ * 解码走 const.ts 的 decodeJwt —— 与 Agent 的 tokens 工具是**同一份实现**。
  * 两边各写一份的话，面板能解的 token 模型解不开（或反之），
  * 而用户看到的只是"模型说这不是 JWT"。
  */
@@ -3019,7 +3020,7 @@ const JwtTab: React.FC<{ tamper: TamperState }> = ({ tamper }) => {
     /**
      * 解 JWT。
      *
-     * 面板与 Agent 的 tokens 工具共用 utils 里的 decodeJwt —— 它负责把
+     * 面板与 Agent 的 tokens 工具共用 const.ts 的 decodeJwt —— 它负责把
      * base64url 还原成 UTF-8 字节再解，否则中文 payload 会变成乱码
      * （实测 `{"name":"张三"}` 解成 `{"name":"å¼ ä¸"}`）。
      */

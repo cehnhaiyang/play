@@ -8,7 +8,7 @@
  *   2. 落盘边界：模型改规则走 applyRules（不落盘），不是 saveRules；
  *   3. tokens find 的 key 必须能写回去（cookie 用 cookie 名，不是数组下标）。
  *
- * 编译产物不含 hooks/（test tsconfig 只 include services/utils/meta），
+ * 编译产物不含 hooks/（test tsconfig 只 include services/const/meta），
  * 所以这里用 stripTypeScriptTypes 直接求值源码 —— 与篡改引擎测试同一套办法。
  */
 const fs = require('fs');
@@ -55,11 +55,11 @@ const grabBlock = (marker, endMarker) => {
 const strip = (ts) => require('module').stripTypeScriptTypes(ts, { mode: 'strip' });
 
 /**
- * useAgent 从 utils 导入的三个 JWT 函数。
- * 直接用**编译产物**（build/utils/utils.js），不重写副本 ——
+ * useAgent 从 const 导入的三个 JWT 函数。
+ * 直接用**编译产物**（build/const.js），不重写副本 ——
  * 否则这里测的是我对 JWT 的理解，而不是产品实现。
  */
-const UTILS = require('./build/utils/utils.js');
+const CONST = require('./build/const.js');
 
 /**
  * 抽 keepReasoning 求值（含它依赖的 truncateBytes / byteLength）。
@@ -227,16 +227,17 @@ const buildAgentHarness = (options = {}) => {
         saveJSON: (k, v) => { store[k] = v; return true; },
     };
 
-    const UTILS = require('./build/utils/utils.js');
+    const CONST = require('./build/const.js');
     const KBSVC = require('./build/services/KbService/index.js');
     const fakeWindow = { setTimeout: () => 1, clearTimeout: () => {} };
 
     // 去掉 import（类型导入 strip 后已消失）与 export；
-    // 具名导入原本来自四个模块，删掉 import 后从注入口解构回来。
+    // 具名导入原本来自多个模块，删掉 import 后从注入口解构回来。
     const body = [
         'const { useState, useRef, useCallback, useMemo, useEffect } = React;',
         'const { chat, estimatePromptTokens } = AiService;',
-        'const { buildCookieKeys, collectDroppedRules, decodeJwt, findCookieByKey, generateId, pickJwtCandidates, rewriteJwtPayload } = utils;',
+        'const { buildCookieKeys, collectDroppedRules, decodeJwt, findCookieByKey, generateId, pickJwtCandidates, rewriteJwtPayload } = Const;',
+        // loadJSON / saveJSON 用测试自己的内存桩顶掉，免得落到真的 localStorage
         'const { loadJSON, saveJSON } = persist;',
         // useAgent 从 KbService 具名导入五个符号，其中 KB_SEARCH_LIMIT 还要插值进
         // 提示词模板 —— 漏注入会在求值时直接抛 ReferenceError，而不是某条断言失败。
@@ -247,7 +248,7 @@ const buildAgentHarness = (options = {}) => {
             .replace(/^export /gm, '');
 
     const makeAgent = new Function(
-        'React', 'AiService', 'utils', 'persist', 'KbService', 'window', 'TextEncoder',
+        'React', 'AiService', 'Const', 'persist', 'KbService', 'window', 'TextEncoder',
         `${body}\nreturn useAgent;`,
     );
 
@@ -319,7 +320,7 @@ const buildAgentHarness = (options = {}) => {
 
     // estimatePromptTokens 用**编译产物**（build/services/AiService.js），
     // 与产品同源：hook 拿它算上下文占用，测试自己重写一份就测不到真实口径了
-    const factory = makeAgent(ReactProxy, { chat, estimatePromptTokens: AI.estimatePromptTokens }, UTILS, persist, KBSVC, fakeWindow, TextEncoder);
+    const factory = makeAgent(ReactProxy, { chat, estimatePromptTokens: AI.estimatePromptTokens }, CONST, persist, KBSVC, fakeWindow, TextEncoder);
 
     /**
      * 假 webview。默认**有页面**，需要造"没有可用页面"的用例传 webview:false。
@@ -431,11 +432,11 @@ const buildDispatch = (tamperState, scripts = [], webviewUrl = null) => {
 ${strip(helpers)}
 // dispatchTool 外面裹着 useCallback；这里只要那个函数本身
 const useCallback = (fn) => fn;
-// JWT 三个函数来自 utils 的编译产物（见文件头说明）；collectDroppedRules 同理 ——
+// JWT 三个函数来自 const 的编译产物（见文件头说明）；collectDroppedRules 同理 ——
 // dispatchTool 里对"被跳过的规则"的判定必须与面板同源，不能在这里重写一份。
 // buildCookieKeys / findCookieByKey 是 cookie 唯一键（面板与 tokens 工具共用），
 // 漏注入会让 tokens find 直接抛 ReferenceError —— 那是测试脚手架的错，不是产品代码的。
-const { decodeJwt, pickJwtCandidates, rewriteJwtPayload, collectDroppedRules, buildCookieKeys, findCookieByKey } = __UTILS__;
+const { decodeJwt, pickJwtCandidates, rewriteJwtPayload, collectDroppedRules, buildCookieKeys, findCookieByKey } = __CONST__;
 const asString = (v) => (typeof v === 'string' ? v : '');
 const generateId = () => 'gen-' + Math.random().toString(36).slice(2, 8);
 const SCRIPTS_STORE_MAX = 3;
@@ -483,7 +484,7 @@ const setScripts = (fn) => { scriptsRef.current = fn(scriptsRef.current); };
 ${strip(dispatch)}
 return { dispatchTool, calls, tamperRef, scriptsRef };
 `;
-    return new Function('__UTILS__', body)(UTILS);
+    return new Function('__CONST__', body)(CONST);
 };
 
 /* -------------------------------------------------------------------------- */

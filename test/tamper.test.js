@@ -16,7 +16,7 @@ const {
     isRealUrl, buildCookieKeys, buildCookieData, findCookieByKey,
     ruleTargetKey, isFieldRuleDropped, isHeaderRuleDropped, collectDroppedRules,
     isLinkFromPage, MEDIA_EXTENSIONS, getMediaType,
-} = require(`${ROOT}/utils/utils`);
+} = require(`${ROOT}/const`);
 
 let pass = 0;
 const fails = [];
@@ -299,7 +299,7 @@ const run = () => {
 
     /**
      * 本组最重要的一条：把**引擎自己的 compile** 从注入脚本里抽出来跑，
-     * 与 utils 里的判据在同一批输入上对照。
+     * 与 const.ts 里的判据在同一批输入上对照。
      *
      * 引擎那份在模板字符串里、无法 import，所以只能这样交叉验证。
      * 两边判据一旦漂移，面板和 Agent 工具就会报出与引擎不符的结论 ——

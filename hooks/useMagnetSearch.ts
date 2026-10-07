@@ -9,7 +9,7 @@ import {
     SiteDescriptor,
     getElectronAPI,
 } from '../meta';
-import { loadJSON, saveJSON } from '../utils/persist';
+import { loadJSON, saveJSON } from '../const';
 import { search as runSearch, listSites } from '../services/SearchService';
 
 /**

@@ -28,10 +28,11 @@ import {
     decodeJwt,
     findCookieByKey,
     generateId,
+    loadJSON,
     pickJwtCandidates,
     rewriteJwtPayload,
-} from '../utils/utils';
-import { loadJSON, saveJSON } from '../utils/persist';
+    saveJSON,
+} from '../const';
 import type { TamperState } from './useBrowse';
 
 /**

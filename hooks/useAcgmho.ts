@@ -11,7 +11,7 @@ import {
     GallerySavedFile,
     getElectronAPI,
 } from '../meta';
-import { loadJSON, saveJSON, removeStored } from '../utils/persist';
+import { loadJSON, removeStored, saveJSON } from '../const';
 
 /* ========================================================================== */
 /*                             1. 类型定义与公共配置                           */

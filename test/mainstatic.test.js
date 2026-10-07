@@ -358,9 +358,9 @@ function run() {
     /**
      * 后缀分类跨进程一致性。
      *
-     * 主进程不能 import utils（TS），所以嗅探后缀表是**派生副本**。
+     * 主进程不能 import const（TS），所以嗅探后缀表是**派生副本**。
      * 副本一旦漂移，同一个地址会被两条路径判成不同类型 ——
-     * 实测事故：`ts` 在主进程属 videoExts、在 utils 属 stream，
+     * 实测事故：`ts` 在主进程属 videoExts、在 const 属 stream，
      * 于是 .ts 地址被标成"视频"，筛选栏归错类，
      * 且下载判定 `type !== 'stream'` 让它跳过 ffmpeg 检查
      * （而 .ts 分片恰恰需要 ffmpeg 才能合成可用文件）。
@@ -369,13 +369,13 @@ function run() {
      * （document 类与 aibook/gallery 从不推送），缺项不算漂移，分类不同才算。
      */
     checks += 1;
-    const utilsSrc = fs.readFileSync(path.join(ROOT, 'utils', 'utils.ts'), 'utf8');
-    const extTable = utilsSrc.slice(
-        utilsSrc.indexOf('export const MEDIA_EXTENSIONS'),
-        utilsSrc.indexOf('};', utilsSrc.indexOf('export const MEDIA_EXTENSIONS')));
+    const constSrc = fs.readFileSync(path.join(ROOT, 'const.ts'), 'utf8');
+    const extTable = constSrc.slice(
+        constSrc.indexOf('export const MEDIA_EXTENSIONS'),
+        constSrc.indexOf('};', constSrc.indexOf('export const MEDIA_EXTENSIONS')));
 
-    const utilsExt = {};
-    for (const m of extTable.matchAll(/'([a-z0-9]+)':\s*'([a-z]+)'/g)) utilsExt[m[1]] = m[2];
+    const constExt = {};
+    for (const m of extTable.matchAll(/'([a-z0-9]+)':\s*'([a-z]+)'/g)) constExt[m[1]] = m[2];
 
     const grabList = (name) => {
         const i = mainSrc.indexOf(`const ${name} = [`);
@@ -392,8 +392,8 @@ function run() {
 
     const drift = [];
     for (const [ext, type] of Object.entries(mainExt)) {
-        if (utilsExt[ext] && utilsExt[ext] !== type) {
-            drift.push(`          ${ext.padEnd(8)} utils=${utilsExt[ext].padEnd(9)} main.js=${type}`);
+        if (constExt[ext] && constExt[ext] !== type) {
+            drift.push(`          ${ext.padEnd(8)} const.ts=${constExt[ext].padEnd(9)} main.js=${type}`);
         }
     }
     if (drift.length > 0) {
