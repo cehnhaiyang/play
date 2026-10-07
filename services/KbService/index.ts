@@ -7,7 +7,7 @@
  *
  * 为什么检索放在渲染层而不是主进程：
  * 主进程目录只能写 .js（见 electron-main-constraints），纯逻辑放那儿就失去了
- * 单测能力 —— scripts/test/tsconfig.json 不 include electron/。放这里则被测试
+ * 单测能力 —— test/tsconfig.json 不 include electron/。放这里则被测试
  * 套件直接编译，与 services/SearchService 同一套路。
  *
  * 为什么从磁盘全量重建索引、而不是直接读仓库自带的 kb-index.json：

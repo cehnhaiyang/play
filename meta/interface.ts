@@ -1520,7 +1520,7 @@ export interface ElectronKbAPI {
  * **这张清单与 electron/browserService.js 的 BROWSER_ACTIONS 逐字对应**，
  * 两边漂移的症状是"按了没反应"——渲染层收到一个自己不认识的动作名，
  * switch 落到 default 就静默忽略了。所以有一处静态断言逐字比对两份清单
- * （scripts/test/browser.test.js）。
+ * （test/browser.test.js）。
  *
  * 分三段，与主进程那边的 BROWSER_KEY_ACTIONS / BROWSER_MENU_ACTIONS /
  * BROWSER_PUSH_ACTIONS 一一对应。分类是有意义的：只有第一段会经过
@@ -1537,6 +1537,8 @@ export type BrowserAction =
     | 'zoomIn' | 'zoomOut' | 'zoomReset'
     // 其它
     | 'toggleBookmark' | 'toggleDevTools'
+    // Agent 工作区：聚焦输入框（界面层动作，主进程只管按键、渲染层转发给面板）
+    | 'focusAgentInput'
     /* 由右键菜单触发（不是按键，不经过 preventDefault） */
     | 'analyzeElement' | 'openInBackgroundTab' | 'searchSelection'
     /* 主进程推送的状态变更（不是用户操作，是 webContents 事件） */
@@ -1783,8 +1785,10 @@ export interface ElectronSettingsAPI {
      *
      * `reasoningEffort` 是映射后的下发取值：映射表在 AiService，
      * 主进程没有也不做映射，由渲染层算好传进来。
+     * 传 `null` 表示明确不下发该参数（服务商不需要思考，或用户选了「不思考」）；
+     * 缺省时才回落到配置里的档位。
      */
-    testAiConfig: (value: AiConfig, reasoningEffort?: string) => Promise<AiTestResult>;
+    testAiConfig: (value: AiConfig, reasoningEffort?: string | null) => Promise<AiTestResult>;
 }
 
 /**

@@ -13,8 +13,8 @@ const path = require('path');
 const fs = require('fs');
 
 const here = __dirname;
-const tsc = path.join(here, '..', '..', 'node_modules', '.bin', 'tsc.cmd');
-const tscFallback = path.join(here, '..', '..', 'node_modules', 'typescript', 'bin', 'tsc');
+const tsc = path.join(here, '..', 'node_modules', '.bin', 'tsc.cmd');
+const tscFallback = path.join(here, '..', 'node_modules', 'typescript', 'bin', 'tsc');
 
 const runTsc = () => {
   const args = ['-p', path.join(here, 'tsconfig.json')];
@@ -30,7 +30,7 @@ const runTsc = () => {
 };
 
 const main = async () => {
-  console.log('编译引擎到 scripts/test/build/ ...');
+  console.log('编译引擎到 test/build/ ...');
   runTsc();
 
   console.log('\n=== 引擎回归测试 ===');
@@ -65,6 +65,9 @@ const main = async () => {
   console.log('\n=== 浏览器外壳 ===');
   const browserOk = require('./browser.test.js').run();
 
+  console.log('\n=== 嗅探引擎 ===');
+  const snifferOk = require('./sniffer.test.js').run();
+
   console.log('\n=== 运行日志 ===');
   const logsOk = require('./logs.test.js').run();
 
@@ -74,7 +77,8 @@ const main = async () => {
   const edgeAsyncOk = await edgeMod.runAsync();
 
   if (!engineOk || !compatOk || !aibookOk || !searchSyncOk || !searchAsyncOk
-    || !mainStaticOk || !tamperOk || !agentToolsOk || !draftOk || !kbOk || !browserOk || !logsOk || !edgeOk || !edgeAsyncOk) {
+    || !mainStaticOk || !tamperOk || !agentToolsOk || !draftOk || !kbOk || !browserOk
+    || !snifferOk || !logsOk || !edgeOk || !edgeAsyncOk) {
     process.exitCode = 1;
     console.log('\n存在失败用例。');
   } else {

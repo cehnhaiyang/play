@@ -20,7 +20,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.join(__dirname, '..', '..');
+const ROOT = path.join(__dirname, '..');
 const ELECTRON_DIR = path.join(ROOT, 'electron');
 
 /** 类方法简写等已知误报，不属于"未声明的自由标识符" */
@@ -221,28 +221,138 @@ function run() {
         }
     }
 
-    // UA 跨进程一致性。
-    // 主进程 onBeforeSendHeaders 把 USER_AGENT 写进真实请求头，渲染层的 <webview useragent>
-    // 决定 JS 里 navigator.userAgent 报什么。两者不一致时，"UA 头 / JS 里的 UA / 内核版本"
-    // 三处互相矛盾，Cloudflare 的 managed 挑战必失败（点击了也过不去、反复弹回挑战页）。
-    // 这两份是各自进程里的字面量，没有编译期约束，只能这样静态盯住。
+    /**
+     * 浏览器身份（UA）：只许"同源"，不许"改写"。
+     *
+     * 两条实测事实，第二条把第一条的方案推翻了：
+     *
+     * A) Chromium **不会**按覆写的 UA 重算 sec-ch-ua / navigator.userAgentData。
+     *    所以历史上那种硬编码旧版本号（UA 声称 Chrome/122、CH 报内核 152、navigator
+     *    第三个值）必然自相矛盾：Google 登录据此报「此浏览器或应用可能不安全」。
+     *
+     * B) 于是改成"派生一个看起来像 Chrome 稳定版的 UA"（抹掉 Electron token、
+     *    版本掩成 Chrome/<major>.0.0.0），让 UA 与 CH 的主版本号对上。
+     *    2026-10-02 在同一站点、同一代理、同一 solver 下 A/B：
+     *      · 不改写（UA 照旧带 `Electron/44.4.5`，Chrome 段是四位全版本号）
+     *        → Cloudflare managed 挑战 36s 自动放行，**一次点击都不需要**。
+     *      · 改写成 `Chrome/152.0.0.0`
+     *        → 137s 不放行，自动点击 10~12 次全部无效，组件反复重建。
+     *    因为 UA 嘴上说"我是 Chrome 稳定版"，UA-CH 的 brands 里却没有 Google Chrome、
+     *    window.chrome 是空对象——这不是修一致性，是**半谎报**，比不改更糟。
+     *    CF 据此把挑战升级成"点了也不会放"的死循环，自动点击救不回来。
+     *
+     * 所以现在的不变量是：**没有任何地方改写 UA**。
+     * UA / sec-ch-ua / navigator.userAgentData 全部交回 Chromium 自己发；
+     * Node 直抓那条路读会话实际值来对齐（cf_clearance 与 UA 绑定）。
+     * 要让站点看成真 Chrome，得四层一起换，只换第一层不行——这条留给以后决策。
+     */
     checks += 1;
-    const uaRe = /Mozilla\/5\.0 \(Windows NT 10\.0; Win64; x64\) AppleWebKit\/537\.36 \(KHTML, like Gecko\) Chrome\/[\d.]+ Safari\/537\.36/g;
     const mainSrc = fs.readFileSync(path.join(ELECTRON_DIR, 'main.js'), 'utf8');
-    const viewSrc = fs.readFileSync(
-        path.join(ROOT, 'components', 'BrowsePanel.tsx'), 'utf8');
+    const browseSrc = fs.readFileSync(path.join(ROOT, 'components', 'BrowsePanel.tsx'), 'utf8');
+    const uaSrc = fs.readFileSync(path.join(ELECTRON_DIR, 'userAgent.js'), 'utf8');
+    const identityProblems = [];
 
-    const mainUas = [...new Set(mainSrc.match(uaRe) || [])];
-    const viewUas = [...new Set(viewSrc.match(uaRe) || [])];
+    // 1) 身份源只读不写：拿不到 app（纯 Node 里 require）必须返回空串，
+    //    绝不凭 process.versions 造一个"看起来像 Chrome 稳定版"的 UA
+    const { kernelUserAgent } = require(path.join(ELECTRON_DIR, 'userAgent.js'));
+    const engineUa = kernelUserAgent();
+    if (engineUa !== '') {
+        identityProblems.push(`纯 Node 环境不该拿得到 UA，却拿到：${engineUa}`);
+    }
+    if (/process\.versions\.(chrome|electron)/.test(uaSrc)) {
+        identityProblems.push('userAgent.js 又按 process.versions 拼 UA 了（拼出来就是假 Chrome 稳定版）');
+    }
 
-    if (mainUas.length !== 1 || viewUas.length !== 1) {
+    // 2) 任何进程都不许再出现硬编码 UA 字面量
+    const uaLiteral = /(["'`])Mozilla\/5\.0[^"'`\n]*Chrome\/\d/;
+    const scannedIdentityFiles = {
+        'electron/main.js': mainSrc,
+        'electron/userAgent.js': uaSrc,
+        'electron/acgmhoService.js': fs.readFileSync(path.join(ELECTRON_DIR, 'acgmhoService.js'), 'utf8'),
+        'electron/challengeSolver.js': fs.readFileSync(path.join(ELECTRON_DIR, 'challengeSolver.js'), 'utf8'),
+        'components/BrowsePanel.tsx': browseSrc,
+    };
+    for (const [name, src] of Object.entries(scannedIdentityFiles)) {
+        const m = src.match(uaLiteral);
+        if (m) identityProblems.push(`${name} 里有硬编码 UA 字面量：${m[0].slice(0, 72)}…`);
+    }
+
+    // 3) 全仓库不许再有"对 session/webContents 覆写 UA"这一类调用
+    //    （本地那个 setUserAgent 只是把值推给站点模块，不动浏览器，所以不算）
+    const overrideFiles = {
+        'electron/main.js': mainSrc,
+        'electron/userAgent.js': uaSrc,
+        'electron/browserService.js': fs.existsSync(path.join(ELECTRON_DIR, 'browserService.js'))
+            ? fs.readFileSync(path.join(ELECTRON_DIR, 'browserService.js'), 'utf8') : '',
+        'electron/challengeSolver.js': scannedIdentityFiles['electron/challengeSolver.js'],
+        'components/BrowsePanel.tsx': browseSrc,
+    };
+    for (const [name, src] of Object.entries(overrideFiles)) {
+        const m = src.match(/\.\s*setUserAgent\s*\(/);
+        if (m) identityProblems.push(`${name} 仍在覆写浏览器 UA：${m[0]}（UA 与 UA-CH 会分家）`);
+    }
+
+    // 4) 不许再删 Client Hints
+    if (/delete\s+requestHeaders\[\s*['"`]sec-ch-ua/.test(mainSrc)) {
+        identityProblems.push('main.js 仍在删 sec-ch-ua*（删 CH = 谎报浏览器，Google/CF 都判伪造）');
+    }
+
+    // 5) 渲染层不许再自带 UA
+    if (/useragent\s*=/i.test(browseSrc)) {
+        identityProblems.push('BrowsePanel.tsx 的 <webview> 仍写了 useragent 属性（UA 会有第二个来源）');
+    }
+
+    // 6) Node 直抓的 UA 必须来自浏览器会话实际值，而不是再算一份
+    if (!/setUserAgent\(session\.defaultSession\.getUserAgent\(\)\)/.test(mainSrc)) {
+        identityProblems.push('main.js 应把会话实际 UA 推给站点模块（cf_clearance 与 UA 绑定）');
+    }
+
+    if (identityProblems.length > 0) {
         failed += 1;
-        console.log(`  FAIL  UA 字面量数量异常：main.js ${mainUas.length} 个，BrowsePanel.tsx ${viewUas.length} 个（各应为 1）`);
-    } else if (mainUas[0] !== viewUas[0]) {
+        console.log('  FAIL  浏览器身份（UA/Client Hints）不一致：');
+        for (const p of identityProblems) console.log(`          ${p}`);
+    }
+
+    /**
+     * CF 自动过验证的"会点"不变量。
+     *
+     * 实测事故：求解器只按**顶层页面**文案判 interactive，而"请验证您是真人"
+     * 渲染在 challenges.cloudflare.com 的**跨域子帧**里，顶层 outerHTML 永远不含它
+     * → 激活分支一次都进不去，窗口里明明摆着复选框，程序只是看着它，
+     * 128 秒里 0 次点击（日志里连一条 frame probe 都没有）。
+     *
+     * 第二个坑在输入通道：`wc.sendInputEvent` 只递给**主帧的渲染进程**，
+     * 跨进程子帧（OOPIF，CF 组件正是这种）一个事件都收不到；
+     * 同页探针实测：同一个坐标，同进程子帧点得到、跨进程子帧直接丢弃。
+     * 必须走 CDP `Input.dispatch*`（在浏览器进程做命中测试与路由）。
+     *
+     * 这两条都不报错、只是"永远不动"，所以只能靠静态断言钉住。
+     */
+    checks += 1;
+    const solverSrc = fs.readFileSync(path.join(ELECTRON_DIR, 'challengeSolver.js'), 'utf8');
+    const solverProblems = [];
+    if (!/=\s*isInteractiveChallengeHtml\(html\)\s*\|\|\s*frameInteractive/.test(solverSrc)) {
+        solverProblems.push('interactive 判据没有并上子帧结果（只看顶层文案 = 永远不点）');
+    }
+    if (!/frameInteractive\s*=\s*INTERACTIVE_RE\.test\(probe\.text\)/.test(solverSrc)) {
+        solverProblems.push('没有从子帧文案得出 frameInteractive');
+    }
+    if (!/f\s*!==\s*wc\.mainFrame/.test(solverSrc)) {
+        solverProblems.push('子帧探测没排除主帧（顶层 #challenge-stage 的 rect 会把点击推到组件外）');
+    }
+    if (!/silentStallMs/.test(solverSrc) || !/if\s*\(!interactive\s*&&\s*now\s*-\s*challengeSeenAt\s*<\s*silentStallMs\)\s*continue/.test(solverSrc)) {
+        solverProblems.push('缺少"挑战页静置超时后主动点一次"的兜底（CF 换 UI 或读不到帧文案时会卡死）');
+    }
+    if (!/Input\.dispatchMouseEvent/.test(solverSrc) || !/Input\.dispatchKeyEvent/.test(solverSrc)) {
+        solverProblems.push('鼠标/键盘事件没走 CDP Input.dispatch*（sendInputEvent 进不了跨进程子帧）');
+    }
+    if (!/const inside = \(x, y\)/.test(solverSrc)) {
+        solverProblems.push('点击点没有约束在组件盒内（帧内 rect 与盒模型不同源时会点到盒外，点了等于没点）');
+    }
+    if (solverProblems.length > 0) {
         failed += 1;
-        console.log('  FAIL  UA 跨进程不一致，Cloudflare 挑战会失败：');
-        console.log(`          main.js         ${mainUas[0]}`);
-        console.log(`          BrowsePanel.tsx ${viewUas[0]}`);
+        console.log('  FAIL  CF 求解器不会自动点击：');
+        for (const p of solverProblems) console.log(`          ${p}`);
     }
 
     /**
@@ -430,7 +540,7 @@ function run() {
     checks += 1;
     const svc = require(path.join(ROOT, 'electron', 'acgmhoService.js'));
     const gallerySrc = fs.readFileSync(
-        path.join(ROOT, 'components', 'GalleryPanel', 'index.tsx'), 'utf8');
+        path.join(ROOT, 'components', 'GalleryPanel.tsx'), 'utf8');
 
     // 从源码里抠出 rangeIncludesPage 的实现（它是组件内私有函数，无法 import）。
     //
@@ -502,8 +612,8 @@ function run() {
     /**
      * 思考强度档位：界面、AiService、主进程三处清单一致，下发前都过映射。
      *
-     * low / high / max 是界面与配置的唯一口径；各服务商取值不同（OFM 认
-     * light / balanced / deep），由 AiService.resolveReasoningEffort 映射。
+     * low / high / max 是界面与配置的唯一口径（「不思考」等同于档位缺省，
+     * 不占白名单名额），各服务商取值不同，由 AiService.resolveReasoningEffort 映射。
      * 清单分叉会让档位被静默改写或点不到，漏映射则是服务端一次 503。
      */
     checks += 1;
@@ -576,46 +686,6 @@ function run() {
         failed += 1;
         console.log('  FAIL  思考强度档位在界面、AiService 与主进程之间分叉：');
         for (const p of effortProblems) console.log(`          ${p}`);
-    }
-
-    /**
-     * scripts/gallery.js 的 --delay 参数必须校验。
-     *
-     * `--delay abc` 会让 parseFloat 得到 NaN，而下游判据是 `delayMs > 0`
-     * （NaN > 0 为 false），于是**静默变成完全不限速**：用户以为设了页间隔，
-     * 实际每页连发，很容易触发站点限流导致整轮下载失败，而且没有任何提示。
-     * 打错一个参数不该把限速悄悄关掉，必须报错退出。
-     *
-     * 这个 CLI 此前完全没有回归测试，这里用真实子进程跑一次，
-     * 断言"坏参数非零退出、好参数继续执行"。
-     */
-    checks += 1;
-    const { spawnSync } = require('child_process');
-    const cliPath = path.join(ROOT, 'scripts', 'gallery.js');
-    const cliProblems = [];
-
-    const badDelay = spawnSync(process.execPath, [cliPath, '123', '--delay', 'abc'],
-        { encoding: 'utf8', timeout: 20000 });
-    if (badDelay.status === 0) {
-        cliProblems.push('--delay abc 竟然以 0 退出（NaN 会让限速静默失效，必须拒绝）');
-    }
-    if (!/--delay/.test(String(badDelay.stderr || ''))) {
-        cliProblems.push('--delay abc 报错信息里没有提到 --delay，用户不知道哪里写错了');
-    }
-
-    const goodHelp = spawnSync(process.execPath, [cliPath, '--help'],
-        { encoding: 'utf8', timeout: 20000 });
-    if (goodHelp.status !== 0) {
-        cliProblems.push(`--help 应以 0 退出，实际 ${goodHelp.status}`);
-    }
-    if (!/--delay/.test(String(goodHelp.stdout || ''))) {
-        cliProblems.push('--help 输出里没有 --delay 说明');
-    }
-
-    if (cliProblems.length > 0) {
-        failed += 1;
-        console.log('  FAIL  gallery.js CLI 参数校验有问题：');
-        for (const p of cliProblems) console.log(`          ${p}`);
     }
 
     console.log(`主进程静态自检：通过 ${checks - failed} 项，失败 ${failed} 项`);

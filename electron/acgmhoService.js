@@ -14,13 +14,12 @@ const tls = require('tls');
 /* -------------------------------------------------------------------------- */
 // 抓取该站时使用的 UA 与默认请求头。
 //
-// UA 的真值在这里，因为抓页面的是本模块。main.js 拿到浏览器会话的真实 UA 后
-// 会调 setUserAgent 覆盖它——cf_clearance 与 UA 绑定，Node 直抓必须与
-// "拿到凭证的那个浏览器"完全一致，否则表现为"验证过了但搜索仍 403"。
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-    '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+// UA 初值由内核版本派生（见 userAgent.js），与浏览器会话天然一致；
+// main.js 拿到会话 UA 后会调 setUserAgent 再对齐一次——cf_clearance 与 UA 绑定，
+// Node 直抓必须与"拿到凭证的那个浏览器"完全一致，否则表现为"验证过了但搜索仍 403"。
+const { kernelUserAgent } = require('./userAgent');
 const HEADERS = {
-    'User-Agent': UA,
+    'User-Agent': kernelUserAgent(),
     Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
 };

@@ -6,7 +6,7 @@ import {
     ProgressionCommand, RunCommand,
 } from '../../../meta';
 import { parseDuration, getMidi } from '../utils';
-import { getPreset } from './presets';
+import { getPreset, PRESET_NAMES } from './presets';
 import {
     parseChordSymbol, voicingToPitches, VoicingStyle, CHORD_QUALITY_NAMES,
 } from './chords';
@@ -42,8 +42,7 @@ const OSC_WAVES: ExpandedOscillatorType[] = [
     'sine', 'square', 'sawtooth', 'triangle',
     'white_noise', 'pink_noise', 'brown_noise', 'custom',
 ];
-/** FM 调制器与 LFO 只能是真正的振荡器波形（噪声由合成器另行处理） */
-const NOISE_WAVES = ['white_noise', 'pink_noise', 'brown_noise'];
+/** FM 调制器与 LFO 只能是真正的振荡器波形（见 LFO_WAVES；噪声由合成器另行处理） */
 const LFO_WAVES: OscillatorType[] = ['sine', 'square', 'sawtooth', 'triangle'];
 const LFO_TARGETS: LFOTarget[] = ['frequency', 'filter', 'gain', 'pan', 'detune'];
 const FILTER_KINDS: FilterKind[] = [
@@ -376,6 +375,20 @@ export class SPGParser {
     }
 
     /**
+     * 严格的数字解析。
+     *
+     * `parseFloat("0.5x")` 会静默读成 0.5 —— 拼写错误变成有效值，
+     * 用户听到的不是自己写的，却拿不到任何反馈（与未知参数静默忽略同类）。
+     * 这里用 Number 做全字匹配：非法返回 NaN，调用方按原有逻辑报错。
+     * 空串与十六进制同样拒绝（Number('') === 0 会吞掉 `gain=` 这类空值）。
+     */
+    private strictFloat(raw: string): number {
+        const t = this.unquote(raw).trim();
+        if (!t || /^0x/i.test(t)) return NaN;
+        return Number(t);
+    }
+
+    /**
      * 解析参数列表为「位置参数 + 具名参数」。
      * 支持 `name="x"`、`freq=200`、`chord=["C4","E4"]` 与裸位置值。
      */
@@ -459,7 +472,7 @@ export class SPGParser {
     private num(named: Record<string, string>, keys: string[], fallback: number, ctx: string, line: number): number {
         for (const k of keys) {
             if (named[k] !== undefined) {
-                const v = parseFloat(this.unquote(named[k]));
+                const v = this.strictFloat(named[k]);
                 if (!Number.isFinite(v)) {
                     throw new SPGError(`${ctx}: 参数 ${k} 需要数字，收到 "${named[k]}"`, line);
                 }
@@ -476,11 +489,17 @@ export class SPGParser {
         return fallback;
     }
 
-    private bool(named: Record<string, string>, keys: string[], fallback: boolean): boolean {
+    private bool(named: Record<string, string>, keys: string[], fallback: boolean, ctx = '', line = 0): boolean {
         for (const k of keys) {
             if (named[k] !== undefined) {
                 const v = this.unquote(named[k]).toLowerCase();
-                return v === 'true' || v === '1' || v === 'yes' || v === 'on';
+                if (v === 'true' || v === '1' || v === 'yes' || v === 'on') return true;
+                if (v === 'false' || v === '0' || v === 'no' || v === 'off') return false;
+                // 拼错的布尔值不能静默当 false：`accent=maybe` 本意是重音，
+                // 按旧逻辑会安静地演奏成普通力度。
+                throw new SPGError(
+                    `${ctx}: 参数 ${k} 需要布尔值（true / false），收到 "${named[k]}"`, line
+                );
             }
         }
         return fallback;
@@ -623,7 +642,7 @@ export class SPGParser {
     ): number | null {
         const raw = this.fieldValue(fields, key);
         if (raw === null) return null;
-        const v = parseFloat(raw);
+        const v = this.strictFloat(raw);
         if (!Number.isFinite(v)) {
             throw new SPGError(`${ctx}: 参数 ${key} 需要数字（收到 "${raw}"）`, line);
         }
@@ -681,7 +700,7 @@ export class SPGParser {
         }
         const kind = m[1].toLowerCase();
         const { positional, named } = this.parseArgs(m[2]);
-        const p = positional.map((v) => parseFloat(this.unquote(v)));
+        const p = positional.map((v) => this.strictFloat(v));
         for (const v of p) {
             if (!Number.isFinite(v)) {
                 throw new SPGError(`${ctx}: 包络参数必须是数字（收到 "${str}"）`, line);
@@ -761,7 +780,7 @@ export class SPGParser {
         }
         const kind = this.enum_(m[1], FILTER_KINDS, `${ctx} 滤波器类型`, line);
         const { positional, named } = this.parseArgs(m[2]);
-        const p = positional.map((v) => parseFloat(this.unquote(v)));
+        const p = positional.map((v) => this.strictFloat(v));
 
         this.rejectUnknownParams(
             named,
@@ -799,7 +818,7 @@ export class SPGParser {
         // 波形必须真实合法，否则调度期会在 OscillatorNode.type 上抛异常
         const type = this.enum_(m[1], LFO_WAVES, `${ctx} LFO 波形`, line);
         const { positional, named } = this.parseArgs(m[2]);
-        const p = positional.map((v) => parseFloat(this.unquote(v)));
+        const p = positional.map((v) => this.strictFloat(v));
 
         this.rejectUnknownParams(
             named, ['freq', 'frequency', 'amount', 'target', 'ramp', 'swell'],
@@ -812,7 +831,7 @@ export class SPGParser {
         const amount = named.amount !== undefined
             ? this.num(named, ['amount'], 10, ctx, line)
             : (Number.isFinite(p[1]) ? p[1] : 10);
-        // target 是枚举字符串，不能走 parseFloat；位置写法取原始第三个参数
+        // target 是枚举字符串，不能走数字解析；位置写法取原始第三个参数
         const target = named.target !== undefined
             ? this.enum_(this.unquote(named.target), LFO_TARGETS, `${ctx} LFO target`, line)
             : (positional[2] !== undefined
@@ -827,7 +846,7 @@ export class SPGParser {
             amount,
             target,
             ramp: named.ramp !== undefined ? this.num(named, ['ramp'], 0, ctx, line) : 0,
-            swell: this.bool(named, ['swell'], false),
+            swell: this.bool(named, ['swell'], false, `${ctx} LFO`, line),
         };
     }
 
@@ -856,7 +875,7 @@ export class SPGParser {
             );
             this.rejectUnknownParams(named, EFFECT_PARAMS[name] ?? [], `${ctx} ${name}()`, lineNo);
 
-            const p = positional.map((v) => parseFloat(this.unquote(v)));
+            const p = positional.map((v) => this.strictFloat(v));
             const num = (keys: string[], fallback: number, idx2: number): number => {
                 if (keys.some((k) => named[k] !== undefined)) {
                     return this.num(named, keys, fallback, `${ctx} ${name}`, lineNo);
@@ -887,7 +906,7 @@ export class SPGParser {
                         feedback: num(['feedback'], 0.3, 1),
                         mix: num(['mix'], 0.4, 2),
                         damping: num(['damping'], 2000, 3),
-                        pingPong: name === 'pingpong' || this.bool(named, ['pingpong'], false),
+                        pingPong: name === 'pingpong' || this.bool(named, ['pingpong'], false, `${ctx} ${name}`, lineNo),
                     });
                     break;
 
@@ -1062,7 +1081,7 @@ export class SPGParser {
             expr.humanize = Math.max(0, Math.min(1, this.num(named, ['humanize', 'human'], 0, ctx, line)));
         }
         // accent 是重音的简写：直接顶到最强力度
-        if (!isReserved('accent') && this.bool(named, ['accent'], false)) {
+        if (!isReserved('accent') && this.bool(named, ['accent'], false, ctx, line)) {
             expr.velocity = 1;
         }
         return expr;
@@ -1178,14 +1197,14 @@ export class SPGParser {
             // bpm 是 tempo 最自然的同义写法，模型经常直接写 bpm
             const tempoRaw = this.fieldValue(cfg, 'tempo') ?? this.fieldValue(cfg, 'bpm');
             if (tempoRaw !== null) {
-                tempo = parseFloat(tempoRaw);
+                tempo = this.strictFloat(tempoRaw);
                 if (!Number.isFinite(tempo) || tempo <= 0 || tempo > 1000) {
-                    throw new SPGError(`tempo 必须在 0~1000 之间（收到 ${tempoRaw}）`, bodyLine);
+                    throw new SPGError(`tempo 必须大于 0 且不超过 1000（收到 ${tempoRaw}）`, bodyLine);
                 }
             }
             const volRaw = this.fieldValue(cfg, 'master_gain') ?? this.fieldValue(cfg, 'gain');
             if (volRaw !== null) {
-                masterVolumeConfig = parseFloat(volRaw);
+                masterVolumeConfig = this.strictFloat(volRaw);
                 if (!Number.isFinite(masterVolumeConfig) || masterVolumeConfig < 0) {
                     throw new SPGError(`master_gain 不能为负数（收到 ${volRaw}）`, bodyLine);
                 }
@@ -1206,7 +1225,7 @@ export class SPGParser {
             }
             const swingRaw = this.fieldValue(cfg, 'swing');
             if (swingRaw !== null) {
-                swing = parseFloat(swingRaw);
+                swing = this.strictFloat(swingRaw);
                 if (!Number.isFinite(swing) || swing < 0 || swing > 1) {
                     throw new SPGError(`swing 必须在 0~1 之间（收到 ${swingRaw}）`, bodyLine);
                 }
@@ -1253,7 +1272,7 @@ export class SPGParser {
                 const loaded = getPreset(presetName);
                 if (!loaded) {
                     throw new SPGError(
-                        `${ctx}: 未知预设 "${presetName}"。可用预设见文档。`, bodyLine
+                        `${ctx}: 未知预设 "${presetName}"。可用预设：${PRESET_NAMES.join(' / ')}`, bodyLine
                     );
                 }
                 base = { ...loaded };
@@ -1296,7 +1315,7 @@ export class SPGParser {
             const harmRaw = this.fieldValue(fields, 'harmonics');
             if (harmRaw !== null) {
                 harmonics = this.parseArray(harmRaw)
-                    .map((v) => parseFloat(v))
+                    .map((v) => this.strictFloat(v))
                     .filter((v) => Number.isFinite(v));
                 if (harmonics.length === 0) {
                     throw new SPGError(`${ctx}: harmonics 数组不能为空`, bodyLine);
@@ -1304,8 +1323,10 @@ export class SPGParser {
             }
 
             const fmWaveRaw = this.fieldValue(fields, 'fm_wave') ?? base.fm_wave;
+            // FM 调制器必须是真正的振荡器波形：写噪声名会在合成器被静默跳过
+            // （听到的就是没 FM 的声音），写 custom 则退化成 sine —— 两种都是"写了白写"。
             const fmWave = fmWaveRaw
-                ? this.enum_(fmWaveRaw, OSC_WAVES, `${ctx} fm_wave`, bodyLine)
+                ? this.enum_(fmWaveRaw, LFO_WAVES, `${ctx} fm_wave（只能是 sine / square / sawtooth / triangle）`, bodyLine)
                 : undefined;
 
             const pickNum = (key: string, baseVal: number | undefined, fallback?: number): number | undefined => {
@@ -1314,6 +1335,34 @@ export class SPGParser {
                 if (baseVal !== undefined) return baseVal;
                 return fallback;
             };
+
+            // fm_ratio 是倍频比：0 会让 FM 静默关闭（合成器按 falsy 跳过），
+            // 负数会被取绝对值 —— 两种都是"写了跟没写不一样，但又不报错"。
+            const fmRatio = pickNum('fm_ratio', base.fm_ratio);
+            if (fmRatio !== undefined && fmRatio <= 0) {
+                throw new SPGError(
+                    `${ctx}: fm_ratio 是倍频比，必须为正数（收到 ${fmRatio}）`
+                    + `；不需要 FM 时直接删掉 fm_wave / fm_ratio / fm_index`, bodyLine
+                );
+            }
+
+            // wave: "custom" 没有内置定义：不配 harmonics 会静默退化成 sine。
+            if (wave === 'custom' && harmonics === undefined) {
+                throw new SPGError(
+                    `${ctx}: wave "custom" 需要配合 harmonics 使用`
+                    + `（如 harmonics: [1, 0.5, 0.25]），否则请写具体波形：`
+                    + `sine / square / sawtooth / triangle`, bodyLine
+                );
+            }
+
+            // 时长类参数为负数没有任何物理意义，合成器会静默按 0 处理 ——
+            // 在这里报错，模型才能知道自己写错了。
+            for (const k of ['glide', 'pitch_decay', 'loop_point']) {
+                const v = this.fieldNumber(fields, k, ctx, bodyLine);
+                if (v !== null && v < 0) {
+                    throw new SPGError(`${ctx}: 参数 ${k} 不能为负数（收到 ${v}）`, bodyLine);
+                }
+            }
 
             instruments.set(name, {
                 name,
@@ -1327,7 +1376,7 @@ export class SPGParser {
                 gain: pickNum('gain', base.gain, 0.8)!,
                 fm_wave: fmWave,
                 fm_index: pickNum('fm_index', base.fm_index),
-                fm_ratio: pickNum('fm_ratio', base.fm_ratio),
+                fm_ratio: fmRatio,
                 detune: pickNum('detune', base.detune),
 
                 glide: pickNum('glide', base.glide, 0),
@@ -1620,9 +1669,12 @@ export class SPGParser {
                     }
 
                     case 'progression': {
+                        // duration/dur 曾经在白名单里但从未被消费：
+                        // progression 的时值只认 beats/beat/位置参数，
+                        // `duration="2n"` 会静默失效。这里删掉，写了就报错并列出可用参数。
                         const expr = this.parseExpression(named, lineNo, ctx, [
                             'chords', 'beats', 'beat', 'voicing', 'octave', 'octaves', 'pattern',
-                            'duration', 'dur', 'strum',
+                            'strum',
                         ], ['octave', 'voicing']);
                         const chordsRaw = positional.find((a) => a.trim().startsWith('['))
                             ?? named.chords ?? named.chord ?? positional[0];
@@ -1707,8 +1759,12 @@ export class SPGParser {
                     }
 
                     case 'run': {
+                        // extraParams 白名单只收"真的会被消费"的键：
+                        // from/to/octaves/scale/key 曾经在这里"合法但无用" ——
+                        // 写了不报错也不生效，与未知参数静默忽略是同一类陷阱。
+                        // run 的音高只来自音高数组，方向只认 direction/pattern。
                         const expr = this.parseExpression(named, lineNo, ctx, [
-                            'notes', 'pitches', 'from', 'to', 'octaves', 'scale', 'key', 'pattern',
+                            'notes', 'pitches', 'pattern',
                             'direction', 'repeat', 'times', 'rate', 'step',
                         ]);
                         const notesRaw = positional.find((a) => a.trim().startsWith('['))

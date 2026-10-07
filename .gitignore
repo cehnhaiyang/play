@@ -5,8 +5,10 @@ dist
 dist-electron
 release
 *.tsbuildinfo
-# SPG 引擎测试的临时编译输出（npm run test:spg 每次重新生成）
-scripts/test/build
+# SPG 引擎测试的临时编译输出（npm run test 每次重新生成）
+test/build
+# 变异检查留下的源码副本（一次性诊断产物，不该进仓库）
+test/.mutant.ts
 # ui-check.js 的截图输出（每次跑 UI 回归都会重新生成，属于产物不是源码）
 scripts/shots
 

@@ -14,7 +14,7 @@
  * 依赖只有 Node 内置：`node:sqlite`（Node 22.5+，Electron 44 的 Node 24 自带）
  * 与 `child_process`（起 PowerShell 跑 C# 小助手做 DPAPI/NCrypt）。
  * **不需要任何第三方包**，也**不 require electron** ——
- * 后者让本模块可以被 scripts/test 直接 require 求值。
+ * 后者让本模块可以被 test/ 直接 require 求值。
  *
  * ============================================================================
  * Cookie 走纯离线解密，不再启动 Edge（实测结论）

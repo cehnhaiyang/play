@@ -41,7 +41,7 @@ const b64url = (obj) => Buffer.from(JSON.stringify(obj), 'utf8')
 const loadEngineCompile = () => {
     const fs = require('fs');
     const path = require('path');
-    const src = fs.readFileSync(path.join(__dirname, '..', '..', 'hooks', 'useBrowse.ts'), 'utf8');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'hooks', 'useBrowse.ts'), 'utf8');
 
     const grab = (marker, endMarker) => {
         const start = src.indexOf(marker);
@@ -82,7 +82,7 @@ const token = (header, payload, sig) =>
 const loadPickStoredTabs = () => {
     const fs = require('fs');
     const path = require('path');
-    const src = fs.readFileSync(path.join(__dirname, '..', '..', 'hooks', 'useBrowse.ts'), 'utf8');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'hooks', 'useBrowse.ts'), 'utf8');
 
     const start = src.indexOf('export const pickStoredTabs = (saved: unknown)');
     if (start < 0) throw new Error('useBrowse.ts 里找不到 pickStoredTabs');
@@ -438,7 +438,7 @@ const run = () => {
         const path = require('path');
         const { isStrictNumber } = loadEngineCompile();
         const src = fs.readFileSync(
-            path.join(__dirname, '..', '..', 'components', 'BrowsePanel.tsx'), 'utf8');
+            path.join(__dirname, '..', 'components', 'BrowsePanel.tsx'), 'utf8');
 
         // 从 BrowsePanel 里抠出它自己那份 isStrictNumber（组件内私有，无法 import）。
         // 签名带 TS 类型标注，不能整段 eval，只取 => 之后的函数体。
@@ -695,7 +695,7 @@ const run = () => {
     check('标签页落盘的 activeIndex 不越界', () => {
         const fs = require('fs');
         const path = require('path');
-        const src = fs.readFileSync(path.join(__dirname, '..', '..', 'hooks', 'useBrowse.ts'), 'utf8');
+        const src = fs.readFileSync(path.join(__dirname, '..', 'hooks', 'useBrowse.ts'), 'utf8');
 
         assert(
             !/const activeIndex = Math\.max\(0, tabs\.findIndex/.test(src),
@@ -717,7 +717,7 @@ const run = () => {
     check('落盘上限保留最新而非最旧', () => {
         const fs = require('fs');
         const path = require('path');
-        const src = fs.readFileSync(path.join(__dirname, '..', '..', 'hooks', 'useBrowse.ts'), 'utf8');
+        const src = fs.readFileSync(path.join(__dirname, '..', 'hooks', 'useBrowse.ts'), 'utf8');
 
         for (const [name, key] of [['嗅探结果', 'LINKS_STORE_MAX'], ['书签', 'BOOKMARKS_MAX']]) {
             const wrong = new RegExp(`slice\\(0,\\s*${key}\\)`, 'g');
@@ -791,7 +791,7 @@ const run = () => {
     check('嗅探加载态用计数而非布尔量', () => {
         const fs = require('fs');
         const path = require('path');
-        const src = fs.readFileSync(path.join(__dirname, '..', '..', 'hooks', 'useBrowse.ts'), 'utf8');
+        const src = fs.readFileSync(path.join(__dirname, '..', 'hooks', 'useBrowse.ts'), 'utf8');
 
         assert(
             !/setIsAnalyzing\(/.test(src),
@@ -820,7 +820,7 @@ const run = () => {
     check('AI 分析结果带页面归属校验', () => {
         const fs = require('fs');
         const path = require('path');
-        const src = fs.readFileSync(path.join(__dirname, '..', '..', 'hooks', 'useBrowse.ts'), 'utf8');
+        const src = fs.readFileSync(path.join(__dirname, '..', 'hooks', 'useBrowse.ts'), 'utf8');
 
         const start = src.indexOf('const analyzeWithAi = useCallback');
         assert(start > 0, '找不到 analyzeWithAi');

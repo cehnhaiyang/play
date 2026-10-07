@@ -10,7 +10,7 @@
         "electron:dev": "concurrently -k \"vite\" \"wait-on tcp:5173 && electron .\"",
         "electron:build": "vite build && electron-builder",
         "gallery": "node scripts/gallery.js",
-        "test:spg": "node scripts/test/index.js",
+        "test:spg": "node test/index.js",
         "test:proxy-sync": "node scripts/proxy-sync-check.js",
         "test:ui": "concurrently -k -s first \"vite --port 5174 --strictPort\" \"wait-on tcp:5174 && electron scripts/ui-check.js\"",
         "test:ui:only": "electron scripts/ui-check.js"

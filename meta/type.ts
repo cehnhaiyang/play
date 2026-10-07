@@ -218,8 +218,8 @@ export type MessageRole = 'user' | 'model' | 'system';
 /**
  * AI 思考（推理）强度档位：界面与配置里只有这三档
  *
- * 各服务商的 reasoning_effort 取值不同（OFM 用 light / balanced / deep），
- * 下发前由 AiService.resolveReasoningEffort 按服务商、模型映射。
+ * 各服务商的 reasoning_effort 取值可能不同，下发前由
+ * AiService.resolveReasoningEffort 按服务商、模型映射；映射结果为空即不下发该参数。
  *
  * - `low`: 最快、最省 token
  * - `high`: 平衡档，适合常规生成
@@ -238,8 +238,13 @@ export interface AiConfig {
     apiKey: string;
     /** 模型标识，如 global:deepseek-v4.1-flash */
     model: string;
-    /** 思考强度档位 */
-    reasoningEffort: ReasoningEffort;
+    /**
+     * 思考强度档位。
+     *
+     * 可选：缺省即「不思考」，请求不下发 reasoning_effort，交给服务商默认行为。
+     * 服务商预设声明不需要思考（AiService.AI_PROVIDERS 的 reasoning 为 false）时同样不下发。
+     */
+    reasoningEffort?: ReasoningEffort;
 }
 
 /**
@@ -274,6 +279,24 @@ export interface AiStreamDelta {
 }
 
 /**
+ * 一次补全请求的 token 用量。
+ *
+ * `estimated` 是这份数据最要紧的字段：服务端不回 usage 时由本地按字符类别估算
+ * （见 AiService.estimateTokens），误差约 ±20%。界面必须把两者分开显示 ——
+ * 把估算值当账单展示，用户会照着它去核对计费。
+ */
+export interface AiUsage {
+    /** 输入 token（系统提示词 + 全部历史） */
+    promptTokens: number;
+    /** 输出 token */
+    completionTokens: number;
+    /** 合计 */
+    totalTokens: number;
+    /** true = 本地估算；false = 服务端实测 */
+    estimated: boolean;
+}
+
+/**
  * 一次补全请求的可选参数
  */
 export interface AiChatOptions {
@@ -296,6 +319,14 @@ export interface AiChatOptions {
      * 服务端不认 stream 时会自动回落成一次性请求（见 AiService.chat）。
      */
     onDelta?: (delta: AiStreamDelta) => void;
+    /**
+     * 本次请求的 token 用量回调，**成功收到回复后**调用一次（失败不调用）。
+     *
+     * 服务端回了 usage 就是实测值；没回（流式默认不带、部分本地代理不带）则由
+     * AiService 按完整入参估算 —— 估算只能在这一层做：系统提示词是在 chat 内部
+     * 拼进 messages 的，调用方手上那份不含它，自己估算会系统性少算一大截。
+     */
+    onUsage?: (usage: AiUsage) => void;
     /** 中断信号。中止后 fetch 抛 AbortError，调用方据此区分"用户停止"与"真失败" */
     signal?: AbortSignal;
 }
@@ -376,25 +407,23 @@ export interface AiBookFile {
  */
 
 /**
- * Agent 可调用的工具名。
+ * Agent 可调用的工具名（全小写，严格匹配）。
  *
- * `S` 是脚本工具，用 args.action 选四件事：R 运行 / L 列出 / S 保存 / D 删除。
- * 四者合并成一个工具是**上下文成本**的取舍：工具说明每步随请求重发一次，
- * 拆成四个条目要多花约 400 字节 × 步数，而它们本就共享同一份状态（脚本清单）。
+ * `js` 是执行器（在页面主世界跑一段脚本），`script_store` 管脚本的持久化
+ * （列出 / 保存 / 更新 / 删除）；两者分开是因为“跑一次”与“存下来复用”是
+ * 两件不同的事， prompt 里各占一条，模型不会把它们搞混。
  *
- * 后三个是把**用户手动面板里的能力**开放给模型：拦截规则、存储、令牌。
- * 它们不是 `S` 的替代 —— 规则类能力必须在引擎层生效（钩子装在页面主世界，
- * 脚本只能影响自己那一次调用），存储类能力必须走原生 API
- * （Cookie 在渲染进程里读不到 HttpOnly）。
+ * 后五个是把**用户手动面板里的能力**开放给模型：导航、拦截规则、存储、令牌、
+ * 知识库。规则类能力必须在引擎层生效（钩子装在页面主世界，脚本只能影响自己
+ * 那一次调用），存储类能力必须走原生 API（Cookie 在渲染进程里读不到 HttpOnly）。
  *
- * `kb` 是知识库检索，与上面五个都不同：它**不碰页面**，只读本地文章。
- * 放在这里是因为它的消费者就是 Agent —— 模型在动手前先查库，
- * 比从零推理页面结构划算得多。
+ * `kb` 只读本地文章，不碰页面。
  */
 export type AgentToolName =
-    | 'S'
+    | 'js'
+    | 'script_store'
     | 'navigate'
-    | 'tamper_rules'
+    | 'tamper'
     | 'storage'
     | 'tokens'
     | 'kb';
@@ -431,10 +460,10 @@ export interface AgentMessage {
     /** 工具消息：调用的工具名 */
     tool?: AgentToolName;
     /**
-     * 工具消息：工具名 + 动作（如 S·R）。
+     * 工具消息：工具名 + 动作（如 script_store·save）。
      *
-     * 重建模型上下文时要用它：只写 "S" 的话，「跑脚本 / 列清单 / 存脚本 / 删脚本」
-     * 在历史里长得一模一样，模型看不出自己上一轮到底做过哪一件。
+     * 重建模型上下文时要用它：只写 "script_store" 的话，「列清单 / 存脚本 /
+     * 改脚本 / 删脚本」在历史里长得一模一样，模型看不出自己上一轮到底做过哪一件。
      */
     label?: string;
     /**
@@ -450,6 +479,19 @@ export interface AgentMessage {
     ok?: boolean;
     /** 工具消息：回传给模型的完整观察结果（已截断） */
     result?: string;
+    /**
+     * 这条消息对应的那次模型调用的 token 用量。
+     *
+     * 落在消息上而不是只维护一个累计值：删除一条或回退一轮之后，累计值必须能
+     * 重算（见 AgentUsage）。界面自己补的提示（notice）没有用量 —— 它不是
+     * 模型说的话，也就没有对应的调用。
+     */
+    usage?: AiUsage;
+    /**
+     * 上下文压缩记录。带这个字段的消息是压缩的**分界线**，
+     * 不是模型的发言也不是用户的提问 —— 界面据此画一条明显的分隔条。
+     */
+    compaction?: AgentCompaction;
     at: number;
 }
 
@@ -476,6 +518,79 @@ export interface AgentScript {
 
 /** Agent 循环的运行状态 */
 export type AgentRunStatus = 'idle' | 'thinking' | 'acting';
+
+/**
+ * 一次上下文压缩的结果：旧消息交给模型压成结构化摘要，保留最近若干条原文。
+ *
+ * 摘要必须**落进对话流**而不是只留一份文本：压缩是不可逆的 —— 被压掉的原文
+ * 在界面上仍然逐条可见，用户需要一条明确的分界线知道"这之前的已经不在
+ * 上下文里了"，否则他会以为模型还记得上面那些内容。
+ */
+export interface AgentCompaction {
+    /** 摘要正文（结构化 Markdown），作为一条 user 消息置于上下文最前 */
+    summary: string;
+    /**
+     * 摘要覆盖到哪一条消息为止（含该条）—— 分界线**插入时的锚点**。
+     *
+     * 用**消息 id** 而不是轮次下标：用户删掉中间一条、或回退到某轮之后，
+     * 下标就全错位了。
+     *
+     * 注意它只是锚点，不是"这条压缩还算不算数"的判据：插完之后边界由承载
+     * 摘要的那条消息在流里的**位置**回答（见 buildTranscript）。按 upTo 反查
+     * 的话，用户单条删掉这个锚点就会让一份本来有效的摘要被误判成失效。
+     */
+    upTo: string;
+    /** 压缩完成时刻 */
+    at: number;
+    /** 被压掉（不再逐条回放）的消息条数 */
+    coveredMessages: number;
+    /**
+     * 其中**真正送进摘要器**的消息条数。
+     *
+     * 小于 coveredMessages 时差额是被直接丢弃的：摘要器的输入有上限，
+     * 超出部分连摘要都没有。界面必须如实说出这个差额 ——
+     * 否则用户以为"压过的都还记得"，而实际上有几条是彻底没了。
+     */
+    summarizedMessages: number;
+    /** 压缩前上下文的估算 token 数 */
+    beforeTokens: number;
+    /** 压缩后上下文的估算 token 数 */
+    afterTokens: number;
+    /**
+     * 压缩后是否**仍未**回到硬门槛以内。
+     *
+     * 为 true 时界面必须继续警示并保持输入框禁用：压缩没解决问题，
+     * 而"压缩完成"的绿色提示会把用户引向错误的安心。
+     */
+    overBudget: boolean;
+    /** 这次摘要调用自身的用量 —— 它也是真实成本，不能不计入会话总量 */
+    usage?: AiUsage;
+}
+
+/** 会话累计 token 统计（按现存消息重算，删除 / 回退后自动收敛） */
+export interface AgentUsage {
+    /** 累计输入 token（每次模型调用的 prompt 都计入，不做任何去重） */
+    promptTokens: number;
+    /** 累计输出 token */
+    completionTokens: number;
+    /** 合计 */
+    totalTokens: number;
+    /** 模型调用次数 */
+    calls: number;
+    /** 其中有多少次是本地估算（服务端未回 usage） */
+    estimatedCalls: number;
+    /**
+     * 当前上下文占用：**按现存消息重建后**的输入 token 估算。
+     *
+     * 与累计值是两个问题：累计值回答"这个会话花了多少"，这个回答"下一次请求
+     * 要发多少" —— 后者才是决定何时该压缩的那个数。
+     *
+     * 刻意不用"最近一次调用的实测 promptTokens"：实测值只在发过请求之后才有，
+     * 而用户刚删掉几轮、或刚压缩完时正需要看到当前占用 —— 那时一个陈旧的
+     * 实测值比估算更误导。所以这个数**永远是估算**，界面统一带 ~ 标注。
+     */
+    contextTokens: number;
+}
 
 /**
  * ============================================================================

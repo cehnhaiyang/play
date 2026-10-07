@@ -8,6 +8,7 @@ import type { SPGWarning } from '../services/AudioService/audioEngine/parser';
 import { exportProjectBundle, bufferToWave } from '../services/AudioService/utils';
 import { generateSyntax, fixSyntax } from '../services/AiService';
 import { loadJSON, saveJSON, removeStored } from '../utils/persist';
+import { downloadBlob } from '../utils/utils';
 
 interface UseAudioParams {
     initialProjectId?: string | null;
@@ -298,13 +299,7 @@ export const useAudio = ({
 
                 const wavBlob = await audioEngine.renderOffline();
                 const zipBlob = await exportProjectBundle(code, wavBlob);
-
-                const url = URL.createObjectURL(zipBlob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `${name.replace(/\s+/g, '_')}_${Date.now()}.zip`;
-                a.click();
-                URL.revokeObjectURL(url);
+                downloadBlob(zipBlob, `${name.replace(/\s+/g, '_')}_${Date.now()}.zip`);
 
                 setAppState(AppState.READY);
             } catch (error: unknown) {
@@ -420,12 +415,7 @@ export const useAudio = ({
                         newName = file.name.replace(/\.asf$/i, '.wav');
                     }
 
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = newName;
-                    a.click();
-                    URL.revokeObjectURL(url);
+                    downloadBlob(blob, newName);
 
                     addLog(`${logPrefix}: 成功 -> ${newName}`);
                 } catch (error: unknown) {
@@ -517,12 +507,7 @@ export const useAudio = ({
             }
 
             const blob = bufferToWave(buffer, buffer.length);
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `fixed_${fixerFile.name.replace(/\.[^/.]+$/, '')}.wav`;
-            a.click();
-            URL.revokeObjectURL(url);
+            downloadBlob(blob, `fixed_${fixerFile.name.replace(/\.[^/.]+$/, '')}.wav`);
         } catch (error: unknown) {
             console.error('音频修复处理失败:', error);
         } finally {

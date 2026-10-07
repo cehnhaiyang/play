@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import {
     AlertCircle,
     AlertTriangle,
+    Archive,
     ArrowLeft,
     ArrowRight,
     ArrowRightLeft,
@@ -16,7 +17,9 @@ import {
     Code,
     Compass,
     FolderPlus,
+    Gauge,
     GripVertical,
+    Copy,
     Pencil,
     Database,
     Download,
@@ -62,10 +65,12 @@ import type {
     TamperState,
     TabsState,
 } from '../hooks';
-import { SEARCH_ENGINE_OPTIONS, isAddressLike } from '../hooks';
+import { SEARCH_ENGINE_OPTIONS, isAddressLike, CONTEXT_LIMIT_TOKENS, COMPACT_RATIOS } from '../hooks';
 import type {
+    AgentCompaction,
     AgentMessage,
     AgentScript,
+    AgentUsage,
     BookmarkNode,
     BookmarkBarVisibility,
     CookieItem,
@@ -86,9 +91,10 @@ import {
     generateId,
     pickJwtCandidates,
 } from '../utils/utils';
+import { exportAgentSession } from '../utils/agentExport';
 import { loadJSON, saveJSON } from '../utils/persist';
 import { formatBytes } from '../services/SearchService';
-import { zoomLevelToPercent, type NavigationError } from '../services/BrowserService';
+import { zoomLevelToPercent, isEditableTarget, type NavigationError } from '../services/BrowserService';
 import {
     collectFolders,
     countNodes,
@@ -1960,8 +1966,11 @@ const DownloadsPanel: React.FC<{
                                             <>
                                                 <button
                                                     onClick={() => (item.paused ? actions.resume(item.id) : actions.pause(item.id))}
-                                                    className="flex h-5 w-5 items-center justify-center rounded text-slate-400 transition hover:bg-white/10 hover:text-white"
-                                                    title={item.paused ? '继续' : '暂停'}
+                                                    disabled={item.paused && item.canResume === false}
+                                                    className="flex h-5 w-5 items-center justify-center rounded text-slate-400 transition hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
+                                                    title={item.paused
+                                                        ? (item.canResume === false ? '服务器不支持断点续传，无法继续' : '继续')
+                                                        : '暂停'}
                                                 >
                                                     {item.paused ? <Play className="h-3 w-3" /> : <Pause className="h-3 w-3" />}
                                                 </button>
@@ -1999,6 +2008,18 @@ const DownloadsPanel: React.FC<{
                                         >
                                             <Trash2 className="h-3 w-3" />
                                         </button>
+                                        {/* 中断但服务器支持断点续传：给续传入口。
+                                            以前这里只有"移除"，断点续传能力被藏起来了；
+                                            不支持时不给按钮（点了也是主进程拒掉、界面毫无反馈） */}
+                                        {item.state === 'interrupted' && item.canResume && (
+                                            <button
+                                                onClick={() => actions.resume(item.id)}
+                                                className="flex h-5 w-5 items-center justify-center rounded text-slate-400 transition hover:bg-white/10 hover:text-white"
+                                                title="从断点继续下载"
+                                            >
+                                                <Play className="h-3 w-3" />
+                                            </button>
+                                        )}
                                     </div>
                                 </div>
 
@@ -2067,13 +2088,13 @@ const BrowserView: React.FC<{
                                     ref={getWebviewRef(tab.id)}
                                     src={tab.initialUrl}
                                     className="h-full w-full border-none bg-white"
-                                    // 必须与主进程 electron/main.js 的 USER_AGENT **逐字一致**：
-                                    // 那里 onBeforeSendHeaders 会把这个 UA 写进真实请求头，
-                                    // 而这里决定 JS 里 navigator.userAgent 报什么。两者不一致时，
-                                    // "UA 头 / JS 里的 UA / 内核版本"三处互相矛盾，Cloudflare 的
-                                    // managed 挑战必失败（点击了也过不去、反复弹回挑战页）。
-                                    // 一致性由 scripts/test/mainstatic.test.js 静态校验。
-                                    useragent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                                    // 不写 useragent 属性：UA 一律**不改写**，唯一来源见
+                                    // electron/userAgent.js（读引擎自己那一份，与 sec-ch-ua /
+                                    // navigator.userAgentData 天然一致）。
+                                    // 渲染层这里再写一份字面量，就等于把"UA 头 / navigator /
+                                    // sec-ch-ua"三处身份重新拆成两个进程各自维护——上次就是这么
+                                    // 造成 Cloudflare 挑战永远过不去。Chromium 不会按覆写的 UA
+                                    // 重算 sec-ch-ua，谎报版本必然自相矛盾。
                                     // @ts-ignore: Electron 特有属性
                                     // Electron 的 BooleanAttribute 是 hasAttribute() 语义，
                                     // 属性存在即为真、与取值字符串无关。这里必须让属性存在，
@@ -3128,6 +3149,186 @@ const ReasoningBlock: React.FC<{ text: string; defaultOpen?: boolean }> = ({ tex
 };
 
 /**
+ * token 数的显示格式。
+ *
+ * 万位以上折成 `12.3k`：边栏宽度只有三四百像素，六位数字会把同一行的
+ * "上下文 / 累计"挤到换行；而这里要的本来就是量级，不是精确到个位。
+ */
+const formatTokens = (value: number): string => {
+    if (!Number.isFinite(value) || value <= 0) return '0';
+    if (value < 1000) return String(Math.round(value));
+    if (value < 10000) return `${(value / 1000).toFixed(1)}k`;
+    return `${Math.round(value / 1000)}k`;
+};
+
+/**
+ * 用量条：当前上下文占用 + 会话累计。
+ *
+ * 三个数回答的是不同问题，必须分开显示，混成一个"总 token"会让人无法判断
+ * 到底该不该压缩：
+ *  - **上下文**：下一次请求要发多少 —— 它决定压缩的时机；
+ *  - **累计**：这个会话一共花了多少 —— 它回答成本；
+ *  - **调用次数**：估算占了几次 —— 它回答上面两个数有多可信。
+ *
+ * `estimated` 必须显式标出来（带 ~ 前缀 + 悬浮说明）。服务端不回 usage 时
+ * 这些数字是本地按字符类别估的，误差约 ±20%；把它当账单展示，
+ * 用户会照着它去核对计费。
+ */
+const UsageBar: React.FC<{ usage: AgentUsage; contextFull: boolean }> = ({ usage, contextFull }) => {
+    // 上下文占用**永远是估算**（见 AgentUsage.contextTokens），所以恒带 ~ 前缀；
+    // 累计值则按调用逐条区分 —— 界面上必须能看出哪个数可以拿去核对计费
+    const approx = '~';
+    // 进度条分母就是硬门槛本身：它是唯一决定"能不能继续"的那条线，
+    // 用别的数做分母会让进度条与禁用行为对不上
+    const ratio = Math.min(1, usage.contextTokens / CONTEXT_LIMIT_TOKENS);
+    const tone = contextFull ? 'bg-rose-400' : ratio > 0.8 ? 'bg-amber-400' : 'bg-emerald-400';
+
+    return (
+        <div className="space-y-1">
+            <div className="flex items-baseline gap-1.5 text-[10px]">
+                <Gauge className="h-3 w-3 shrink-0 self-center text-slate-600" />
+                <span className="text-slate-500">上下文</span>
+                <span className={`font-mono font-bold ${contextFull ? 'text-rose-300' : 'text-slate-300'}`}>
+                    {/* 空会话不写 "~0"：那个 ~ 是"这个数是估的"的标记，
+                        而没有上下文时没有可估的东西，写着反而像出了错 */}
+                    {usage.contextTokens > 0 ? `${approx}${formatTokens(usage.contextTokens)}` : '0'}
+                </span>
+                <span className="text-slate-600">/ {formatTokens(CONTEXT_LIMIT_TOKENS)}</span>
+                <span className="ml-auto font-mono text-slate-600" title={`累计 ${usage.totalTokens} token（输入 ${usage.promptTokens} / 输出 ${usage.completionTokens}）`}>
+                    累计 {formatTokens(usage.totalTokens)} · {usage.calls} 次调用
+                </span>
+            </div>
+
+            <div className="h-1 overflow-hidden rounded-full bg-white/8">
+                <div className={`h-full rounded-full transition-all ${tone}`} style={{ width: `${Math.max(2, ratio * 100)}%` }} />
+            </div>
+
+            {usage.estimatedCalls > 0 && (
+                <p className="text-[9px] leading-relaxed text-slate-600">
+                    {usage.estimatedCalls === usage.calls
+                        ? '全部为本地估算（服务端未返回 usage），误差约 ±20%'
+                        : `${usage.estimatedCalls} / ${usage.calls} 次为本地估算，其余为服务端实测`}
+                </p>
+            )}
+        </div>
+    );
+};
+
+/**
+ * 压缩分界线。
+ *
+ * 它在对话流里的位置就是**上下文的分界**：这条线以上的消息已不在模型上下文里，
+ * 只剩下面的摘要。不画这条线的话，用户看着满屏的历史会以为模型全都记得 ——
+ * 而追问上面某一步的细节时模型答不上来，那种"它明明看得到却说不知道"的
+ * 困惑比直接说"已压缩"糟糕得多。
+ *
+ * 摘要默认**折叠**，但标题上写明"以上 N 条已压成摘要"并给出查看入口：
+ * 平时它只是一条分界线（不该占掉半屏），而需要确认"模型还记得什么"时
+ * 点开就能看到全文。
+ */
+const CompactionDivider: React.FC<{ compaction: AgentCompaction }> = ({ compaction }) => {
+    const [open, setOpen] = useState(false);
+    const dropped = compaction.coveredMessages - compaction.summarizedMessages;
+
+    return (
+        <div className="rounded-xl border border-amber-400/25 bg-amber-500/[0.06] px-2.5 py-2">
+            <div className="flex items-center gap-1.5 text-[10px] font-bold text-amber-200">
+                <Archive className="h-3 w-3 shrink-0" />
+                上下文压缩
+                <span className="font-normal text-amber-200/70">
+                    以上 {compaction.coveredMessages} 条已压成摘要
+                </span>
+                <button
+                    onClick={() => setOpen((prev) => !prev)}
+                    className="ml-auto flex items-center gap-0.5 font-normal text-amber-300/70 transition hover:text-amber-100"
+                >
+                    {open ? '收起' : '查看摘要'}
+                    <ChevronRight className={`h-3 w-3 transition-transform ${open ? 'rotate-90' : ''}`} />
+                </button>
+            </div>
+
+            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[9px] text-amber-200/60">
+                <span>{compaction.beforeTokens} → {compaction.afterTokens} token</span>
+                {dropped > 0 && (
+                    // 差额必须说出来：那几条**连摘要都没进**（摘要器的输入有上限），
+                    // 信息是真的没了。只说"已压缩"会让用户以为压过的都还记得。
+                    <span className="text-rose-300/80">
+                        · 其中 {dropped} 条超出摘要输入上限，已直接丢弃
+                    </span>
+                )}
+            </div>
+
+            {/* 压完仍超门槛：输入框还锁着，必须继续警示而不是报"完成" */}
+            {compaction.overBudget && (
+                <p className="mt-1 flex items-start gap-1 text-[9px] leading-relaxed text-rose-300/90">
+                    <AlertTriangle className="mt-0.5 h-2.5 w-2.5 shrink-0" />
+                    压缩后仍超出上限（{compaction.afterTokens} token，门槛 {formatTokens(CONTEXT_LIMIT_TOKENS)}），
+                    输入框仍锁定。请再压一次，或清空对话。
+                </p>
+            )}
+
+            {open && (
+                <pre className="custom-scrollbar mt-1.5 max-h-64 overflow-auto whitespace-pre-wrap rounded-lg border border-amber-400/15 bg-slate-950/60 p-2 font-sans text-[10px] leading-relaxed text-amber-100/80">
+                    {compaction.summary}
+                </pre>
+            )}
+        </div>
+    );
+};
+
+/**
+ * 剪贴板写入。Electron 渲染进程里 navigator.clipboard 在页面失焦时可能不可用，
+ * 不写 fallback 的话"复制"按钮在最需要它的场合（刚从页面切回来）恰恰没反应。
+ * fallback 用老式的 execCommand：需要一个在文档里的 textarea，positions 不能 display:none。
+ */
+const copyText = async (text: string): Promise<boolean> => {
+    try {
+        await navigator.clipboard.writeText(text);
+        return true;
+    } catch {
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            const ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            return ok;
+        } catch {
+            return false;
+        }
+    }
+};
+
+/**
+ * 小复制按钮（已复制 1.2 秒内变绿勾确认）。
+ *
+ * 状态收在自己内部：调用方只给 text，不用为每个 pre 各维护一份 copied。
+ */
+const CopyButton: React.FC<{ text: string; title?: string }> = ({ text, title }) => {
+    const [copied, setCopied] = useState(false);
+    const timerRef = useRef<number | null>(null);
+    useEffect(() => () => { if (timerRef.current !== null) window.clearTimeout(timerRef.current); }, []);
+    return (
+        <button
+            onClick={() => {
+                void copyText(text).then((ok) => {
+                    if (!ok || copied) return;
+                    setCopied(true);
+                    timerRef.current = window.setTimeout(() => setCopied(false), 1200);
+                });
+            }}
+            className={`flex h-5 w-5 shrink-0 items-center justify-center rounded transition ${copied ? 'text-emerald-400' : 'text-slate-600 hover:bg-white/8 hover:text-slate-300'}`}
+            title={copied ? '已复制' : (title || '复制')}
+        >
+            {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+        </button>
+    );
+};
+
+/**
  * 正在流式输出的这一轮。
  *
  * 正文与推理分开渲染：推理是模型的草稿，用暗色斜体并默认折叠；
@@ -3154,16 +3355,36 @@ const StreamBubble: React.FC<{ content: string; reasoning: string }> = ({ conten
     </div>
 );
 
-const EmptyHint: React.FC = () => (
-    <div className="rounded-xl border border-dashed border-white/8 bg-white/[0.02] px-4 py-5 text-center">
-        <Bot className="mx-auto mb-2 h-5 w-5 text-slate-600" />
-        <p className="text-[11px] font-bold text-slate-400">Agent 在已登录的页面里干活</p>
-        <p className="mt-1.5 text-[10px] leading-relaxed text-slate-600">
-            它既能写 JavaScript（点击、翻页、调页面自身的函数），
-            也能直接改拦截规则、请求头、存储与 JWT —— 上面那几个标签页做的事，它都能做。
-        </p>
-    </div>
-);
+const EmptyHint: React.FC<{ onPick: (text: string) => void }> = ({ onPick }) => {
+    const examples = [
+        '看看这个页面的数据是从哪个接口来的',
+        '把页面里的价格都提取出来',
+    ];
+    return (
+        <div className="rounded-xl border border-dashed border-white/8 bg-white/[0.02] px-4 py-5 text-center">
+            <Bot className="mx-auto mb-2 h-5 w-5 text-slate-600" />
+            <p className="text-[11px] font-bold text-slate-400">Agent 在已登录的页面里干活</p>
+            <p className="mt-1.5 text-[10px] leading-relaxed text-slate-600">
+                它既能写 JavaScript（点击、翻页、调页面自身的函数），
+                也能直接改拦截规则、请求头、存储与 JWT —— 上面那几个标签页做的事，它都能做。
+            </p>
+            {/* 示例点一下直接填进输入框：空态的最大价值是告诉用户"第一句该说什么"，
+                静态文本等于把这句话的组织成本留给用户 */}
+            <div className="mt-2.5 space-y-1.5">
+                {examples.map((text) => (
+                    <button
+                        key={text}
+                        onClick={() => onPick(text)}
+                        className="w-full truncate rounded-lg border border-white/8 bg-white/[0.03] px-2 py-1.5 text-left text-[10px] text-slate-500 transition hover:border-indigo-400/30 hover:text-slate-300"
+                        title={text}
+                    >
+                        试试：{text}
+                    </button>
+                ))}
+            </div>
+        </div>
+    );
+};
 
 /**
  * 一条消息右上角的行内操作（回退 / 删除）。
@@ -3185,7 +3406,7 @@ const MessageActions: React.FC<{
             onClick={onRewind}
             disabled={disabled}
             className="flex h-5 w-5 items-center justify-center rounded text-slate-500 transition hover:bg-indigo-500/15 hover:text-indigo-300 disabled:cursor-not-allowed"
-            title="回到这里：这一轮及其之后的对话都会被移除，提问会填回输入框"
+            title="回到这里：这一条及其之后的对话都会被移除，是提问时原文会填回输入框"
         >
             <Undo2 className="h-3 w-3" />
         </button>
@@ -3210,6 +3431,36 @@ const MessageRow: React.FC<{
 }> = ({ message, expanded, onToggle, canEdit, onRewind, onRemove }) => {
     const row = 'group/msg';
 
+    /**
+     * 压缩分界线不是一次发言：它记录的是"上下文在这里断过一次"。
+     *
+     * 给它一个删除按钮，语义是**撤销这次压缩** —— 删掉它之后，
+     * 它覆盖的原文会重新进上下文（见 useAgent 的 splitByCompaction）。
+     * 这是刻意的：压缩是模型生成的摘要，质量不满意时用户必须有退路，
+     * 而"删掉这条记录"是最自然的表达方式。
+     *
+     * 不给回退按钮：回退是"从某条起往后全砍掉"，而分界线不属于任何一次发言。
+     * 对分界线回退在功能上并非不可行，但那条线只是压缩的记账位置，
+     * 用户想撤销压缩时"删掉它"比"从它开始砍"更贴切，两个按钮并存只会让人犹豫。
+     */
+    if (message.compaction) {
+        return (
+            <div className="group/msg relative">
+                <CompactionDivider compaction={message.compaction} />
+                <span className="absolute right-1.5 top-1.5 opacity-0 transition-opacity group-hover/msg:opacity-100 focus-within:opacity-100">
+                    <button
+                        onClick={onRemove}
+                        disabled={!canEdit}
+                        className="flex h-5 w-5 items-center justify-center rounded text-amber-300/70 transition hover:bg-rose-500/20 hover:text-rose-200 disabled:cursor-not-allowed disabled:opacity-30"
+                        title="撤销这次压缩：删掉这条分界线后，被它覆盖的原文会重新进入上下文"
+                    >
+                        <Trash2 className="h-3 w-3" />
+                    </button>
+                </span>
+            </div>
+        );
+    }
+
     if (message.role === 'user') {
         return (
             <div className={`${row} flex items-start justify-end gap-2`}>
@@ -3232,8 +3483,13 @@ const MessageRow: React.FC<{
                 </div>
                 <div className="min-w-0 max-w-[85%] flex-1 space-y-1.5">
                     {message.reasoning && <ReasoningBlock text={message.reasoning} />}
-                    <div className="whitespace-pre-wrap rounded-xl rounded-tl-sm bg-white/6 px-2.5 py-2 text-[11px] leading-relaxed text-slate-200">
+                    {/* 复制挂在气泡上而不是行内操作里：结论经常要贴到别处用，
+                        藏在 hover 菜单里等于每次都要先找到那条消息再悬停 */}
+                    <div className="group/copy relative whitespace-pre-wrap rounded-xl rounded-tl-sm bg-white/6 px-2.5 py-2 text-[11px] leading-relaxed text-slate-200">
                         {message.content}
+                        <span className="absolute right-1 top-1 opacity-0 transition-opacity group-hover/copy:opacity-100">
+                            <CopyButton text={message.content} title="复制这条回答" />
+                        </span>
                     </div>
                 </div>
                 <MessageActions disabled={!canEdit} onRewind={onRewind} onRemove={onRemove} />
@@ -3252,6 +3508,16 @@ const MessageRow: React.FC<{
                 <button onClick={onToggle} className="flex w-full items-center gap-1.5 text-left">
                     <Terminal className="h-3 w-3 shrink-0 text-slate-500" />
                     <span className="min-w-0 flex-1 truncate text-[10px] font-bold text-slate-300">{message.content}</span>
+                    {/* 这一步花了多少。折叠态就显示：一步步累积起来才是成本的大头，
+                        藏在展开区里等于没人会去看 */}
+                    {message.usage && (
+                        <span
+                            className="shrink-0 font-mono text-[9px] text-slate-600"
+                            title={`输入 ${message.usage.promptTokens} / 输出 ${message.usage.completionTokens} token${message.usage.estimated ? '（本地估算）' : '（服务端实测）'}`}
+                        >
+                            {message.usage.estimated ? '~' : ''}{formatTokens(message.usage.totalTokens)}
+                        </span>
+                    )}
                     <span className="shrink-0 rounded bg-white/8 px-1 py-0.5 font-mono text-[9px] text-slate-400">{message.tool}</span>
                     <ChevronRight className={`h-3 w-3 shrink-0 text-slate-600 transition-transform ${expanded ? 'rotate-90' : ''}`} />
                 </button>
@@ -3266,6 +3532,9 @@ const MessageRow: React.FC<{
                                 <div className="mb-1 flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider text-slate-600">
                                     <Code className="h-2.5 w-2.5" />
                                     脚本
+                                    <span className="ml-auto">
+                                        <CopyButton text={message.script} title="复制脚本" />
+                                    </span>
                                 </div>
                                 <pre className="custom-scrollbar max-h-40 overflow-auto rounded-lg border border-white/8 bg-slate-950 p-2 font-mono text-[10px] leading-relaxed text-cyan-200">
                                     {message.script}
@@ -3276,6 +3545,11 @@ const MessageRow: React.FC<{
                             <div className="mb-1 flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider text-slate-600">
                                 <Braces className="h-2.5 w-2.5" />
                                 返回值
+                                {message.result && (
+                                    <span className="ml-auto">
+                                        <CopyButton text={message.result} title="复制返回值" />
+                                    </span>
+                                )}
                             </div>
                             <pre className="custom-scrollbar max-h-40 overflow-auto whitespace-pre-wrap rounded-lg border border-white/8 bg-slate-950 p-2 font-mono text-[10px] leading-relaxed text-slate-400">
                                 {message.result || '(空)'}
@@ -3294,7 +3568,16 @@ const ScriptList: React.FC<{
     scripts: AgentScript[];
     onRemove: (id: string) => void;
     onToggle: (id: string) => void;
-}> = ({ scripts, onRemove, onToggle }) => {
+    /**
+     * 手动执行。跑完不切标签页：结果直接写回这张卡片（lastResult / 最近执行），
+     * 用户点完就能在原地看到。
+     */
+    onRun: (id: string) => Promise<unknown>;
+    /** Agent 运行中禁用：手动执行会与模型的步骤交错读页面（见 runScriptNow） */
+    runDisabled: boolean;
+}> = ({ scripts, onRemove, onToggle, onRun, runDisabled }) => {
+    // 正在跑的那张卡片转圈圈。状态收在这里：跑完即清，不需要提升到边栏。
+    const [runningId, setRunningId] = useState<string | null>(null);
     if (scripts.length === 0) {
         return (
             <div className="rounded-xl border border-dashed border-white/8 bg-white/[0.02] px-4 py-6 text-center">
@@ -3331,6 +3614,20 @@ const ScriptList: React.FC<{
                             title="删除脚本"
                         >
                             <Trash2 className="h-3 w-3" />
+                        </button>
+                        <button
+                            onClick={() => {
+                                if (runningId || runDisabled) return;
+                                setRunningId(script.id);
+                                void Promise.resolve(onRun(script.id)).finally(() => {
+                                    setRunningId((prev) => (prev === script.id ? null : prev));
+                                });
+                            }}
+                            disabled={runDisabled || runningId !== null}
+                            className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-slate-600 transition hover:bg-emerald-500/15 hover:text-emerald-300 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-600"
+                            title={runDisabled ? 'Agent 运行中，先停止再手动执行' : '在当前页面立即执行一次'}
+                        >
+                            {runningId === script.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
                         </button>
                     </div>
 
@@ -3566,8 +3863,86 @@ const SIDEBAR_MAX = 720;
 const SIDEBAR_DEFAULT = 400;
 const SIDEBAR_RAIL = 48;
 const SIDEBAR_STORE_KEY = 'theplay.browse.agent';
+/** 当前标签页：只记 id。记整个 prefs 对象也行，但标签是高频切换，
+ * 每次都全量写 prefs 会把宽度/全屏这些低频值反复序列化 —— 分开存 */
+const AGENT_TAB_STORE_KEY = 'theplay.browse.agent.tab';
+/** 输入框草稿：刷新/重启不丢。发送成功后清空（submit 里 setInput('') 会连带落盘） */
+const AGENT_DRAFT_STORE_KEY = 'theplay.browse.agent.draft';
 
 interface SidebarPrefs { open: boolean; width: number; fullscreen: boolean }
+
+/**
+ * 导出菜单的两项。带 / 不带思考的差异只在 includeReasoning 这一个开关上，
+ * 文案写在这里而不是散在 JSX 里，将来加「导出为 JSON」时只动这一个数组。
+ */
+const AGENT_EXPORT_ITEMS: { label: string; hint: string; includeReasoning: boolean }[] = [
+    { label: '带思考导出', hint: '推理过程一并写入（折叠展示）', includeReasoning: true },
+    { label: '不带思考导出', hint: '只留结论、脚本与返回值', includeReasoning: false },
+];
+
+/**
+ * 会话导出菜单。
+ *
+ * 做成「按钮 + 菜单」而不是并排两个按钮：这条操作条上还挂着「规则有改动」
+ * 与「清空对话」，侧边栏最窄 320px，再占一个按钮就会被挤成两行。
+ * 展开与点击外部关闭沿用 EnginePicker 那一套，不引浮层库。
+ */
+const AgentExportMenu: React.FC<{ messages: AgentMessage[] }> = ({ messages }) => {
+    const [open, setOpen] = useState(false);
+    const boxRef = useRef<HTMLDivElement | null>(null);
+
+    useEffect(() => {
+        if (!open) return;
+        const close = (event: PointerEvent) => {
+            if (!boxRef.current?.contains(event.target as Node)) setOpen(false);
+        };
+        document.addEventListener('pointerdown', close);
+        return () => document.removeEventListener('pointerdown', close);
+    }, [open]);
+
+    return (
+        <div ref={boxRef} className="relative">
+            <button
+                type="button"
+                onClick={() => setOpen((prev) => !prev)}
+                aria-expanded={open}
+                aria-haspopup="menu"
+                // 导出只读，运行中也可用：它导的是**已定稿**的记录，
+                // 在飞的那一轮还在 streaming 里，导出件里不会有它
+                title="导出会话为 Markdown 单文件"
+                className="flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-slate-400 transition hover:bg-white/10 hover:text-slate-200"
+            >
+                <Download className="h-3 w-3" />
+                导出
+                <ChevronDown className={`h-2.5 w-2.5 transition-transform ${open ? 'rotate-180' : ''}`} />
+            </button>
+
+            {open && (
+                // 向右贴齐：这排按钮靠着侧边栏右缘，往左展开才不会顶出去
+                <div
+                    role="menu"
+                    className="animate-in fade-in zoom-in-95 absolute right-0 top-7 z-50 w-52 overflow-hidden rounded-xl border border-white/12 bg-slate-950/95 p-1 shadow-[0_16px_40px_rgba(0,0,0,0.6)] backdrop-blur-xl"
+                >
+                    {AGENT_EXPORT_ITEMS.map((item) => (
+                        <button
+                            key={item.label}
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                                exportAgentSession(messages, { includeReasoning: item.includeReasoning });
+                                setOpen(false);
+                            }}
+                            className="flex w-full flex-col items-start gap-0.5 rounded-lg px-2 py-1.5 text-left transition hover:bg-white/6"
+                        >
+                            <span className="text-[11px] font-bold text-slate-200">{item.label}</span>
+                            <span className="text-[9px] leading-relaxed text-slate-500">{item.hint}</span>
+                        </button>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+};
 
 /**
  * Agent 工作区：浏览器面板右侧的**常驻边栏**。
@@ -3595,8 +3970,15 @@ const AgentSidebar: React.FC<{
      * 不会被重新填上，看起来像"右键没反应"。
      */
     prefill?: { seq: number; text: string } | null;
-}> = ({ agent, tamper, currentUrl, prefill }) => {
-    const { messages, scripts, status, error, streaming, actions, canEdit } = agent;
+    /**
+     * 聚焦请求序号（Ctrl+K / 右键菜单未来扩展）。
+     *
+     * 用 seq 而不用 boolean：boolean 翻回去还得再翻回来，多一次往返；
+     * seq 只增不减，effect 对每次递增响应一次。
+     */
+    focusSeq?: number;
+}> = ({ agent, tamper, currentUrl, prefill, focusSeq }) => {
+    const { messages, scripts, status, error, streaming, actions, canEdit, usage, contextFull, canCompact, compacting, compactRatio } = agent;
 
     const [prefs, setPrefs] = useState<SidebarPrefs>(() => {
         const saved = loadJSON<Partial<SidebarPrefs> | null>(SIDEBAR_STORE_KEY, null, '');
@@ -3609,8 +3991,20 @@ const AgentSidebar: React.FC<{
         };
     });
 
-    const [activeTab, setActiveTab] = useState<AgentTab>('chat');
-    const [input, setInput] = useState('');
+    /**
+     * 当前标签页要落盘：调规则调到一半收起边栏腾地方看页面，
+     * 再展开时回到对话页等于刚才的上下文全断 —— 高频动作不能丢状态。
+     * 非法值回退到 chat（版本升级删掉某个标签时，存量偏好不能把界面卡死）。
+     */
+    const [activeTab, setActiveTabState] = useState<AgentTab>(() => {
+        const saved = loadJSON<string | null>(AGENT_TAB_STORE_KEY, null, '');
+        return AGENT_TABS.some((tab) => tab.id === saved) ? (saved as AgentTab) : 'chat';
+    });
+    const selectTab = useCallback((tab: AgentTab) => {
+        setActiveTabState(tab);
+        saveJSON(AGENT_TAB_STORE_KEY, tab, '');
+    }, []);
+    const [input, setInput] = useState(() => loadJSON<string>(AGENT_DRAFT_STORE_KEY, '', '') || '');
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
     const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
     const [resizing, setResizing] = useState(false);
@@ -3618,8 +4012,37 @@ const AgentSidebar: React.FC<{
     const draft = useTamperDraft(tamper);
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const asideRef = useRef<HTMLElement | null>(null);
+    const inputRef = useRef<HTMLTextAreaElement | null>(null);
     const resizeCleanupRef = useRef<(() => void) | null>(null);
     const busy = status !== 'idle';
+    /**
+     * 压缩按钮的禁用判据，三个原因分开表述。
+     *
+     * 分开是为了给**不同的提示文案**：笼统地"禁用"而不说为什么，用户只会
+     * 反复点它。运行中与轮数不足是两回事 —— 前者等一等就好，后者得先聊几轮。
+     */
+    const compactDisabled = busy || compacting || !canCompact;
+    // 按当前档位至少需要几条消息才压得动：40% 档要 3 条（floor(3*0.4)=1），
+    // 60%/80% 档要 2 条，100% 档 1 条即可。界面不得手抄这个数。
+    const minCompactMessages = Math.max(1, Math.ceil(1 / compactRatio));
+    const compactHint = busy
+        ? 'Agent 运行中，先停止再压缩'
+        : compacting
+            ? '正在压缩…'
+            : !canCompact
+                ? `按当前档位（${Math.round(compactRatio * 100)}%）至少需要 ${minCompactMessages} 条消息才有可压的内容`
+                : `把较早的消息按当前档位（${Math.round(compactRatio * 100)}%）压成摘要，剩下的原样保留。压缩不可逆，但可以删掉分界线撤销`;
+
+    /**
+     * 输入框能否使用。达到硬门槛即锁死，**没有例外**。
+     *
+     * 与 busy 分开算，因为两者给用户的出路完全不同：运行中要等，超限要压缩。
+     * 合成一个"不可用"会让用户在两件毫不相干的事之间猜。
+     * 压缩中同样禁用：compact 手上的 digest 与锚点是开始那一刻算的，
+     * 中途进来一轮会让分界线按过期位置落下（send 里还有第二道闸门）。
+     */
+    const inputLocked = contextFull;
+    const inputDisabled = inputLocked || busy || compacting;
 
     const persist = useCallback((next: SidebarPrefs) => {
         setPrefs(next);
@@ -3639,14 +4062,39 @@ const AgentSidebar: React.FC<{
     useEffect(() => {
         if (!prefill || !prefill.text) return;
         setInput((prev) => (prev.trim() ? prev : prefill.text));
-        setActiveTab('chat');
+        selectTab('chat');
         setPrefs((prev) => {
             if (prev.open) return prev;
             const next = { ...prev, open: true };
             saveJSON(SIDEBAR_STORE_KEY, next, '');
             return next;
         });
-    }, [prefill]);
+    }, [prefill, selectTab]);
+
+    /**
+     * 外部聚焦请求（Ctrl+K）。
+     *
+     * 三件事一起做：切到对话页 + 展开 + 聚焦输入框 —— 只做聚焦而不展开，
+     * 焦点会落在一个看不见的输入框里，用户以为快捷键坏了。
+     * setTimeout 是等展开那一帧提交完再 focus，否则 focus 时元素还 display:none。
+     */
+    useEffect(() => {
+        if (!focusSeq) return;
+        selectTab('chat');
+        setPrefs((prev) => {
+            if (prev.open) return prev;
+            const next = { ...prev, open: true };
+            saveJSON(SIDEBAR_STORE_KEY, next, '');
+            return next;
+        });
+        const timer = window.setTimeout(() => inputRef.current?.focus(), 50);
+        return () => window.clearTimeout(timer);
+    }, [focusSeq, selectTab]);
+
+    // 输入草稿落盘：半句话写到一半刷新页面，回来还能接着写
+    useEffect(() => {
+        saveJSON(AGENT_DRAFT_STORE_KEY, input, '');
+    }, [input]);
 
     /**
      * Esc 退出全屏。
@@ -3741,10 +4189,13 @@ const AgentSidebar: React.FC<{
 
     const submit = useCallback(() => {
         const text = input.trim();
-        if (!text || busy) return;
+        // inputLocked 也要拦：textarea 已 disabled，但 Enter 走的是 keydown，
+        // 而 disabled 元素不触发 keydown —— 这层是防"锁上那一帧恰好按了回车"，
+        // 以及未来任何绕过 disabled 的调用路径。send() 里还有一道同样的闸门。
+        if (!text || busy || inputLocked) return;
         setInput('');
         void actions.send(text);
-    }, [actions, busy, input]);
+    }, [actions, busy, input, inputLocked]);
 
     const toggleExpand = useCallback((id: string) => {
         setExpanded((prev) => {
@@ -3758,6 +4209,19 @@ const AgentSidebar: React.FC<{
     const hostName = useMemo(() => {
         try { return new URL(currentUrl).hostname; } catch { return ''; }
     }, [currentUrl]);
+
+    /**
+     * 最后一句用户提问 —— 错误横幅上"重试"按钮的重发内容。
+     *
+     * 从后往前找第一条 user 消息：失败的那一轮提问一定在，
+     * 中断（stop）不留 error所以不会误挂。
+     */
+    const lastPrompt = useMemo(() => {
+        for (let i = messages.length - 1; i >= 0; i -= 1) {
+            if (messages[i].role === 'user') return messages[i].content;
+        }
+        return '';
+    }, [messages]);
 
     const isRuleTab = activeTab === 'rules' || activeTab === 'headers';
 
@@ -3802,7 +4266,15 @@ const AgentSidebar: React.FC<{
             failed: saveStatus === 'failed',
         }
         : { incomplete: false, overridden: false, dirty: false, failed: false };
-    const hasBanner = banners.incomplete || banners.overridden || banners.dirty || banners.failed;
+    /**
+     * 上下文超限横幅：**任何标签页都显示**，包括对话页。
+     *
+     * 与"该压缩了"那种提示不同，这是一条硬拦截：输入框已锁死，用户如果
+     * 正好在规则页调东西，不告诉他为什么就切回去，他会对着一个打不了字的
+     * 输入框发懵。所以这里不做"只在对话页之外显示"的省略。
+     */
+    const showContextBanner = contextFull;
+    const hasBanner = banners.incomplete || banners.overridden || banners.dirty || banners.failed || showContextBanner;
 
     /* ------------------------------ 收起：竖轨 ------------------------------ */
 
@@ -3933,7 +4405,7 @@ const AgentSidebar: React.FC<{
                             return (
                                 <button
                                     key={tab.id}
-                                    onClick={() => setActiveTab(tab.id)}
+                                    onClick={() => selectTab(tab.id)}
                                     className={`relative flex flex-1 flex-col items-center gap-0.5 rounded-lg py-1.5 transition-all ${isActive ? 'bg-white/10 text-white' : 'text-slate-500 hover:bg-white/5 hover:text-slate-300'
                                         }`}
                                     title={tab.label}
@@ -3948,6 +4420,14 @@ const AgentSidebar: React.FC<{
                                 </button>
                             );
                         })}
+                    </div>
+
+                    {/* 用量条：常驻在操作条下方（不只是对话页）。
+                        规则页 / 存储页开着时也看得见上下文涨到哪了 —— 那些页面
+                        同样是在跟同一个会话打交道，而用户在那里待着的时候
+                        恰恰最容易忘掉对话已经很长了。 */}
+                    <div className="shrink-0 border-b border-white/8 px-3 py-2">
+                        <UsageBar usage={usage} contextFull={contextFull} />
                     </div>
 
                     {/* 规则页的上下文操作条：应用 / 清空对话 */}
@@ -3977,6 +4457,60 @@ const AgentSidebar: React.FC<{
                                         {messages.length} 条记录
                                         {!canEdit && ' · 运行中不可编辑'}
                                     </span>
+                                    {/* Agent 在对话里改过规则：用户此刻还在对话页，
+                                        不给个入口他要自己发现"规则"页多了个横幅。
+                                        点过去即看草稿，不自动应用 —— 应用永远是显式动作 */}
+                                    {draft.overridden && (
+                                        <button
+                                            onClick={() => selectTab('rules')}
+                                            className="flex items-center gap-1 rounded-lg border border-indigo-400/30 bg-indigo-500/12 px-2 py-1 text-[10px] font-bold text-indigo-200 transition hover:bg-indigo-500/20"
+                                            title="Agent 在对话里改过规则，去规则页查看"
+                                        >
+                                            规则有改动
+                                            <ArrowRight className="h-3 w-3" />
+                                        </button>
+                                    )}
+                                    <AgentExportMenu messages={messages} />
+                                    {/* 压缩：**常驻**按钮，不按任何阈值显隐 ——
+                                        压缩是不可逆的历史改写，什么时候压由用户决定，
+                                        程序只负责在越线时拦住他。藏起来更糟：
+                                        他连这个功能存在都不知道。
+                                        状态全走 disabled + 分开的提示文案；
+                                        达到硬门槛时改用实心红色把它顶出来
+                                        （那一刻它是唯一的出路）。 */}
+                                    {/* 压缩档位：每次覆盖分界线之后现存消息的前百分之几。
+                                        常驻在压缩按钮旁边 —— 藏进设置里的话，用户会在"压了但没压够"
+                                        和"压得太多"之间反复横跳却找不到原因。 */}
+                                    <div
+                                        className="flex items-center gap-0.5 rounded-lg border border-white/10 bg-white/5 px-1 py-0.5"
+                                        title={`压缩档位：覆盖前 ${Math.round(compactRatio * 100)}% 的消息，剩下的原样保留`}
+                                    >
+                                        {COMPACT_RATIOS.map((ratio) => (
+                                            <button
+                                                key={ratio}
+                                                onClick={() => actions.setCompactRatio(ratio)}
+                                                disabled={busy || compacting}
+                                                className={`rounded px-1 py-0.5 text-[10px] transition disabled:cursor-not-allowed disabled:opacity-40 ${ratio === compactRatio
+                                                    ? 'bg-amber-500/25 font-bold text-amber-100'
+                                                    : 'text-slate-500 hover:bg-white/10 hover:text-slate-300'
+                                                    }`}
+                                            >
+                                                {Math.round(ratio * 100)}%
+                                            </button>
+                                        ))}
+                                    </div>
+                                    <button
+                                        onClick={() => void actions.compact()}
+                                        disabled={compactDisabled}
+                                        className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] transition disabled:cursor-not-allowed disabled:opacity-40 ${contextFull
+                                            ? 'border-rose-400/50 bg-rose-500/25 font-bold text-rose-100 hover:bg-rose-500/35'
+                                            : 'border-white/10 bg-white/5 text-slate-400 hover:bg-white/10 hover:text-slate-200'
+                                            }`}
+                                        title={compactHint}
+                                    >
+                                        {compacting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Archive className="h-3 w-3" />}
+                                        {compacting ? '压缩中…' : '压缩上下文'}
+                                    </button>
                                     <button
                                         onClick={actions.clear}
                                         disabled={!canEdit}
@@ -3994,6 +4528,45 @@ const AgentSidebar: React.FC<{
                     {/* 提示横幅。半空规则会被引擎跳过，但面板上显示「启用中」——
             不点出来用户会以为规则生效了 */}
                     <div className={`flex shrink-0 flex-col gap-1.5 px-3 ${hasBanner ? 'pt-2.5' : ''}`}>
+                        {/* 上下文达硬门槛：这是一条**拦截**，不是提示。
+                            输入框已锁死，所以必须说清"为什么打不了字"和"怎么恢复"。
+
+                            canCompact 为假时（按当前档位算不出可压的消息）不给压缩按钮 ——
+                            那时压缩压不出任何东西，指引用户去点一个按不动的按钮
+                            比不提示更糟。那种情况只剩清空一条路，文案照实说。 */}
+                        {showContextBanner && (
+                            <div className="flex items-start justify-between gap-2 rounded-lg border border-rose-400/30 bg-rose-500/10 px-2.5 py-1.5 text-[10px] leading-relaxed text-rose-200">
+                                <span className="flex items-start gap-2">
+                                    <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
+                                    <span>
+                                        上下文已达 <strong className="text-rose-100">{formatTokens(CONTEXT_LIMIT_TOKENS)}</strong> token 上限
+                                        （当前 {formatTokens(usage.contextTokens)}），
+                                        <strong className="text-rose-100">输入框已锁定</strong>。
+                                        {canCompact
+                                            ? '压缩之后即可继续。'
+                                            : '按当前档位没有可压的消息，只能清空对话重开。'}
+                                    </span>
+                                </span>
+                                {canCompact ? (
+                                    <button
+                                        onClick={() => { selectTab('chat'); void actions.compact(); }}
+                                        disabled={compactDisabled}
+                                        className="shrink-0 rounded-md border border-rose-400/40 bg-rose-500/20 px-2 py-0.5 font-bold text-rose-100 transition hover:bg-rose-500/30 disabled:cursor-not-allowed disabled:opacity-40"
+                                    >
+                                        {compacting ? '压缩中…' : '立即压缩'}
+                                    </button>
+                                ) : (
+                                    <button
+                                        onClick={actions.clear}
+                                        disabled={!canEdit}
+                                        className="shrink-0 rounded-md border border-rose-400/40 bg-rose-500/20 px-2 py-0.5 font-bold text-rose-100 transition hover:bg-rose-500/30 disabled:cursor-not-allowed disabled:opacity-40"
+                                    >
+                                        清空对话
+                                    </button>
+                                )}
+                            </div>
+                        )}
+
                         {banners.incomplete && (
                             <div className="flex items-start gap-2 rounded-lg border border-amber-400/20 bg-amber-500/8 px-2.5 py-1.5 text-[10px] leading-relaxed text-amber-200">
                                 <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
@@ -4045,7 +4618,7 @@ const AgentSidebar: React.FC<{
                         <div className="flex min-h-0 flex-1 flex-col px-3 pb-3">
                             <div ref={scrollRef} className="custom-scrollbar min-h-0 flex-1 space-y-2.5 overflow-y-auto py-2.5 pr-1">
                                 {messages.length === 0 ? (
-                                    <EmptyHint />
+                                    <EmptyHint onPick={(text) => setInput((prev) => (prev.trim() ? prev : text))} />
                                 ) : (
                                     messages.map((message) => (
                                         <MessageRow
@@ -4082,44 +4655,83 @@ const AgentSidebar: React.FC<{
                             {error && (
                                 <div className="mb-2 flex shrink-0 items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-950/40 px-2.5 py-1.5 text-[10px] text-rose-300">
                                     <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
-                                    <span className="break-all">{error}</span>
+                                    <span className="min-w-0 flex-1 break-all">{error}</span>
+                                    {/* 重试：用同一句提问再跑一次。失败的那一轮留作记录，
+                                        不删 —— 删了等于销毁"我试过什么"的证据。
+                                        超限或压缩中时不显示：send() 会直接拒绝，挂一个按不动的
+                                        按钮只会让用户以为"重试也没用" */}
+                                    {!busy && !inputLocked && !compacting && lastPrompt && (
+                                        <button
+                                            onClick={() => void actions.send(lastPrompt)}
+                                            className="flex shrink-0 items-center gap-1 rounded-md border border-rose-400/30 px-1.5 py-0.5 font-bold text-rose-200 transition hover:bg-rose-500/15"
+                                            title="用同一句提问再跑一次"
+                                        >
+                                            <RotateCw className="h-3 w-3" />
+                                            重试
+                                        </button>
+                                    )}
                                 </div>
                             )}
 
-                            {/* 输入区 */}
-                            <div className="flex shrink-0 items-end gap-1.5 border-t border-white/8 pt-2.5">
-                                <textarea
-                                    value={input}
-                                    onChange={(event) => setInput(event.target.value)}
-                                    onKeyDown={(event) => {
-                                        if (event.key === 'Enter' && !event.shiftKey) {
-                                            event.preventDefault();
-                                            submit();
-                                        }
-                                    }}
-                                    rows={2}
-                                    placeholder="描述你要做的事，例如：把接口返回的 is_vip 改成 true，并让页面相信"
-                                    className="custom-scrollbar min-h-0 flex-1 resize-none rounded-xl border border-white/10 bg-slate-950/70 p-2.5 text-[11px] leading-relaxed text-slate-200 outline-none transition placeholder:text-slate-600 focus:border-indigo-400/40"
-                                />
-                                {busy ? (
-                                    <button
-                                        onClick={actions.stop}
-                                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-rose-600 text-white transition hover:bg-rose-500"
-                                        title="停止"
-                                    >
-                                        <Square className="h-3.5 w-3.5" />
-                                    </button>
-                                ) : (
-                                    <button
-                                        onClick={submit}
-                                        disabled={!input.trim()}
-                                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-white text-slate-900 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-30"
-                                        title="发送（Enter）"
-                                    >
-                                        <Send className="h-3.5 w-3.5" />
-                                    </button>
-                                )}
-                            </div>
+                            {/* 输入区。
+                                超限时整个锁死（textarea 与发送按钮都 disabled），
+                                并把它换成一条明确说明 —— 只把 placeholder 改掉的话，
+                                用户仍会往里打字然后奇怪为什么发不出去。 */}
+                            {inputLocked ? (
+                                <div className="flex shrink-0 items-center gap-2 rounded-xl border border-rose-400/30 bg-rose-500/10 px-2.5 py-2.5 text-[10px] leading-relaxed text-rose-200">
+                                    <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                                    <span className="min-w-0 flex-1">
+                                        上下文已达 {formatTokens(CONTEXT_LIMIT_TOKENS)} token 上限，输入已锁定。
+                                        {canCompact ? '点上方「压缩上下文」把旧消息压成摘要后即可继续。' : '请先清空对话。'}
+                                    </span>
+                                    {canCompact && (
+                                        <button
+                                            onClick={() => void actions.compact()}
+                                            disabled={compactDisabled}
+                                            className="flex shrink-0 items-center gap-1 rounded-lg border border-rose-400/40 bg-rose-500/20 px-2 py-1 font-bold text-rose-100 transition hover:bg-rose-500/30 disabled:cursor-not-allowed disabled:opacity-40"
+                                        >
+                                            {compacting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Archive className="h-3 w-3" />}
+                                            {compacting ? '压缩中…' : '压缩'}
+                                        </button>
+                                    )}
+                                </div>
+                            ) : (
+                                <div className="flex shrink-0 items-end gap-1.5 border-t border-white/8 pt-2.5">
+                                    <textarea
+                                        ref={inputRef}
+                                        value={input}
+                                        disabled={inputDisabled}
+                                        onChange={(event) => setInput(event.target.value)}
+                                        onKeyDown={(event) => {
+                                            if (event.key === 'Enter' && !event.shiftKey) {
+                                                event.preventDefault();
+                                                submit();
+                                            }
+                                        }}
+                                        rows={2}
+                                        placeholder="描述你要做的事，例如：把接口返回的 is_vip 改成 true，并让页面相信"
+                                        className="custom-scrollbar min-h-0 flex-1 resize-none rounded-xl border border-white/10 bg-slate-950/70 p-2.5 text-[11px] leading-relaxed text-slate-200 outline-none transition placeholder:text-slate-600 focus:border-indigo-400/40 disabled:cursor-not-allowed disabled:opacity-50"
+                                    />
+                                    {busy ? (
+                                        <button
+                                            onClick={actions.stop}
+                                            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-rose-600 text-white transition hover:bg-rose-500"
+                                            title="停止"
+                                        >
+                                            <Square className="h-3.5 w-3.5" />
+                                        </button>
+                                    ) : (
+                                        <button
+                                            onClick={submit}
+                                            disabled={!input.trim() || inputDisabled}
+                                            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-white text-slate-900 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-30"
+                                            title="发送（Enter）"
+                                        >
+                                            <Send className="h-3.5 w-3.5" />
+                                        </button>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     ) : (
                         <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-2.5">
@@ -4135,7 +4747,7 @@ const AgentSidebar: React.FC<{
                             {activeTab === 'storage' && <StorageTab tamper={tamper} currentUrl={currentUrl} />}
                             {activeTab === 'jwt' && <JwtTab tamper={tamper} />}
                             {activeTab === 'scripts' && (
-                                <ScriptList scripts={scripts} onRemove={actions.removeScript} onToggle={actions.toggleScript} />
+                                <ScriptList scripts={scripts} onRemove={actions.removeScript} onToggle={actions.toggleScript} onRun={actions.runScriptNow} runDisabled={busy} />
                             )}
                             {activeTab === 'kb' && <KbTab />}
                         </div>
@@ -4220,6 +4832,13 @@ export const BrowsePanel: React.FC<BrowsePanelProps> = ({
      * effect 不跑，输入框里已经删掉的内容不会被重新填上。
      */
     const [agentPrefill, setAgentPrefill] = useState<{ seq: number; text: string } | null>(null);
+    /**
+     * Agent 输入框聚焦请求（Ctrl+K）。
+     *
+     * 只增不减的序号，AgentSidebar 侧对每次递增响应一次
+     * （切对话页 + 展开 + 聚焦，见那边的注释）。
+     */
+    const [agentFocusSeq, setAgentFocusSeq] = useState(0);
 
     /**
      * 界面层的浏览器动作（Ctrl+L 聚焦地址栏 / 右键"让 Agent 分析这个元素"）。
@@ -4249,6 +4868,11 @@ export const BrowsePanel: React.FC<BrowsePanelProps> = ({
         if (command.action === 'searchSelection') {
             handleNavigate(String(command.arg?.text || ''));
         }
+        if (command.action === 'focusAgentInput') {
+            // 地址栏→Agent 是最高频的键盘流：Ctrl+L 定位页面，Ctrl+K 提问
+            setAgentFocusSeq((prev) => prev + 1);
+            return;
+        }
     }), [onUiAction, handleNavigate]);
 
     /**
@@ -4262,7 +4886,12 @@ export const BrowsePanel: React.FC<BrowsePanelProps> = ({
     useEffect(() => {
         if (!findOpen && !findQuery) return;
         const onKeyDown = (event: KeyboardEvent) => {
-            if (event.key === 'Escape') closeFind();
+            if (event.key !== 'Escape') return;
+            // 可编辑控件里的 Esc 归各自处理（地址栏是失焦、输入框是取消）：
+            // 不拦的话，在地址栏按一下 Esc 会连带关掉后台开着的查找条、
+            // 还顺手 stopFindInPage 清掉页面上的高亮
+            if (isEditableTarget(event.target)) return;
+            closeFind();
         };
         window.addEventListener('keydown', onKeyDown);
         return () => window.removeEventListener('keydown', onKeyDown);
@@ -4456,6 +5085,7 @@ export const BrowsePanel: React.FC<BrowsePanelProps> = ({
                 tamper={tamper}
                 currentUrl={activeTab.url}
                 prefill={agentPrefill}
+                focusSeq={agentFocusSeq}
             />
         </div>
     );

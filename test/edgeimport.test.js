@@ -28,7 +28,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.join(__dirname, '..', '..');
+const ROOT = path.join(__dirname, '..');
 
 let pass = 0;
 const fails = [];
@@ -683,10 +683,10 @@ const run = () => {
         // 这条保证"Edge 装了但 Local State 损坏/缺失"时用户看到的是人话，
         // 而不是一条 powershell 报错。
         const r = await edge.readCookiesOffline({
-            userDataDir: path.join(ROOT, 'scripts', 'test', 'no-such-dir'),
-            profileDir: path.join(ROOT, 'scripts', 'test', 'no-such-dir'),
-            tempDb: path.join(ROOT, 'scripts', 'test'),
-            tempRoot: path.join(ROOT, 'scripts', 'test'),
+            userDataDir: path.join(ROOT, 'test', 'no-such-dir'),
+            profileDir: path.join(ROOT, 'test', 'no-such-dir'),
+            tempDb: path.join(ROOT, 'test'),
+            tempRoot: path.join(ROOT, 'test'),
             warnings: [],
             report: null,
         });

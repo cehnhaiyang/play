@@ -7,6 +7,7 @@ const { detectEdgeProfiles, importEdgeData } = require('./edgeImportService');
 const {
     setupBrowserSession, setupBrowserIpc, attachBrowserInput, attachGuestExtras, guardWebviewAttach,
 } = require('./browserService');
+const { kernelUserAgent } = require('./userAgent');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
@@ -857,11 +858,12 @@ function installGlobalInterception() {
 /* -------------------------------------------------------------------------- */
 /*                              浏览器会话身份                                  */
 /* -------------------------------------------------------------------------- */
-// UA 动态化：cf_clearance 与 UA 绑定，Node 直抓必须用"拿到凭证的那个浏览器的真实 UA"，
-// 不能再硬编码——之前 Node 用 Chrome/126 而应用内浏览器是 Chromium 120，
-// 出现 UA 与内核/Client Hints 三处互相矛盾，Cloudflare 校验直接判失败。
+// UA 的唯一来源见 electron/userAgent.js：**不改写**，读引擎自己那一份。
+// cf_clearance 与 UA 绑定，所以 Node 直抓用的必须是"拿到凭证的那个浏览器的 UA"，
+// 而不是另一份手写的字符串——历史上 Node 用 Chrome/126、浏览器用 Chromium 120，
+// 三处（UA 头 / navigator / sec-ch-ua）互相矛盾，Cloudflare 校验直接判失败。
 //
-// 职责划分：UA 的**真值**由站点模块（acgmhoService）持有，因为抓页面的是它。
+// 职责划分：站点模块（acgmhoService）仍持有它抓取时用的 UA，因为抓页面的是它。
 // 这里只做两件事：记住浏览器会话当前用的 UA，并在它变化时推给站点模块对齐。
 // 不在这边再存一份请求头——两份状态迟早不同步，而"Node 用旧 UA、浏览器用新 UA"
 // 的表现就是"验证过了但搜索仍 403"，极难定位。
@@ -917,8 +919,20 @@ app.commandLine.appendSwitch(
 
 let mainWindow = null;
 
-const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
-const STREAM_EXTENSIONS = new Set(['m3u8', 'm3u', 'mpd']);
+const USER_AGENT = kernelUserAgent();
+/**
+ * 必须交给 ffmpeg 才能得到可用文件的后缀。
+ *
+ * 与嗅探的 stream 分类**同一份清单**（utils.MEDIA_EXTENSIONS 的 stream 类），
+ * 也就是 utils.requiresFfmpeg 判据里"后缀"那一半的派生副本：
+ * 嗅探把 m3u8 / m3u / mpd / ts / flv / f4v 归为 stream，界面据此打上
+ * 「ffmpeg 下载」徽章、并在 ffmpeg 缺失时拦住下载。这里少列一个，
+ * 同一个文件就会"界面说要 ffmpeg、实际走裸 HTTP 直存"——
+ * 落盘的 .ts / .flv 是播放器（本应用靠 hls.js / flv.js 才认）打不开的裸流。
+ *
+ * test/sniffer.test.js 会比对这张表与 utils 的分类，漂移即失败。
+ */
+const STREAM_EXTENSIONS = new Set(['m3u8', 'm3u', 'mpd', 'ts', 'flv', 'f4v']);
 const MEDIA_HTTP_HEADERS = {
     'User-Agent': USER_AGENT,
     Referer: '',
@@ -949,6 +963,44 @@ function getDownloadCapabilities() {
     };
 }
 
+/**
+ * content-type 的 MIME 子类型 → 规范后缀。
+ *
+ * 不能直接把子类型当后缀用：MIME 里大量子类型是**编码名而不是容器名**，
+ * 照搬会产出系统与播放器都不认的"后缀"：
+ *   video/x-matroska  → matroska（真实后缀 mkv）
+ *   video/quicktime   → quicktime（真实后缀 mov）
+ *   video/mp2t        → mp2t（真实后缀 ts，已在上游单独处理）
+ *   audio/x-mpeg      → mpeg（真实后缀 mp3）
+ *   audio/mp4         → mp4（真实后缀 m4a）
+ * 这些后缀会一路带到下载：文件名变成 `片子.matroska`，
+ * 而本应用的下载判定、播放器类型判定都按 MEDIA_EXTENSIONS 查表，全都落空。
+ *
+ * 两张表而不是一张：`ogg` 在主类型下含义不同 —— video/ogg 是 `.ogv`、
+ * audio/ogg 是 `.ogg`。合成一张表必然把其中一个映射错。
+ * 表里没有的（含 `video/mp4` 这种子类型恰好等于后缀的常见情形）回落默认值。
+ */
+const VIDEO_MIME_EXTS = {
+    'mp4': 'mp4', 'mpeg': 'mpg', 'mpg': 'mpg',
+    'x-matroska': 'mkv', 'matroska': 'mkv',
+    'quicktime': 'mov', 'x-msvideo': 'avi', 'avi': 'avi',
+    'webm': 'webm', 'ogg': 'ogv', 'x-ms-wmv': 'wmv', '3gpp': '3gp',
+};
+
+const AUDIO_MIME_EXTS = {
+    'x-mpeg': 'mp3', 'mpeg': 'mp3', 'mp3': 'mp3', 'mpeg3': 'mp3',
+    'wav': 'wav', 'x-wav': 'wav', 'wave': 'wav',
+    'aac': 'aac', 'x-aac': 'aac', 'mp4': 'm4a', 'm4a': 'm4a',
+    'flac': 'flac', 'x-flac': 'flac', 'opus': 'opus',
+    'x-ms-wma': 'wma', 'x-ms-asf': 'wma', 'ogg': 'ogg',
+};
+
+function canonicalExtFromMime(contentType, fallback) {
+    const sub = String(contentType).split('/')[1]?.split(';')[0]?.trim() || '';
+    const table = String(contentType).startsWith('audio/') ? AUDIO_MIME_EXTS : VIDEO_MIME_EXTS;
+    return table[sub] || fallback;
+}
+
 function sanitizeFileName(name) {
     const fallbackName = 'media';
     const cleanName = String(name || fallbackName)
@@ -959,9 +1011,17 @@ function sanitizeFileName(name) {
     return cleanName || fallbackName;
 }
 
+/**
+ * 定后缀。优先用渲染层给的 ext，其次从 URL 路径推断，最后回落 mp4。
+ *
+ * `'unknown'` 必须当作"没有提示"：嗅探的几条路径（页内脚本、AI 提取）在
+ * 认不出后缀时都会显式写 'unknown'，那是**占位符不是后缀** ——
+ * 照单全收会落出 `视频标题.unknown` 这种系统认不出类型的文件。
+ */
 function inferExtension(url, ext) {
-    if (ext) {
-        return String(ext).toLowerCase().replace(/^\./, '');
+    const hinted = String(ext || '').toLowerCase().replace(/^\./, '');
+    if (hinted && hinted !== 'unknown') {
+        return hinted;
     }
 
     try {
@@ -1288,8 +1348,22 @@ async function handleMediaDownload(_event, payload) {
         return { success: false, message: '下载失败：缺少资源地址。' };
     }
 
-    const targetPath = resolveDownloadTarget(title, STREAM_EXTENSIONS.has(ext) ? 'mp4' : ext);
-    const isStream = STREAM_EXTENSIONS.has(ext);
+    // 走不走 ffmpeg：**后缀与渲染层判定的类型，任一为 stream 即走**。
+    // 与 utils.requiresFfmpeg 同判据（那边是唯一真值，这里是派生副本）。
+    //
+    // 两个都要看，各自补对方的漏：
+    //  - 只看后缀会漏：AI 提取出的地址常常没有可辨识的路径后缀
+    //    （`/api/play?format=hls`），ext 回落到 mp4，但渲染层已按 type='stream'
+    //    打了「ffmpeg 下载」徽章、并在 ffmpeg 缺失时拦住了下载；
+    //  - 只看 type 会漏：`{"url":"...x.flv","type":"video"}` 这种模型产物，
+    //    类型与后缀不自洽，而后缀才是真正决定能不能直存的东西。
+    // 两边判据不一致的后果是"界面说要 ffmpeg、实际裸 HTTP 直存" ——
+    // 落盘的 .mp4 里装的是 m3u8 文本，播放器打开是黑的。
+    const isStream = STREAM_EXTENSIONS.has(ext) || payload?.type === 'stream';
+
+    // 流媒体一律落成 .mp4：ffmpeg 的 -c copy 出来的是 MP4 容器，
+    // 按源后缀命名（.ts / .m3u8）会让系统与播放器都认不出类型
+    const targetPath = resolveDownloadTarget(title, isStream ? 'mp4' : ext);
 
     // 同一条资源重复点：把上一次的先取消，避免两个进程往同一个文件写
     const existing = activeMediaDownloads.get(url);
@@ -1709,8 +1783,9 @@ function loadSearchPageViaBrowser(url) {
 }
 
 // 全文搜索被 Cloudflare 挑战拦下时的兜底：交给自动求解器（可见小窗，无需用户操作）。
-// 挑战能否通过取决于浏览器指纹是否真实一致：本窗口不设置任何 UA 覆盖，
-// 且全局请求钩子对 acgmho/cloudflare 域豁免 UA/sec-ch-ua 改写（见 setupDownloadHandlers）。
+// 挑战能否通过取决于浏览器指纹是否真实一致：会话 UA 在 ready 时就覆写成内核派生值
+// （见 electron/userAgent.js），Client Hints 交回 Chromium 自己发，
+// 所以这个窗口的 UA 头 / navigator / sec-ch-ua 三处天然同源，且与 Node 直抓用的是同一个值。
 // 通过后 cf_clearance 落在会话里，Node 直抓（走代理 + 同 UA）即可复用。
 async function loadSearchPageViaBrowserOnce(url) {
     const { html, finalUrl, userAgent } = await solveChallengeWithBrowser({
@@ -2742,11 +2817,47 @@ function setupSniffer(sess) {
      *    后果是筛选栏里它出现在"视频"下、徽章文案错，
      *    且下载时 `type !== 'stream'` 让它**跳过 ffmpeg 检查** ——
      *    而 .ts 分片恰恰需要 ffmpeg 才能合成可用文件。
+     *    test/sniffer.test.js 会比对两边都有后缀的分类，漂移即失败。
      */
     const streamExts = ['m3u8', 'm3u', 'mpd', 'flv', 'f4v', 'ts'];
     const videoExts = ['mp4', 'mkv', 'webm', 'avi', 'mov', 'wmv', 'ogv', '3gp', 'mpg', 'mpeg', 'm4s'];
     const audioExts = ['mp3', 'wav', 'aac', 'm4a', 'ogg', 'flac', 'opus', 'wma'];
     const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico', 'tiff', 'heic', 'avif'];
+
+    /**
+     * HLS 分片路径判据。与 utils.HLS_SEGMENT_RE_SOURCE **逐字同源**
+     * （独立进程不能 import TS，只能复制；test/sniffer.test.js 盯着不漂移）。
+     *
+     * 单独一份而不是内联在回调里：分片判据只对 .ts 生效，但它决定了
+     * "一个页面播 HLS 时会不会推几十上百条 segNNN.ts 刷满列表"。
+     */
+    const hlsSegmentRe = new RegExp(
+        '(?:^|/)(?:segment|seg|chunk|slice|frag|part|track|ts)[-_]?\\d*/'
+        + '|(?:^|/)(?:segment|seg|chunk|slice|frag|part|track)[-_]?\\d*\\.ts$'
+        + '|(?:^|/)\\d+\\.ts$'
+        + '|[-_]\\d+\\.ts$',
+        'i'
+    );
+
+    /**
+     * 从查询参数值里认出媒体后缀（`?file=movie.mp4`、`?url=a%2Fb.m3u8`）。
+     *
+     * 后缀必须**成词**，不能用裸 includes：`component.tsx` 里含 `.ts`、
+     * `backup.mpd2` 里含 `.mpd` —— 那是源码与备份文件，不是流媒体。
+     * 裸 includes 会把它们推成 stream，界面据此打上「ffmpeg 下载」徽章，
+     * 用户点了才发现下回来一个文本文件。
+     * 成词判据是"后缀后面不能再跟字母数字"（`?`、`&`、`#`、`/` 都算边界）。
+     *
+     * 返回命中的**真实后缀**而不是写死的 m3u8/mp4：`?file=movie.mpd` 的扩展名
+     * 是 mpd，写死 m3u8 会让徽章、下载命名与 ffmpeg 判定三处都用错后缀。
+     */
+    const matchExtInValue = (value, exts) => {
+        const lower = String(value).toLowerCase();
+        for (const e of exts) {
+            if (new RegExp(`\\.${e}(?![a-z0-9])`).test(lower)) return e;
+        }
+        return '';
+    };
 
     sess.webRequest.onResponseStarted(filter, (details) => {
         // 总开关没打开时直接丢弃："持续嗅探"关闭中，网络层不推送任何结果。
@@ -2811,13 +2922,20 @@ function setupSniffer(sess) {
             if (contentType.includes('x-flv')) {
                 detectedType = 'stream';
                 ext = 'flv';
+            } else if (contentType.includes('mp2t')) {
+                // MPEG-TS。必须与 utils 同口径判成 stream、后缀归一为 'ts'：
+                // utils 的 MEDIA_EXTENSIONS 里 'ts' 属 stream，若这里照搬 content-type
+                // 的字面量（'mp2t'）判成 video，同一个地址就会两条路径两个结论 ——
+                // 筛选栏归错类，界面按 type 判 ffmpeg 徽章而主进程按 ext 判下载方式。
+                detectedType = 'stream';
+                ext = 'ts';
             } else {
                 detectedType = 'video';
-                ext = contentType.split('/')[1]?.split(';')[0]?.replace('x-', '') || 'mp4';
+                ext = canonicalExtFromMime(contentType, 'mp4');
             }
         } else if (contentType.startsWith('audio/')) {
             detectedType = 'audio';
-            ext = contentType.split('/')[1]?.split(';')[0]?.replace('x-', '') || 'mp3';
+            ext = canonicalExtFromMime(contentType, 'mp3');
         } else if (contentType.startsWith('image/')) {
             let imgExt = contentType.split('/')[1]?.split(';')[0];
             if (imgExt === 'svg+xml') {
@@ -2861,18 +2979,22 @@ function setupSniffer(sess) {
         // 3. 基于 Query 参数中嵌套媒体拓展名探测
         if (!detectedType && urlObj) {
             for (const [, val] of urlObj.searchParams.entries()) {
-                const lowerVal = val.toLowerCase();
-                if (streamExts.some((s) => lowerVal.includes(`.${s}`))) {
+                const hitStream = matchExtInValue(val, streamExts);
+                if (hitStream) {
                     detectedType = 'stream';
-                    ext = 'm3u8';
+                    ext = hitStream;
                     break;
-                } else if (videoExts.some((v) => lowerVal.includes(`.${v}`))) {
+                }
+                const hitVideo = matchExtInValue(val, videoExts);
+                if (hitVideo) {
                     detectedType = 'video';
-                    ext = 'mp4';
+                    ext = hitVideo;
                     break;
-                } else if (audioExts.some((a) => lowerVal.includes(`.${a}`))) {
+                }
+                const hitAudio = matchExtInValue(val, audioExts);
+                if (hitAudio) {
                     detectedType = 'audio';
-                    ext = 'mp3';
+                    ext = hitAudio;
                     break;
                 }
             }
@@ -2880,21 +3002,18 @@ function setupSniffer(sess) {
 
         // 过滤 TS 切片分段。
         //
-        // 判据必须**同时看 ext 与 contentType**：HLS 分片的响应头是 video/mp2t，
-        // 而步骤 1 会把 ext 设成 'mp2t'（不是 'ts'），且步骤 2 只在 !detectedType
-        // 时才跑 —— 于是 `ext === 'ts'` 这个门根本不会为分片打开，
-        // 里面那句 `contentType.includes('mp2t')` 成了永远到不了的死代码。
-        // 后果：播一个 HLS 视频，几十上百个 segNNN.ts 全被推给渲染层刷满列表。
+        // 判据同时看 ext 与 contentType：HLS 分片的响应头是 video/mp2t，
+        // 而步骤 1 现在把它归一成 ext='ts'（见上面的 mp2t 分支），
+        // 步骤 2 只在 !detectedType 时才跑 —— 所以 ext 与 content-type 两条都要开门。
         //
-        // 只放开门、不额外加宽 isSegment：真实的 HLS 分片全都带 mp2t 响应头，
-        // 已由最后那条兜住；再补一条"任何 .ts 结尾都算分片"会误伤
-        // 真正的整段 .ts 视频（它同样可下载，不该被丢）。
-        if (ext === 'ts' || ext === 'mp2t' || contentType.includes('mp2t')) {
-            const isSegment =
-                /\b(seg|chunk|slice|frag|part|track|\d{2,})\b/i.test(pathname) ||
-                /[-_]\d+\.ts/i.test(pathname) ||
-                pathname.includes('/ts/') ||
-                contentType.includes('mp2t');
+        // 第三条门（pathExt === 'ts'）不能省：部分 CDN 把分片标成
+        // application/octet-stream，既不是 video/mp2t 也不进 streamExts 的
+        // content-type 分支，只靠前两条门会让整页 segNNN.ts 全被推给渲染层。
+        //
+        // 不写成"任何 .ts 都算分片"：整段的 .ts 视频同样可下载，不该被丢，
+        // 所以最终判据仍然交给路径正则（它只认分片命名）。
+        if (ext === 'ts' || ext === 'mp2t' || pathExt === 'ts' || contentType.includes('mp2t')) {
+            const isSegment = contentType.includes('mp2t') || hlsSegmentRe.test(pathname);
             // 播放列表本身要留下（它是"可下载的流"入口），只丢分片
             if (isSegment && !url.includes('playlist')) {
                 return;
@@ -3005,7 +3124,26 @@ function createWindow() {
         mainWindow = null;
     });
 
+    // 弹窗洪水节流：页面里 `while(1) window.open(url)` 会无上限开新标签页
+    // （每个都带一个 webview），正常站点只会零星弹窗。同一来源 3 秒内开
+    // 第 9 个起直接拒掉 —— 阈值只拦机器，不拦人。两处 setWindowOpenHandler
+    // （主窗口 + guest）共用这一份记账。
+    const popupOpenTimes = new WeakMap();
+    const allowPopupOpen = (source) => {
+        const now = Date.now();
+        const list = (popupOpenTimes.get(source) || []).filter((t) => now - t < 3000);
+        if (list.length >= 8) {
+            popupOpenTimes.set(source, list);
+            console.warn('弹窗过于频繁，已拦截');
+            return false;
+        }
+        list.push(now);
+        popupOpenTimes.set(source, list);
+        return true;
+    };
+
     mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+        if (!allowPopupOpen(mainWindow.webContents)) return { action: 'deny' };
         mainWindow.webContents.send('navigate-to-url', url);
         return { action: 'deny' };
     });
@@ -3013,7 +3151,7 @@ function createWindow() {
     const filter = { urls: ['*://*/*'] };
 
     /**
-     * 请求头改写：统一 UA / 补防盗链 Referer。
+     * 请求头改写：补防盗链 Referer；顺带把该 session 的 UA 对齐内核。
      *
      * 抽成具名函数是因为它必须挂到**每一个**会用到的 session 上，
      * 而不只是主窗口那个：
@@ -3023,7 +3161,8 @@ function createWindow() {
      *    所以重复注册不是"叠加"而是"替换"，不能靠多调几次来覆盖多个 session。
      *  - `<webview>` 默认继承宿主窗口的 session，但一旦将来有人给 webview 加
      *    partition（独立 session），主窗口那次注册就管不到它了 ——
-     *    表现为防盗链 403、UA 与渲染层 navigator.userAgent 不一致，
+     *    表现为防盗链 403，而且 partition session 的 UA 会退回 Electron 默认值
+     *    （自带 `Electron/` token），
      *    而嗅探（setupSniffer）**有**覆盖多 session 的守卫，两者不对称。
      *
      * 用 WeakSet 记账：同一个 session 只注册一次，避免后注册的把先注册的顶掉。
@@ -3042,22 +3181,11 @@ function createWindow() {
             try {
                 hostname = new URL(details.url).hostname;
             } catch (_error) { }
-            // acgmho 系与 Cloudflare 域豁免 UA/sec-ch-ua 改写：这两处流量要过 Cloudflare
-            // managed 挑战，UA 必须是浏览器真实值，Client Hints 也必须原样发送。
-            // 之前一刀切改成 Chrome/122 并删除 sec-ch-ua，导致"UA 头 / JS 里的 UA / 内核版本"
-            // 三处互相矛盾，挑战验证必失败（点击了也过不去、反复弹回挑战页）。
-            const isChallengeSensitive =
-                /(^|\.)acgmho\.com$/i.test(hostname) ||
-                /(^|\.)acgnngca\.com$/i.test(hostname) ||
-                /(^|\.)acgnfl\.com$/i.test(hostname) ||
-                /(^|\.)acg-hentai\.com$/i.test(hostname) ||
-                /(^|\.)cloudflare\.com$/i.test(hostname);
-            if (!isChallengeSensitive) {
-                requestHeaders['User-Agent'] = USER_AGENT;
-                delete requestHeaders['sec-ch-ua'];
-                delete requestHeaders['sec-ch-ua-mobile'];
-                delete requestHeaders['sec-ch-ua-platform'];
-            }
+            // 这里**不再碰 UA 与 sec-ch-ua\***，也不再覆写任何 session 的 UA。
+            // 原先把非白名单域的 UA 一刀切改成旧版 Chrome、并删掉三个 Client Hints，
+            // 结果是"UA 声称 122 / sec-ch-ua 报内核 152 / navigator 又是第三个值"——
+            // Google 据此判定"浏览器或应用可能不安全"，Cloudflare 把它当伪造流量。
+            // 现在 UA 与 Client Hints 全部交回 Chromium 自己发，天然同源（见 userAgent.js）。
 
             if (/(^|\.)bilivideo\.com$/i.test(hostname) || /(^|\.)hdslb\.com$/i.test(hostname)) {
                 requestHeaders.Referer = 'https://www.bilibili.com/';
@@ -3094,6 +3222,7 @@ function createWindow() {
         attachGuestExtras(webContents);
 
         webContents.setWindowOpenHandler(({ url }) => {
+            if (!allowPopupOpen(webContents)) return { action: 'deny' };
             mainWindow.webContents.send('navigate-to-url', url);
             return { action: 'deny' };
         });
@@ -3258,7 +3387,8 @@ function setupSettingsHandlers() {
         return saveAiConfig(value);
     });
 
-    // 探活用提交上来的草稿配置，不落盘。第二个参数是映射后的档位取值，由渲染层传入
+    // 探活用提交上来的草稿配置，不落盘。第二个参数是映射后的档位取值，由渲染层传入；
+    // 传 null 表示这次不下发思考参数（服务商不需要思考，或用户选了「不思考」）
     ipcMain.handle('settings-test-ai-config', async (_event, value, reasoningEffort) => {
         return testAiConnection(value, reasoningEffort);
     });
@@ -3352,6 +3482,9 @@ function setupEdgeImportHandlers() {
 }
 
 app.whenReady().then(async () => {
+    // 会话 UA 一个字节都不改（理由见 electron/userAgent.js：只改 UA 不改 UA-CH＝谎报，
+    // Cloudflare 会据此把挑战升级成点多少次都不放行的死循环）。
+    // Node 直抓那条路的 UA 由下面的 syncAcgmhoProxy 读会话实际值后对齐。
     // 启动即同步代理配置：留空则直连，配了端口则建隧道。
     // 这一步同时完成全局接管（http/https 的 globalAgent + 全局 fetch）。
     await syncAcgmhoProxy();

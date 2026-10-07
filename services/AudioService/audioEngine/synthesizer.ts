@@ -23,22 +23,29 @@ export class AudioSynthesizer {
         const bufferSize = Math.floor(sampleRate * duration);
 
         // 固定种子：同一份代码每次渲染得到相同的噪声纹理
+        // （键带采样率，与 noiseBufferFor 的按需重建共用一套种子）
         const colors: Array<'white' | 'pink' | 'brown'> = ['white', 'pink', 'brown'];
         colors.forEach((color, i) => {
             const buffer = ctx.createBuffer(1, bufferSize, sampleRate);
             fillNoise(buffer.getChannelData(0), color, createRandom(0x5eed + i * 977));
-            this.noiseBuffers.set(color, buffer);
+            this.noiseBuffers.set(`${color}@${sampleRate}`, buffer);
         });
     }
 
+    private static readonly NOISE_SEED_INDEX: Record<string, number> = { white: 0, pink: 1, brown: 2 };
+
     private noiseBufferFor(ctx: BaseAudioContext, wave: string): AudioBuffer | null {
         const key = wave.startsWith('brown') ? 'brown' : wave.startsWith('pink') ? 'pink' : 'white';
-        const existing = this.noiseBuffers.get(key);
-        if (existing && existing.sampleRate === ctx.sampleRate) return existing;
-        // 离线上下文采样率可能不同，按需重建
+        // 缓存必须区分采样率：离线渲染（44100）与实时上下文（常为 48000）混用时，
+        // 旧实现按颜色缓存、 rebuild 又用了另一个种子 —— 同一份代码先试听再导出，
+        // 噪声纹理会变，试听与导出对不上；且每次切换都重建 2 秒缓冲，白白烧 CPU。
+        const cacheKey = `${key}@${ctx.sampleRate}`;
+        const existing = this.noiseBuffers.get(cacheKey);
+        if (existing) return existing;
         const buffer = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 2), ctx.sampleRate);
-        fillNoise(buffer.getChannelData(0), key, createRandom(0x5eed));
-        this.noiseBuffers.set(key, buffer);
+        const seedIdx = AudioSynthesizer.NOISE_SEED_INDEX[key] ?? 0;
+        fillNoise(buffer.getChannelData(0), key, createRandom(0x5eed + seedIdx * 977));
+        this.noiseBuffers.set(cacheKey, buffer);
         return buffer;
     }
 
@@ -212,6 +219,11 @@ export class AudioSynthesizer {
      *
      * `registerSource` 与 `stopAt` 用于接管调制类效果内部的 LFO：
      * 它们必须被登记并在曲末停止，否则会永久占用振荡器。
+     *
+     * `timeOffset` 是实时播放时的调度偏移：playRealtime 把所有事件整体后移
+     * （now + 缓冲），而 filter 效果的扫频自动化写的是"乐曲内时刻"。
+     * 不加偏移，扫频会落在上下文时间 0~duration（即过去）而完全听不见 ——
+     * 试听与导出的行为从此分叉。离线渲染传 0。
      */
     public buildEffectChain(
         ctx: BaseAudioContext,
@@ -219,7 +231,8 @@ export class AudioSynthesizer {
         outputNode: AudioNode,
         effects: EffectDef[],
         registerSource?: (node: AudioScheduledSourceNode) => void,
-        stopAt?: number
+        stopAt?: number,
+        timeOffset = 0
     ) {
         let currentNode = inputNode;
 
@@ -497,7 +510,8 @@ export class AudioSynthesizer {
                     biquad.Q.value = clamp(effect.Q, 0, 30, 1);
                     const from = clamp(effect.from, 20, 20000, 200);
                     const to = clamp(effect.to, 20, 20000, 4000);
-                    const start = Math.max(0, effect.start);
+                    // 自动化锚点必须跟事件走同样的偏移（见 timeOffset 说明）
+                    const start = Math.max(0, effect.start) + timeOffset;
                     const end = start + Math.max(0.01, effect.duration);
 
                     biquad.frequency.setValueAtTime(from, start);
@@ -735,7 +749,9 @@ export class AudioSynthesizer {
         destination: AudioNode,
         events: ScheduledEvent[],
         effects: EffectDef[],
-        registerSource: (node: AudioScheduledSourceNode) => void
+        registerSource: (node: AudioScheduledSourceNode) => void,
+        // 实时播放时事件已被整体后移，效果器内的时间自动化要跟同样的偏移
+        timeOffset = 0
     ) {
         const masterBus = ctx.createGain();
         masterBus.gain.value = 1.0;
@@ -747,7 +763,7 @@ export class AudioSynthesizer {
         );
 
         if (effects.length > 0) {
-            this.buildEffectChain(ctx, masterBus, destination, effects, registerSource, chainStop);
+            this.buildEffectChain(ctx, masterBus, destination, effects, registerSource, chainStop, timeOffset);
         } else {
             masterBus.connect(destination);
         }
@@ -761,7 +777,7 @@ export class AudioSynthesizer {
             const cached = busCache.get(key);
             if (cached) return cached;
             const bus = ctx.createGain();
-            this.buildEffectChain(ctx, bus, masterBus, instEffects, registerSource, chainStop);
+            this.buildEffectChain(ctx, bus, masterBus, instEffects, registerSource, chainStop, timeOffset);
             busCache.set(key, bus);
             return bus;
         };
@@ -828,9 +844,20 @@ export class AudioSynthesizer {
                     const rStart = Math.max(dEnd, t + duration);
                     const rEnd = rStart + Math.max(0, fe.release);
 
+                    // 零起音/零衰减时用跳变代替零时长 ramp：
+                    // exponentialRamp 在起止同刻的行为各浏览器不一致，
+                    // 而 applyAdsr 对振幅包络就是这么处理的，两边保持一致。
                     filterNode.frequency.setValueAtTime(baseFreq, t);
-                    filterNode.frequency.exponentialRampToValueAtTime(Math.max(ZERO, peak), aEnd);
-                    filterNode.frequency.exponentialRampToValueAtTime(Math.max(ZERO, sustainF), dEnd);
+                    if (a <= 0.0005) {
+                        filterNode.frequency.setValueAtTime(Math.max(ZERO, peak), aEnd);
+                    } else {
+                        filterNode.frequency.exponentialRampToValueAtTime(Math.max(ZERO, peak), aEnd);
+                    }
+                    if (d <= 0.0005) {
+                        filterNode.frequency.setValueAtTime(Math.max(ZERO, sustainF), dEnd);
+                    } else {
+                        filterNode.frequency.exponentialRampToValueAtTime(Math.max(ZERO, sustainF), dEnd);
+                    }
                     filterNode.frequency.setValueAtTime(Math.max(ZERO, sustainF), rStart);
                     filterNode.frequency.exponentialRampToValueAtTime(Math.max(ZERO, baseFreq), rEnd);
                 }
@@ -943,7 +970,7 @@ export class AudioSynthesizer {
                     osc.frequency.setValueAtTime(freq, t);
                 }
 
-                if (event.pitchEnvAmount && event.pitchEnvAmount !== 0 && event.pitchDecay) {
+                if (event.pitchEnvAmount && event.pitchEnvAmount !== 0 && (event.pitchDecay ?? 0.05) >= 0) {
                     const peakF = clamp(
                         freq * Math.pow(2, event.pitchEnvAmount / 12),
                         0.01, ctx.sampleRate * NYQUIST_MARGIN, freq
@@ -952,7 +979,7 @@ export class AudioSynthesizer {
                     const pStart = t + (glide > 0 ? glide : 0);
                     osc.frequency.setValueAtTime(peakF, pStart);
                     osc.frequency.exponentialRampToValueAtTime(
-                        freq, pStart + Math.max(0.005, event.pitchDecay)
+                        freq, pStart + Math.max(0.005, event.pitchDecay ?? 0.05)
                     );
                 }
 

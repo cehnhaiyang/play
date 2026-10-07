@@ -7,6 +7,7 @@ import type {
     AiStory,
     AiStreamDelta,
     AiTestResult,
+    AiUsage,
     FoundLink,
     MediaType,
     ReasoningEffort,
@@ -36,9 +37,10 @@ export const DEFAULT_AI_CONFIG: AiConfig = {
     reasoningEffort: 'low',
 };
 
-/** 界面上的一个档位：value 是配置里的档位，label 是按钮文字 */
+/** 界面上的一个档位：value 是配置里的档位（缺省即「不思考」），label 是按钮文字 */
 export interface AiEffortOption {
-    value: ReasoningEffort;
+    /** 缺省表示不下发思考参数 */
+    value?: ReasoningEffort;
     label: string;
     hint: string;
 }
@@ -46,7 +48,7 @@ export interface AiEffortOption {
 /** 档位映射：low / high / max 换成服务商认的取值；未列出的档位原样下发 */
 export type AiEffortMap = Partial<Record<ReasoningEffort, string>>;
 
-/** 服务商预设：地址、密钥、模型候选与档位映射 */
+/** 服务商预设：地址、密钥、模型候选、思考能力与档位映射 */
 export interface AiProviderPreset {
     id: string;
     /** 按钮文字 */
@@ -57,14 +59,21 @@ export interface AiProviderPreset {
     apiKey: string;
     /** 该服务商的模型候选；第一个是套用预设时的默认值 */
     models: string[];
+    /**
+     * 该服务商是否需要思考档位。
+     * `false` = 不需要：整条链路都不带 reasoning_effort（档位可能已写进模型名）。
+     * 缺省视为需要。
+     */
+    reasoning?: boolean;
     /** 服务商级档位映射 */
     efforts?: AiEffortMap;
     /** 模型级档位映射，优先于服务商级 */
     modelEfforts?: Record<string, AiEffortMap>;
 }
 
-/** 界面上的三档 */
+/** 界面档位：不思考 + 低 / 高 / 最大三档 */
 export const EFFORT_OPTIONS: AiEffortOption[] = [
+    { label: '不思考', hint: '不下发思考参数，由服务商默认行为决定' },
     { value: 'low', label: '低', hint: '最快、省 token' },
     { value: 'high', label: '高', hint: '质量与速度平衡' },
     { value: 'max', label: '最大', hint: '最强推理，最慢' },
@@ -78,17 +87,18 @@ export const AI_PROVIDERS: AiProviderPreset[] = [
         note: '本地 tc2api（7863），默认密钥 1',
         baseUrl: DEFAULT_AI_CONFIG.baseUrl,
         apiKey: DEFAULT_AI_CONFIG.apiKey,
-        models: [DEFAULT_AI_CONFIG.model, 'deepseek-v4.1-flash'],
+        models: [DEFAULT_AI_CONFIG.model, 'deepseek-v4.1-flash', 'global:glm-5.2'],
         // reasoning_effort 就叫 low / high / max，不需要映射
     },
     {
         id: 'ofm',
-        label: 'OFM',
-        note: '本地 OFM（18899），可用默认密钥',
-        baseUrl: 'http://127.0.0.1:18899/v1',
-        apiKey: 'ofm-YAIv8wepn58uZi0gD44K48AOI2ElqtBD',
-        models: ['muse-spark-1.3-contributor-free', 'mimo-v2.6-flash-free'],
-        efforts: { low: 'light', high: 'balanced', max: 'deep' },
+        label: 'gcli2api',
+        note: '本地 gcli2api，可用默认密钥；档位写在模型名里，不下发思考参数',
+        baseUrl: 'http://127.0.0.1:7861/antigravity/v1/',
+        apiKey: 'pwd',
+        models: ['gemini-3.8-flash-high', 'claude-sonnet-4-6'],
+        // 不需要思考：档位已由模型名（-high）决定，再下发 reasoning_effort 只是多余参数
+        reasoning: false,
     },
 ];
 
@@ -100,13 +110,22 @@ export const findAiProvider = (baseUrl: string): AiProviderPreset | null =>
     AI_PROVIDERS.find((provider) => normalizeBaseUrl(provider.baseUrl) === normalizeBaseUrl(baseUrl)) || null;
 
 /**
- * 这次请求实际下发的 reasoning_effort。
- * 查表顺序：模型级 → 服务商级 → 档位原值；地址不在预设表里则原值下发。
+ * 这次请求实际下发的 reasoning_effort；返回 undefined 表示不下发该参数。
+ *
+ * 两种不下发的情况：
+ * - 没有档位可解析：配置缺省（用户在界面上选了「不思考」），或调用方显式传空；
+ * - 服务商预设声明不需要思考（如 gcli2api）：档位写在模型名里，参数是多余的。
+ *
+ * 有档位时的查表顺序：模型级 → 服务商级 → 档位原值；
+ * 地址不在预设表里则原值下发（自定义服务商仍保留档位控制权）。
  */
-export const resolveReasoningEffort = (config: AiConfig, requested?: ReasoningEffort): string => {
+export const resolveReasoningEffort = (config: AiConfig, requested?: ReasoningEffort): string | undefined => {
     const tier = requested || config.reasoningEffort;
+    if (!tier) return undefined;
+
     const provider = findAiProvider(config.baseUrl);
     if (!provider) return tier;
+    if (provider.reasoning === false) return undefined;
 
     const byModel = provider.modelEfforts?.[config.model]?.[tier];
     const byProvider = provider.efforts?.[tier];
@@ -118,13 +137,13 @@ export const getModelPresets = (baseUrl: string): string[] =>
     (findAiProvider(baseUrl) || AI_PROVIDERS[0]).models;
 
 /* -------------------------------------------------------------------------- */
-/*                                配置读写                                     */
+/*                                配置读写                                    */
 /* -------------------------------------------------------------------------- */
 
 /** 浏览器降级模式下的存储键 */
 const AI_CONFIG_STORAGE_KEY = 'play_ai_config';
 
-/** 合法档位：界面、AiService、主进程三处一致 */
+/** 合法档位：界面、AiService、主进程三处一致；档位可选，缺省即「不思考」 */
 const REASONING_EFFORTS: ReasoningEffort[] = ['low', 'high', 'max'];
 
 /** 把任意输入收敛成一份字段齐全且合法的配置 */
@@ -135,7 +154,8 @@ const normalizeConfig = (input: Partial<AiConfig> | null | undefined): AiConfig 
         baseUrl: (raw.baseUrl || '').trim().replace(/\/+$/, '') || DEFAULT_AI_CONFIG.baseUrl,
         apiKey: typeof raw.apiKey === 'string' ? raw.apiKey.trim() : DEFAULT_AI_CONFIG.apiKey,
         model: (raw.model || '').trim() || DEFAULT_AI_CONFIG.model,
-        reasoningEffort: effort && REASONING_EFFORTS.includes(effort) ? effort : DEFAULT_AI_CONFIG.reasoningEffort,
+        // 档位可选：缺省或非法都当作「不思考」，键直接不落，请求侧自然不下发参数
+        ...(effort && REASONING_EFFORTS.includes(effort) ? { reasoningEffort: effort } : {}),
     };
 };
 
@@ -195,7 +215,9 @@ export const saveAiConfig = async (config: AiConfig): Promise<{ success: boolean
  */
 export const testAiConnection = async (config: AiConfig): Promise<AiTestResult> => {
     const normalized = normalizeConfig(config);
-    const wireEffort = resolveReasoningEffort(normalized);
+    // 传 null 而不是 undefined：明确告诉主进程这次不下发思考参数，
+    // 否则主进程会回落到配置里的档位，不需要思考的服务商又被塞回一个参数
+    const wireEffort = resolveReasoningEffort(normalized) ?? null;
 
     const settingsApi = getElectronAPI()?.settings;
     if (settingsApi) {
@@ -220,7 +242,7 @@ export const testAiConnection = async (config: AiConfig): Promise<AiTestResult> 
                 // 128 而非 8：推理模型的思考过程也占 completion 预算，
                 // 给太小会导致 content 为空，探活看起来"通了但没回话"
                 max_tokens: 128,
-                reasoning_effort: wireEffort,
+                ...(wireEffort ? { reasoning_effort: wireEffort } : {}),
             }),
         });
         const latency = Date.now() - startedAt;
@@ -247,7 +269,9 @@ export const testAiConnection = async (config: AiConfig): Promise<AiTestResult> 
 /*                                底层调用                                     */
 /* -------------------------------------------------------------------------- */
 
-/** 服务端错误正文里的 message 字段，比裸状态码有用得多 */
+/**
+ * 服务端错误正文里的 message 字段，比裸状态码有用得多
+ */
 const extractErrorMessage = (status: number, body: string): string => {
     try {
         const parsed = JSON.parse(body);
@@ -259,6 +283,110 @@ const extractErrorMessage = (status: number, body: string): string => {
     return body.trim().slice(0, 300) || `HTTP ${status}`;
 };
 
+/* -------------------------------------------------------------------------- */
+/*                                token 统计                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 本地 token 估算。
+ *
+ * 只在服务端不回 usage 时用（流式默认不带、部分本地代理不带）。
+ *
+ * 按**字符类别**分别计数而不是 `字符数 / 4`：Agent 的上下文里中文、代码、
+ * JSON 各占相当比例，而三者的 token/字符比差了近 10 倍 —— 一刀切会在
+ * 中文占比高的会话里低估一半以上，而"要不要压缩"正是拿这个数判断的。
+ *
+ * 系数取自各 tokenizer 的公开经验值，误差约 ±20%：
+ * - ASCII 字母数字：约 4 字符/token
+ * - 中文等 CJK：约 1.5 字符/token（一个汉字常占 1~2 token）
+ * - 其余符号与空白：约 3 字符/token
+ *
+ * 刻意不引入 tokenizer 依赖：这里的用途是"判断上下文是否接近上限"，
+ * 不是计费核对。真值由服务端 usage 提供，估算只负责在没有它时给个量级。
+ */
+export const estimateTokens = (text: string): number => {
+    if (!text) return 0;
+
+    let ascii = 0;
+    let cjk = 0;
+    let other = 0;
+
+    // 用 code point 迭代：中文在 BMP 内，但 emoji 等补充平面字符
+    // 用 charCodeAt 会算成两个字符，凭空多算一倍
+    for (const ch of text) {
+        const code = ch.codePointAt(0) ?? 0;
+        if (code < 0x80) {
+            if ((code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122)) ascii += 1;
+            else other += 1;
+            continue;
+        }
+        // CJK 统一表意文字、日文假名、韩文音节、全角标点
+        if ((code >= 0x3040 && code <= 0x30ff) || (code >= 0x3400 && code <= 0x9fff)
+            || (code >= 0xac00 && code <= 0xd7af) || (code >= 0xf900 && code <= 0xfaff)
+            || (code >= 0xff00 && code <= 0xffef)) {
+            cjk += 1;
+            continue;
+        }
+        other += 1;
+    }
+
+    return Math.ceil(ascii / 4 + cjk / 1.5 + other / 3);
+};
+
+/** 一条消息的 token 数（多模态消息只算文本块；图片按固定额度估） */
+const messageTokens = (message: AiChatMessage): number => {
+    if (typeof message.content === 'string') return estimateTokens(message.content);
+    return message.content.reduce((sum, part) => {
+        // 图片无法按字符估：一张图的实际 token 由分辨率与服务商的切块策略决定，
+        // 这里给一个常见量级（约 800）—— 它只影响"估算"这条回落的精度，
+        // 而带图请求（AI 绘本）本来就不走 Agent 这条链路
+        if (part.type === 'image_url') return sum + 800;
+        return sum + estimateTokens(part.text);
+    }, 0);
+};
+
+/** 按完整入参估算一次请求的 prompt token（系统提示词由 chat 拼入，此处已含） */
+export const estimatePromptTokens = (messages: AiChatMessage[]): number =>
+    messages.reduce((sum, message) => sum + messageTokens(message), 0);
+
+/** 从服务端响应里取 usage；字段缺失或非数字都返回 null（交给估算兜底） */
+const pickUsage = (raw: unknown): { promptTokens: number; completionTokens: number; totalTokens: number } | null => {
+    if (!raw || typeof raw !== 'object') return null;
+    const usage = raw as { prompt_tokens?: unknown; completion_tokens?: unknown; total_tokens?: unknown };
+    const prompt = Number(usage.prompt_tokens);
+    const completion = Number(usage.completion_tokens);
+    if (!Number.isFinite(prompt) || !Number.isFinite(completion)) return null;
+    // total 不是每个服务商都给：缺了就自己加，不要因此整条 usage 作废
+    const total = Number(usage.total_tokens);
+    return {
+        promptTokens: prompt,
+        completionTokens: completion,
+        totalTokens: Number.isFinite(total) ? total : prompt + completion,
+    };
+};
+
+/**
+ * 组装一次请求的用量并回调。
+ *
+ * `measured` 为空即走估算：prompt 用**实际发出的** messages 算（含系统提示词），
+ * completion 用**实际收到的**正文算。两者都由调用方传进来，服务层不去猜。
+ */
+const reportUsage = (
+    onUsage: ((usage: AiUsage) => void) | undefined,
+    messages: AiChatMessage[],
+    reply: string,
+    measured: { promptTokens: number; completionTokens: number; totalTokens: number } | null,
+): void => {
+    if (!onUsage) return;
+    if (measured) {
+        onUsage({ ...measured, estimated: false });
+        return;
+    }
+    const promptTokens = estimatePromptTokens(messages);
+    const completionTokens = estimateTokens(reply);
+    onUsage({ promptTokens, completionTokens, totalTokens: promptTokens + completionTokens, estimated: true });
+};
+
 /**
  * 发起一次对话补全，返回助手回复文本。
  *
@@ -267,6 +395,8 @@ const extractErrorMessage = (status: number, body: string): string => {
  *
  * 传了 `options.onDelta` 即走流式（stream:true），增量实时回调，
  * **返回值仍是完整文本**，调用方不需要自己拼接。
+ *
+ * 传了 `options.onUsage` 时，无论流式与否都会在成功拿到回复后回调一次用量。
  */
 export const chat = async (options: AiChatOptions): Promise<string> => {
     const config = await getAiConfig();
@@ -274,28 +404,71 @@ export const chat = async (options: AiChatOptions): Promise<string> => {
         ? [{ role: 'system', content: options.system }, ...options.messages]
         : options.messages;
 
-    const payload: Record<string, unknown> = {
-        model: config.model,
-        messages,
-        // 配置里只有 low / high / max，服务商未必认，下发前按预设映射
-        reasoning_effort: resolveReasoningEffort(config, options.reasoningEffort),
-    };
+    const payload: Record<string, unknown> = { model: config.model, messages };
+
+    // 思考参数可选：配置里只有 low / high / max，服务商未必认，下发前按预设映射；
+    // 无档位或服务商不需要思考时映射结果为空，整条请求就不带 reasoning_effort
+    const wireEffort = resolveReasoningEffort(config, options.reasoningEffort);
+    if (wireEffort) payload.reasoning_effort = wireEffort;
+
     if (typeof options.temperature === 'number') payload.temperature = options.temperature;
     if (typeof options.maxTokens === 'number') payload.max_tokens = options.maxTokens;
     if (options.jsonMode) payload.response_format = { type: 'json_object' };
 
+    const finish = (reply: string, measured: ReturnType<typeof pickUsage>): string => {
+        reportUsage(options.onUsage, messages, reply, measured);
+        return reply;
+    };
+
     if (!options.onDelta) {
-        return sendCompletion(payload, config, options.signal);
+        const { reply, usage } = await sendCompletion(payload, config, options.signal);
+        return finish(reply, usage);
+    }
+
+    /**
+     * 流式要显式申请 usage。
+     *
+     * OpenAI 兼容协议下流式响应**默认不带** usage 块，必须传
+     * `stream_options.include_usage`。两处克制：
+     *
+     * 1. **只有调用方要用量时才传。** 不要用量的调用方（音频工坊、绘本）
+     *    完全不该因为别人的需求多担一份被服务商拒绝的风险。
+     * 2. **被拒过的服务商记下来，不再重试。** 服务商不认这个参数时多半直接报
+     *    400，而 400 落在回落集合里。往下走两条路：
+     *    - 只不认 stream_options、认 stream → 第二次用普通流式跑通，
+     *      此后不再带这个参数，代价只是第一次多一个来回；
+     *    - 连 stream 都不认 → 第二次照样 400，再回落成一次性请求。
+     *      这与改动前逐次行为一致（那条路本来就要两个来回），没有额外损失。
+     */
+    if (options.onUsage && !STREAM_USAGE_REJECTED.has(normalizeBaseUrl(config.baseUrl))) {
+        const streamPayload = { ...payload, stream: true, stream_options: { include_usage: true } };
+        try {
+            const { reply, usage } = await sendStreaming(streamPayload, config, options.onDelta, options.signal);
+            return finish(reply, usage);
+        } catch (error) {
+            if (!(error instanceof StreamUnsupportedError)) throw error;
+            STREAM_USAGE_REJECTED.add(normalizeBaseUrl(config.baseUrl));
+        }
     }
 
     // 流式：服务端不认 stream 参数时回落成一次性请求，调用方无感
     try {
-        return await sendStreaming({ ...payload, stream: true }, config, options.onDelta, options.signal);
+        const { reply, usage } = await sendStreaming({ ...payload, stream: true }, config, options.onDelta, options.signal);
+        return finish(reply, usage);
     } catch (error) {
         if (!(error instanceof StreamUnsupportedError)) throw error;
-        return sendCompletion(payload, config, options.signal);
+        const { reply, usage } = await sendCompletion(payload, config, options.signal);
+        return finish(reply, usage);
     }
 };
+
+/**
+ * 已经拒绝过 `stream_options` 的服务商地址。
+ *
+ * 进程级缓存，不落盘：它只是一次请求往返的优化，重启后重探一遍的代价可忽略，
+ * 而落盘会引入"服务商升级了支持却仍被缓存挡住"的陈旧状态。
+ */
+const STREAM_USAGE_REJECTED = new Set<string>();
 
 /** 服务端拒绝了 stream 参数。内部信号，不外泄给调用方 */
 class StreamUnsupportedError extends Error { }
@@ -323,7 +496,7 @@ const sendCompletion = async (
     payload: Record<string, unknown>,
     config: AiConfig,
     signal?: AbortSignal
-): Promise<string> => {
+): Promise<{ reply: string; usage: ReturnType<typeof pickUsage> }> => {
     const response = await requestCompletion(payload, config, signal);
     const text = await response.text();
 
@@ -331,14 +504,14 @@ const sendCompletion = async (
         throw new Error(`AI 服务返回错误：${extractErrorMessage(response.status, text)}`);
     }
 
-    let data: { choices?: { message?: { content?: string } }[] };
+    let data: { choices?: { message?: { content?: string } }[]; usage?: unknown };
     try {
         data = JSON.parse(text);
     } catch (_error) {
         throw new Error('AI 服务返回了无法解析的内容，请确认接口地址指向 OpenAI 兼容服务。');
     }
 
-    return data?.choices?.[0]?.message?.content || '';
+    return { reply: data?.choices?.[0]?.message?.content || '', usage: pickUsage(data?.usage) };
 };
 
 /**
@@ -353,7 +526,7 @@ const sendStreaming = async (
     config: AiConfig,
     onDelta: (delta: AiStreamDelta) => void,
     signal?: AbortSignal
-): Promise<string> => {
+): Promise<{ reply: string; usage: ReturnType<typeof pickUsage> }> => {
     const response = await requestCompletion(payload, config, signal);
 
     if (!response.ok) {
@@ -367,7 +540,7 @@ const sendStreaming = async (
     // 服务端忽略了 stream，回的是普通 JSON —— 直接当非流式处理，别当失败
     if (!contentType.includes('event-stream') || !response.body) {
         const text = await response.text();
-        let data: { choices?: { message?: { content?: string } }[] };
+        let data: { choices?: { message?: { content?: string } }[]; usage?: unknown };
         try {
             data = JSON.parse(text);
         } catch (_error) {
@@ -375,7 +548,7 @@ const sendStreaming = async (
         }
         const whole = data?.choices?.[0]?.message?.content || '';
         if (whole) onDelta({ content: whole });
-        return whole;
+        return { reply: whole, usage: pickUsage(data?.usage) };
     }
 
     const reader = response.body.getReader();
@@ -383,7 +556,39 @@ const sendStreaming = async (
     let buffer = '';
     let content = '';
     let reasoning = '';
+    // 流式 usage 通常出现在**最后一个** chunk（choices 为空、只有 usage 字段），
+    // 所以整个流里持续覆盖，取到的那一份自然是最新的
+    let usage: ReturnType<typeof pickUsage> = null;
     let finished = false;
+
+    const handleDataLine = (line: string): void => {
+        if (!line.startsWith('data:')) return;
+        const data = line.slice(5).trim();
+        if (!data) return;
+        if (data === '[DONE]') { finished = true; return; }
+
+        let parsed: { choices?: { delta?: Record<string, unknown> }[]; usage?: unknown };
+        try {
+            parsed = JSON.parse(data);
+        } catch (_error) {
+            return; // 单个事件坏掉不该中断整条流
+        }
+
+        // usage 块常常和空 choices 一起到达，必须在取 delta 之前接住，
+        // 否则下面那句 `if (!delta) continue` 会把它整块丢掉
+        const chunkUsage = pickUsage(parsed?.usage);
+        if (chunkUsage) usage = chunkUsage;
+
+        const delta = parsed?.choices?.[0]?.delta;
+        if (!delta) return;
+
+        const piece = pickText(delta.content);
+        // 推理字段名各家不一：reasoning_content 是 DeepSeek 系，reasoning 是通用写法
+        const think = pickText(delta.reasoning_content) || pickText(delta.reasoning);
+
+        if (piece) { content += piece; onDelta({ content: piece }); }
+        if (think) { reasoning += think; onDelta({ reasoning: think }); }
+    };
 
     try {
         while (!finished) {
@@ -401,27 +606,19 @@ const sendStreaming = async (
                 buffer = buffer.slice(newline + 1);
                 newline = buffer.indexOf('\n');
 
-                if (!line.startsWith('data:')) continue;
-                const data = line.slice(5).trim();
-                if (!data) continue;
-                if (data === '[DONE]') { finished = true; break; }
+                handleDataLine(line);
+                if (finished) break;
+            }
+        }
 
-                let parsed: { choices?: { delta?: Record<string, unknown> }[] };
-                try {
-                    parsed = JSON.parse(data);
-                } catch (_error) {
-                    continue; // 单个事件坏掉不该中断整条流
-                }
-
-                const delta = parsed?.choices?.[0]?.delta;
-                if (!delta) continue;
-
-                const piece = pickText(delta.content);
-                // 推理字段名各家不一：reasoning_content 是 DeepSeek 系，reasoning 是通用写法
-                const think = pickText(delta.reasoning_content) || pickText(delta.reasoning);
-
-                if (piece) { content += piece; onDelta({ content: piece }); }
-                if (think) { reasoning += think; onDelta({ reasoning: think }); }
+        // 收尾：decoder 里可能还压着半个多字节字符，buffer 里可能还剩一行
+        // 没有换行符的尾行（上游最后一段正文常常如此）。两处都不处理等于
+        // 静默丢掉最后一段增量 —— 症状是回复永远少个标点或少半个字。
+        buffer += decoder.decode();
+        if (buffer.trim()) {
+            for (const line of buffer.split('\n')) {
+                handleDataLine(line.replace(/\r$/, ''));
+                if (finished) break;
             }
         }
     } finally {
@@ -429,7 +626,7 @@ const sendStreaming = async (
         try { await reader.cancel(); } catch (_error) { /* 已关闭 */ }
     }
 
-    return content;
+    return { reply: content, usage };
 };
 
 /** 发请求。网络层失败与用户中止要分开报，否则点停止会看到"无法连接 AI 服务" */
@@ -477,8 +674,12 @@ export const chatForSpeech = async (options: AiChatOptions): Promise<string | nu
         messages,
         modalities: ['audio'],
         audio: { voice: 'alloy', format: 'pcm16' },
-        reasoning_effort: resolveReasoningEffort(config, options.reasoningEffort),
     };
+
+    // 与 chat 同一套规则：没有可下发的档位就不带这个参数
+    const wireEffort = resolveReasoningEffort(config, options.reasoningEffort);
+    if (wireEffort) payload.reasoning_effort = wireEffort;
+
     if (typeof options.temperature === 'number') payload.temperature = options.temperature;
 
     let response: Response;
@@ -490,8 +691,13 @@ export const chatForSpeech = async (options: AiChatOptions): Promise<string | nu
                 ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
             },
             body: JSON.stringify(payload),
+            signal: options.signal,
         });
     } catch (error) {
+        // 与 requestCompletion 同一约定：中止原样抛出，调用方据此识别"用户停止"
+        if (error instanceof DOMException && error.name === 'AbortError') throw error;
+        if (error instanceof Error && error.name === 'AbortError') throw error;
+
         const reason = error instanceof Error ? error.message : '未知网络错误';
         throw new Error(`无法连接 AI 服务（${config.baseUrl}）：${reason}`);
     }
@@ -570,7 +776,7 @@ const extractBalanced = (text: string, open: string, close: string): unknown => 
 
 /**
  * 从可能带围栏/前后缀的回复里抠出 JSON 数组。
- * 导出仅供回归测试直接断言（见 scripts/test/aibook.test.js）。
+ * 导出仅供回归测试直接断言（见 test/aibook.test.js）。
  */
 export const extractJsonArray = (text: string): unknown[] | null => {
     const parsed = extractBalanced(text, '[', ']');
@@ -733,8 +939,11 @@ effect_chain {
 - \`compressor(threshold, ratio, attack, release)\`　压缩
 - \`filter(kind, from, to, Q, duration, start)\`　整体扫频，kind 见滤波器一节
 - \`eq(low, mid, high)\`　三段均衡，单位 dB
-参数名必须用上面列出的那些（\`time\` 不能写成 \`delay\`，\`decay\` 不能写成 \`size\`）；
-写错参数名会直接编译失败。
+参数名必须用上面列出的那些规范名；写错参数名会直接编译失败。
+以下同义写法也能编译，但会给出"已按某某处理"的提示，正式写法请直接用规范名：
+delay→time、fb→feedback、size→decay、drive→amount（失真里）、depth→bits（位深里）、
+speed→rate、tone→damping、bass→low、treble→high、ping_pong→pingpong、
+start→from、end→to（扫频里）、from→min、to→max（移相里）、dur→duration、at→start。
 
 **顺序很重要**：失真应放在延迟/混响之前，否则会把尾音一起弄脏。
 
@@ -776,6 +985,7 @@ mix {
 - 波形：sine | square | sawtooth | triangle
 - target 及其量纲：
   - \`frequency\` 颤音，amount 单位是**音分**（5~15 是自然颤音，50+ 是夸张效果）
+  - \`detune\` 与 frequency 同量纲（音分），直接调制失谐
   - \`filter\` 自动哇音，amount 单位是 **Hz**（200~2000）
   - \`gain\` 震音，amount 是 **0~1 的深度比例**（0.2~0.5）
   - \`pan\` 自动摇摆，amount 是 0~1
@@ -784,7 +994,7 @@ mix {
 例：\`lfo: "sine(freq=5.5, amount=10, target=frequency, ramp=0.6)"\`
 
 ==================== 时值写法 ====================
-\`1n\` 全音符　\`2n\` 二分　\`4n\` 四分　\`8n\` 八分　\`16n\` 十六分　\`32n\`　\`64n\`
+\`1n\` 全音符　\`2n\` 二分　\`4n\` 四分　\`8n\` 八分　\`16n\` 十六分　\`32n\`　\`64n\`　\`128n\`
 - 附点加 \`.\`：\`4n.\` = 1.5 倍，\`4n..\` = 1.75 倍
 - 三连音加 \`t\`：\`4nt\` = 2/3
 - 小节：\`1m\`（4/4 拍的 4 拍）
@@ -931,9 +1141,10 @@ const SPG_FIX_PROMPT = `
 2. 优先检查这些高频错误：
    - 音名不合法：必须是"字母A-G + 可选#/b + 八度数字"，且**必须加引号**（\`note("C4","4n")\` 而不是 \`note(C4,"4n")\`）
    - 时值不合法：只能用 4n / 8n. / 16nt / 1m / 250ms / 1.5s 这类写法
-   - **未知参数名**：报错信息里会列出该指令可用的参数，照着改。常见混淆是
-     \`delay(delay=...)\` 应为 \`delay(time=...)\`、\`reverb(size=...)\` 应为 \`reverb(decay=...)\`、
-     \`velocity\` 拼成 \`velo\`/\`velosity\`
+    - **未知参数名**：报错信息里会列出该指令可用的参数，照着改。常见混淆是
+      \`delay(delay=...)\` 应为 \`delay(time=...)\`、\`reverb(size=...)\` 应为 \`reverb(decay=...)\`
+      （这两个同义写法其实能编译，但会告警，修复时顺手改成规范名）、
+      \`velocity\` 拼成 \`velo\`/\`velosity\`
    - 引用了未定义的乐器或音序名（拼写不一致）——报错信息里会列出已定义的名字
    - 括号或引号没有配对
    - 使用了不存在的参数名或指令名（只能用文档里列出的那些）
@@ -1187,16 +1398,36 @@ export const extractMediaLinks = async (
     if (!parsed) return [];
 
     return parsed
+        /**
+         * 只收 http(s) 直链。
+         *
+         * `blob:` 必须排除：它是**页面自己那块内存**的句柄，不是可下载的远端资源 ——
+         * 跨不过进程边界（主进程下载器按这个地址请求只会失败），
+         * 播放器也不在页面那个源上，同样读不到。收进来等于给用户两个点了没反应的按钮。
+         *
+         * 提示词里写的就是 "direct media URLs"，页内脚本与网络层也都各自拦了 blob:，
+         * 唯独这里放行过 —— 三条路径口径必须一致，否则同一个页面走哪条路结论不同。
+         */
         .filter((item): item is { url: string; title?: string; type?: string } => {
             const url = (item as { url?: unknown })?.url;
-            return typeof url === 'string' && /^(https?:\/\/|blob:)/i.test(url.trim());
+            return typeof url === 'string' && /^https?:\/\//i.test(url.trim());
         })
         .slice(0, 50)
         .map((item) => {
             const cleanUrl = item.url.trim();
             const pathPart = cleanUrl.split('?')[0].split('#')[0];
-            const extGuess = pathPart.split('.').pop()?.toLowerCase();
-            const ext = extGuess && /^[a-z0-9]{2,5}$/.test(extGuess) ? extGuess : 'unknown';
+            const lastSegment = pathPart.split('/').pop() || '';
+            /**
+             * 后缀只从**最后一个路径段**里取，且必须是真正的扩展名。
+             *
+             * 早先直接 `pathPart.split('.').pop()`：路径里没有点时（`/stream/abc123`）
+             * 取到的是整个末段，`^[a-z0-9]{2,5}$` 一过就把它当成后缀 ——
+             * 于是落盘文件叫 `标题.abc123`，系统认不出类型。
+             * 现在要求末段里**确实有点**，且点不在首位（`.hidden` 不是后缀）。
+             */
+            const dot = lastSegment.lastIndexOf('.');
+            const extGuess = dot > 0 ? lastSegment.slice(dot + 1).toLowerCase() : '';
+            const ext = /^[a-z0-9]{2,5}$/.test(extGuess) ? extGuess : 'unknown';
             const type: MediaType = KNOWN_TYPES.includes(item.type as MediaType)
                 ? (item.type as MediaType)
                 : 'other';

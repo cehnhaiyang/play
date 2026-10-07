@@ -8,7 +8,7 @@
  * ============================================================================
  *
  * 解 cookie 只发生在主进程（渲染层拿不到密钥，也没有 DPAPI/NCrypt）。
- * 本模块**不 require electron** —— 后者让它可以被 scripts/test 直接
+ * 本模块**不 require electron** —— 后者让它可以被 test/ 直接
  * require 求值（与 edgeImportService/kbService 同一条边界）。
  *
  * 完整解密链：

@@ -23,7 +23,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.join(__dirname, '..', '..');
+const ROOT = path.join(__dirname, '..');
 
 let pass = 0;
 const fails = [];
@@ -150,6 +150,7 @@ const run = () => {
             ['g', {}, 'findNext'],
             ['g', { shift: true }, 'findPrev'],
             ['d', {}, 'toggleBookmark'],
+            ['k', {}, 'focusAgentInput'],
             ['i', { shift: true }, 'toggleDevTools'],
             ['=', {}, 'zoomIn'],
             ['+', {}, 'zoomIn'],
@@ -266,6 +267,8 @@ const run = () => {
             'openExternal', 'web-printing', 'idle-detection', 'local-fonts',
             'keyboardLock', 'window-management', 'web-app-installation',
             'payment-handler', 'vr', 'ar', 'hand-tracking', 'smart-card',
+            'local-network', 'local-network-access', 'loopback-network',
+            'periodic-background-sync',
         ];
         for (const p of mustDeny) {
             const d = svc.decidePermission(p);
@@ -281,6 +284,7 @@ const run = () => {
             'fullscreen', 'automatic-fullscreen', 'pointerLock',
             'persistent-storage', 'storage-access', 'top-level-storage-access',
             'background-sync', 'background-fetch', 'screen-wake-lock', 'system-wake-lock',
+            'clipboard-sanitized-write', 'speaker-selection', 'mediaKeySystem',
         ];
         for (const p of mustAllow) {
             eq(svc.decidePermission(p).allow, true, `权限 ${p} 必须放行`);
@@ -472,6 +476,46 @@ const run = () => {
         eq(r.stripped.length, 6, '六项都该记进 stripped');
     });
 
+    check('webview 校验：遗留高危项与能力开关同样被剥掉', () => {
+        // 第二轮补的：旧版 Electron 的 worker/remote 与可扩大攻击面的开关。
+        // 删掉任一 stripped.push 就会让 dangerouslySetInnerHTML 式的
+        // 页面自建 webview 拿到更多能力，且之前没有任何测试盯着。
+        const prefs = {
+            nodeIntegrationInWorker: true,
+            enableRemoteModule: true,
+            plugins: true,
+            experimentalFeatures: true,
+            enableBlinkFeatures: 'Accelerated2dCanvas',
+        };
+        const r = svc.reviewWebviewPreferences(prefs, { src: 'https://example.com/' });
+        eq(r.ok, true, '剥掉之后应当放行');
+        eq(prefs.nodeIntegrationInWorker, false);
+        eq(prefs.enableRemoteModule, false);
+        eq(prefs.plugins, false);
+        eq(prefs.experimentalFeatures, false);
+        eq(prefs.enableBlinkFeatures, undefined, '特性串应当整个删掉而不是置空');
+        eq(r.stripped.length, 5, '五项都该记进 stripped');
+    });
+
+    check('webview 校验：十一项高危配置一次记全（防回归网）', () => {
+        const prefs = {
+            preload: '/evil/preload.js',
+            nodeIntegration: true,
+            nodeIntegrationInSubFrames: true,
+            contextIsolation: false,
+            webSecurity: false,
+            allowRunningInsecureContent: true,
+            nodeIntegrationInWorker: true,
+            enableRemoteModule: true,
+            plugins: true,
+            experimentalFeatures: true,
+            enableBlinkFeatures: 'x',
+        };
+        const r = svc.reviewWebviewPreferences(prefs, { src: 'https://example.com/' });
+        eq(r.ok, true);
+        eq(r.stripped.length, 11, '十一项都该记进 stripped，少一项都是回归');
+    });
+
     check('webview 校验：不允许的协议被拦截', () => {
         for (const bad of ['javascript:alert(1)', 'chrome-extension://abc/x.html', 'ftp://x/y']) {
             const r = svc.reviewWebviewPreferences({}, { src: bad });
@@ -499,6 +543,26 @@ const run = () => {
         eq(svc.sanitizeDownloadName('x\u0000y.txt'), 'x_y.txt');
         eq(svc.sanitizeDownloadName(''), 'download', '空名给兜底');
         eq(svc.sanitizeDownloadName(null), 'download');
+    });
+
+    check('下载：Windows 保留名与尾点空格被处理', () => {
+        // 保留名直接落盘会失败；尾点空格会被系统静默截掉导致重名判断错位
+        eq(svc.sanitizeDownloadName('CON.txt'), '_CON.txt');
+        eq(svc.sanitizeDownloadName('nul'), '_nul');
+        eq(svc.sanitizeDownloadName('com1.zip'), '_com1.zip');
+        eq(svc.sanitizeDownloadName('file.'), 'file');
+        eq(svc.sanitizeDownloadName('file... '), 'file');
+        eq(svc.sanitizeDownloadName('...'), 'download', '只剩点时回兜底');
+        // 非保留名不受影响
+        eq(svc.sanitizeDownloadName('control.txt'), 'control.txt');
+    });
+
+    check('下载：超长文件名截断但保留扩展名', () => {
+        const out = svc.sanitizeDownloadName('a'.repeat(300) + '.txt');
+        assert(out.length <= 104, `截断后应 <= 104，实际 ${out.length}`);
+        assert(out.endsWith('.txt'), '扩展名必须保留');
+        eq(svc.sanitizeDownloadName('b'.repeat(300)), 'b'.repeat(100));
+        eq(svc.sanitizeDownloadName('short.txt'), 'short.txt', '短名不受影响');
     });
 
     check('下载：重名自动编号，绝不覆盖', () => {
@@ -689,6 +753,47 @@ const run = () => {
         assert(!labels.includes('tenth'), '第 6 条建议应当被截掉');
     });
 
+    check('右键菜单：带链接的图片同时给链接项与媒体项', () => {
+        // 第一轮把 !linkURL 跳过改成了 srcURL !== linkURL 展开：
+        // 带链接的图片要能"存下图"，不能只能存链接
+        const tpl = svc.buildContextMenuTemplate({
+            params: {
+                linkURL: 'https://a.test/page',
+                mediaType: 'image',
+                srcURL: 'https://a.test/pic.png',
+            },
+            isGuest: true,
+            handlers: {
+                openLink: () => { }, saveLink: () => { }, saveMedia: () => { },
+                copyText: () => { }, inspect: () => { },
+            },
+        });
+        const labels = tpl.map((i) => i.label).filter(Boolean);
+        assert(labels.some((l) => l.includes('在新标签页中打开链接')), '缺少链接打开项');
+        assert(labels.some((l) => l.includes('在新标签页中打开图片')), '缺少图片打开项');
+        assert(labels.some((l) => l.includes('图片另存为')), '缺少图片另存为');
+        assert(labels.some((l) => l.includes('复制图片地址')), '缺少复制图片地址');
+        eq(labels.filter((l) => l.includes('在新标签页中打开')).length, 2, '链接与媒体各一遍打开项');
+    });
+
+    check('右键菜单：图片与链接同地址时不重复展开', () => {
+        const tpl = svc.buildContextMenuTemplate({
+            params: {
+                linkURL: 'https://a.test/pic.png',
+                mediaType: 'image',
+                srcURL: 'https://a.test/pic.png',
+            },
+            isGuest: true,
+            handlers: {
+                openLink: () => { }, saveLink: () => { }, saveMedia: () => { },
+                copyText: () => { }, inspect: () => { },
+            },
+        });
+        const labels = tpl.map((i) => i.label).filter(Boolean);
+        eq(labels.filter((l) => l.includes('在新标签页中打开')).length, 1, '同地址只给一遍打开项');
+        assert(!labels.some((l) => l.includes('图片另存为')), '同地址不该再给媒体另存为');
+    });
+
     /* ====================================================================== */
     /* 11. 跨文件契约                                                          */
     /* ====================================================================== */
@@ -862,8 +967,12 @@ const run = () => {
     check('契约：切换标签页时查找条要收掉', () => {
         const browseSrc = fs.readFileSync(path.join(ROOT, 'hooks', 'useBrowse.ts'), 'utf8');
         // 查找是针对具体页面的，跟着切会找错页
-        assert(/useEffect\(\(\) => \{\s*if \(!findQueryRef\.current\) return;/.test(browseSrc),
+        assert(/if \(!findQueryRef\.current\) return;/.test(browseSrc),
             '没有在切换标签页时收掉查找条');
+        // 只清 state 不停旧页会话的话，旧页黄色高亮残留
+        // （切回去显示 0/0，但页面上高亮还在）
+        assert(/stopFindInPage\(prev\)/.test(browseSrc),
+            '切页时没有停掉旧页的查找高亮');
     });
 
     check('契约：右键填 Agent 输入框只在输入框空着时生效', () => {
@@ -1007,7 +1116,7 @@ const run = () => {
     });
 
     check('契约：磁力下载是浏览器全屏页（与 ACG/音频/播放器同概念）', () => {
-        const panelSrc = fs.readFileSync(path.join(ROOT, 'components', 'TorrentPanel', 'index.tsx'), 'utf8');
+        const panelSrc = fs.readFileSync(path.join(ROOT, 'components', 'TorrentPanel.tsx'), 'utf8');
         assert(/export const TorrentPanel/.test(panelSrc), 'TorrentPanel 没有导出');
         assert(/onBack/.test(panelSrc), 'TorrentPanel 没有返回入口 —— 全屏页必须能回浏览');
         assert(/useMagnetSearch/.test(panelSrc), 'TorrentPanel 没有接 useMagnetSearch —— 搜索与任务断了');
@@ -1018,6 +1127,134 @@ const run = () => {
         assert(/'torrent'/.test(appSrc), 'App 的 ViewMode 没有 torrent');
         assert(/<TorrentPanel onBack/.test(appSrc), 'App 没有挂载 TorrentPanel');
         assert(/onNavigateToTorrent=\{openTorrentView\}/.test(appSrc), 'App 没有把入口传给 BrowsePanel');
+    });
+
+    /* ====================================================================== */
+    /* 第三轮：错误层清理 / 提交去重 / 缩放回写 / 地址判据补强 / 下载续传 / 弹窗节流 */
+    /* ====================================================================== */
+
+    check('缩放：factor→level 逆换算与夹取', () => {
+        eq(browser.zoomFactorToLevel(1), 0);
+        eq(browser.zoomFactorToLevel(1.2), 1);
+        eq(browser.zoomFactorToLevel(1.44), 2);
+        eq(browser.zoomFactorToLevel(1 / 1.2), -1);
+        eq(browser.zoomFactorToLevel(Math.pow(1.2, 5)), 5);
+        eq(browser.zoomFactorToLevel(100), 5, '超大值要夹到上限');
+        eq(browser.zoomFactorToLevel(0.001), -5, '超小值要夹到下限');
+        eq(browser.zoomFactorToLevel(NaN), 0);
+        eq(browser.zoomFactorToLevel(0), 0);
+        eq(browser.zoomFactorToLevel(-2), 0);
+        // 往返一致：level→factor→level 不能漂移，否则回写一次指示就错一档
+        for (let l = -5; l <= 5; l++) {
+            eq(browser.zoomFactorToLevel(browser.zoomLevelToFactor(l)), l, `level ${l} 往返漂移`);
+        }
+    });
+
+    check('地址栏：about:blank 开空白页而不是搜这个词', () => {
+        assert(browser.isAddressLike('about:blank'), 'about:blank 没被认成地址');
+        assert(browser.isAddressLike('ABOUT:BLANK'), '大小写没处理');
+        // 提交路径与显示判据同一份实现：回车必须落到空白页，不是搜索页
+        eq(browser.resolveInputUrl('about:blank', 'https://www.bing.com/search?q='), 'about:blank');
+        eq(browser.resolveInputUrl('  hello world  ', 'https://www.bing.com/search?q='),
+            'https://www.bing.com/search?q=hello%20world', '搜索词要走引擎前缀');
+        eq(browser.resolveInputUrl('example.com', 'https://www.bing.com/search?q='), 'https://example.com');
+        eq(browser.resolveInputUrl('', 'https://www.bing.com/search?q='), '', '空输入返回空串');
+    });
+
+    check('地址栏：非法 IPv4（段>255）退回搜索', () => {
+        assert(!browser.isAddressLike('999.999.999.999'), '999 段被当成网址，只会落到 DNS 错误页');
+        assert(!browser.isAddressLike('1.2.3.256'), '256 段被当成网址');
+        assert(browser.isAddressLike('192.168.1.1'), '合法内网 IP 被误判成搜索');
+        assert(browser.isAddressLike('8.8.8.8'), '合法 IP 被误判成搜索');
+        assert(browser.isAddressLike('10.0.0.1:8080/path'), '带端口路径的合法 IP 被误判');
+    });
+
+    check('契约：reload/hardReload 清掉错误/崩溃盖层', () => {
+        const browseSrc = fs.readFileSync(path.join(ROOT, 'hooks', 'useBrowse.ts'), 'utf8');
+        // 同 URL 重载不走 syncTabUrl 的"变地址清层"分支，不清的话 F5 后
+        // 新页面在盖层底下加载、用户以为刷新无效
+        const reloadFn = browseSrc.slice(
+            browseSrc.indexOf('const reload = useCallback'),
+            browseSrc.indexOf('}, []);', browseSrc.indexOf('const reload = useCallback')));
+        assert(/error: null/.test(reloadFn) && /crashed: false/.test(reloadFn),
+            'reload 没有清错误/崩溃盖层');
+        assert(!/hardReloadKey:/.test(reloadFn), 'reload 不该碰 hardReloadKey');
+
+        const hardFn = browseSrc.slice(
+            browseSrc.indexOf('const hardReload = useCallback'),
+            browseSrc.indexOf('}, []);', browseSrc.indexOf('const hardReload = useCallback')));
+        assert(/error: null/.test(hardFn) && /crashed: false/.test(hardFn),
+            'hardReload 没有清错误/崩溃盖层');
+        assert(!/reloadKey:/.test(hardFn), 'hardReload 不该碰 reloadKey');
+    });
+
+    check('契约：地址栏连击只提交一次', () => {
+        const browseSrc = fs.readFileSync(path.join(ROOT, 'hooks', 'useBrowse.ts'), 'utf8');
+        // 非空白页每次提交都开新标签，连按两次回车会开出两个同 URL 标签
+        assert(/lastSubmitRef\.current\.time < 1000/.test(browseSrc),
+            'handleNavigate 没有连击去重');
+    });
+
+    check('契约：页内原生缩放回写 Tab 状态', () => {
+        const browseSrc = fs.readFileSync(path.join(ROOT, 'hooks', 'useBrowse.ts'), 'utf8');
+        // Ctrl+滚轮走 Chromium 原生缩放不经过命令通道，不回写指示过期、
+        // 下一次 Ctrl+加号按过期基准跳变
+        assert(browseSrc.includes("addEventListener('zoom-changed'"), '没有监听 zoom-changed');
+        assert(/zoomFactorToLevel\(/.test(browseSrc), '回写没有用统一的逆换算');
+        assert(!/Math\.log\(factor\)/.test(browseSrc), '逆换算又在 useBrowse 里写了一份副本');
+    });
+
+    check('契约：reviveTab 无事件时不永久转圈', () => {
+        const browseSrc = fs.readFileSync(path.join(ROOT, 'hooks', 'useBrowse.ts'), 'utf8');
+        const reviveFn = browseSrc.slice(
+            browseSrc.indexOf('const reviveTab = useCallback'),
+            browseSrc.indexOf('}, [tabActions]);', browseSrc.indexOf('const reviveTab = useCallback')));
+        assert(/setTimeout/.test(reviveFn) && /isLoading\(\)/.test(reviveFn),
+            'reviveTab 没有无事件兜底 —— reload 成功调用但零事件时永久转圈且无恢复入口');
+    });
+
+    check('契约：地址判据只有服务层一份实现', () => {
+        const browseSrc = fs.readFileSync(path.join(ROOT, 'hooks', 'useBrowse.ts'), 'utf8');
+        // 判据搬进 BrowserService（可单测）之后，hook 里不许再留第二份正则/实现
+        assert(!/const SAFE_SCHEME_RE/.test(browseSrc), 'useBrowse 里还有一份 SAFE_SCHEME_RE');
+        assert(!/const HOSTNAME_RE/.test(browseSrc), 'useBrowse 里还有一份 HOSTNAME_RE');
+        assert(!/const isUrlLike/.test(browseSrc), 'useBrowse 里还有一份 isUrlLike');
+        assert(/resolveInputUrl\(input, ENGINE_URLS\[engine\]\)/.test(browseSrc),
+            'parseInputToUrl 没有走统一的 resolveInputUrl');
+    });
+
+    check('契约：标题截断后再入库', () => {
+        const browseSrc = fs.readFileSync(path.join(ROOT, 'hooks', 'useBrowse.ts'), 'utf8');
+        assert(/title\.trim\(\)\.slice\(0, 200\)/.test(browseSrc),
+            'updateTabTitle 存了全量标题 —— 恶意页超长标题进内存状态与 localStorage 快照');
+    });
+
+    check('契约：全局 Esc 不抢可编辑控件的按键', () => {
+        const panelSrc = fs.readFileSync(path.join(ROOT, 'components', 'BrowsePanel.tsx'), 'utf8');
+        // 地址栏 Esc 只是失焦，不拦的话后台开着的查找条被连带关闭、高亮被清掉
+        assert(/isEditableTarget\(event\.target\)/.test(panelSrc),
+            '全局 Esc 处理没有可编辑控件守卫');
+    });
+
+    check('契约：下载续传按钮与主进程真实能力一致', () => {
+        const panelSrc = fs.readFileSync(path.join(ROOT, 'components', 'BrowsePanel.tsx'), 'utf8');
+        // 中断但支持续传：以前只有"移除"，能力被藏起来了
+        assert(/item\.state === 'interrupted' && item\.canResume/.test(panelSrc),
+            '中断可续传的下载没有续传入口');
+        // 不支持续传的暂停：点了也是主进程拒掉、界面毫无反馈，按钮该禁用
+        assert(/item\.paused && item\.canResume === false/.test(panelSrc),
+            '不支持续传的暂停仍给可点的"继续"');
+    });
+
+    check('接线：window.open 弹窗洪水被节流', () => {
+        const mainSrc = fs.readFileSync(path.join(ROOT, 'electron', 'main.js'), 'utf8');
+        // 页面里 while(1) window.open 会无上限开标签页（每个带一个 webview）
+        assert(/popupOpenTimes = new WeakMap/.test(mainSrc), '没有弹窗记账');
+        assert(/list\.length >= 8/.test(mainSrc), '没有节流阈值');
+        // 调用 2 次（主窗口 handler 与 guest handler）+ 定义 1 处
+        eq((mainSrc.match(/allowPopupOpen\(/g) || []).length, 2,
+            '节流只挂了一处 handler，另一处仍可被洪水打穿');
+        assert(/const allowPopupOpen = /.test(mainSrc), '节流函数定义丢失');
     });
 
     /* ====================================================================== */

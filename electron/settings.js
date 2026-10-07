@@ -19,7 +19,10 @@ const path = require('path');
  * - AI 走 OpenAI 兼容协议（/chat/completions），默认指向tc2api。
  */
 
-/** 合法档位：界面与配置里只有这三档；服务商口径的转换在 AiService 下发前做 */
+/**
+ * 合法档位：界面与配置里只有这三档；服务商口径的转换在 AiService 下发前做。
+ * 档位是可选字段，缺省即「不思考」（请求不下发 reasoning_effort）。
+ */
 const REASONING_EFFORTS = ['low', 'high', 'max'];
 
 /** AI 服务默认值：本地 tc2api */
@@ -65,6 +68,9 @@ function settingsPath() {
  * 归一化 AI 配置。存量配置可能是手改过的、缺字段的、或上一版结构，
  * 这里保证任何输入都能得到一份字段齐全且合法的配置，读盘阶段不抛错。
  * 非法值一律回落到默认值，而不是让整个 AI 功能不可用。
+ *
+ * 例外是思考档位：它是可选字段，缺省即「不思考」，不能回落成默认档 ——
+ * 否则用户特意选的「不思考」会在读盘时被悄悄改回 low。
  */
 function normalizeAiConfig(input) {
     const raw = input && typeof input === 'object' ? input : {};
@@ -79,7 +85,7 @@ function normalizeAiConfig(input) {
         // 用户主动清空过，不该被"默认值"悄悄填回去；字段整个缺失才是没配过。
         apiKey: typeof raw.apiKey === 'string' ? apiKey : DEFAULT_AI.apiKey,
         model: model || DEFAULT_AI.model,
-        reasoningEffort: REASONING_EFFORTS.includes(effort) ? effort : DEFAULT_AI.reasoningEffort,
+        ...(REASONING_EFFORTS.includes(effort) ? { reasoningEffort: effort } : {}),
     };
 }
 
@@ -203,8 +209,10 @@ function normalizeAiInput(input) {
         return { value: null, error: '接口地址格式不合法' };
     }
     if (!model) return { value: null, error: '模型名不能为空' };
-    if (!REASONING_EFFORTS.includes(effort)) {
-        return { value: null, error: `思考强度只能是 ${REASONING_EFFORTS.join(' / ')}` };
+    // 档位可选：留空 = 不思考（请求不下发 reasoning_effort）；
+    // 填了就必须在白名单里，避免拼错的档位被静默忽略。
+    if (effort && !REASONING_EFFORTS.includes(effort)) {
+        return { value: null, error: `思考强度只能是 ${REASONING_EFFORTS.join(' / ')}，或留空表示不思考` };
     }
 
     return {
@@ -213,7 +221,7 @@ function normalizeAiInput(input) {
             baseUrl: baseUrl.replace(/\/+$/, ''),
             apiKey,
             model,
-            reasoningEffort: effort,
+            ...(effort ? { reasoningEffort: effort } : {}),
         },
         error: '',
     };
@@ -266,24 +274,28 @@ function saveAiConfig(input) {
     if (error) return { success: false, ai: getSettings().ai, message: error };
     const res = writeSettings({ ai: value });
     if (!res.success) return { success: false, ai: getSettings().ai, message: res.message };
-    return { success: true, ai: value, message: `已保存：${value.model}（思考强度 ${value.reasoningEffort}）` };
+    return { success: true, ai: value, message: `已保存：${value.model}（思考强度 ${value.reasoningEffort || '不思考'}）` };
 }
 
 /**
  * 真实探活：拿当前配置发一次最小请求，验证地址/密钥/模型三者确实可用。
  * 设置面板的「测试连接」用它，避免用户存了一份连不上的配置却毫不知情。
  *
- * `wireEffort` 是映射后的档位取值（如 OFM 的 balanced），由渲染层算好传入；
- * 缺省时用配置里的档位。
+ * `wireEffort` 是映射后的档位取值，由渲染层算好传入（映射表在 AiService）：
+ * - `null`    = 明确不下发（服务商不需要思考，或用户选了「不思考」）；
+ * - 字符串    = 只做粗略的形状校验，合法性由映射表那一侧负责；
+ * - 缺省      = 回落到配置里的档位，兼容旧的调用方。
  */
 async function testAiConnection(input, wireEffort) {
     const { value, error } = normalizeAiInput(input);
     if (error) return { success: false, message: error };
 
-    // 这里只做粗略的形状校验，档位的合法性由映射表那一侧负责
-    const effort = typeof wireEffort === 'string' && /^[a-z0-9_-]{1,32}$/i.test(wireEffort.trim())
-        ? wireEffort.trim()
-        : value.reasoningEffort;
+    const wire = typeof wireEffort === 'string' ? wireEffort.trim() : '';
+    const effort = wireEffort === null
+        ? ''
+        : /^[a-z0-9_-]{1,32}$/i.test(wire)
+            ? wire
+            : (value.reasoningEffort || '');
 
     const startedAt = Date.now();
     try {
@@ -299,7 +311,7 @@ async function testAiConnection(input, wireEffort) {
                 // 128 而非 8：推理模型的思考过程也占 completion 预算，
                 // 给太小会导致 content 为空，探活看起来"通了但没回话"
                 max_tokens: 128,
-                reasoning_effort: effort,
+                ...(effort ? { reasoning_effort: effort } : {}),
             }),
             signal: AbortSignal.timeout(20000),
         });

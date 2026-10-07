@@ -34,7 +34,7 @@
  *
  *   - 判据部分（resolveBrowserShortcut / decidePermission /
  *     buildContextMenuTemplate / snapshotDownload …）
- *     全是纯函数，不碰 Electron，可以被 scripts/test 直接 require 求值；
+ *     全是纯函数，不碰 Electron，可以被 test/ 直接 require 求值；
  *   - 接线部分（attachGuestExtras / setupBrowserSession / setupBrowserIpc）
  *     只做事件挂载与转发，不含策略。
  *
@@ -72,6 +72,9 @@ const BROWSER_KEY_ACTIONS = [
     'zoomIn', 'zoomOut', 'zoomReset',
     // 其它
     'toggleBookmark', 'toggleDevTools',
+    // Agent 工作区：界面层动作（渲染层只转发给面板）。按键仍要 preventDefault ——
+    // Ctrl+K 在页面里没有对应功能，不拦的话页面会收到一个无意义的组合键
+    'focusAgentInput',
 ];
 
 /**
@@ -102,7 +105,7 @@ const BROWSER_PUSH_ACTIONS = [
  * **这张表是主进程与渲染层的契约**，两边各有一份（这边是 JS 数组，
  * meta/interface.ts 那边是 TS 联合类型）。两份漂移的症状是"按了没反应"——
  * 渲染层收到一个自己不认识的动作名，只能静默忽略。所以有一处静态断言
- * 逐字比对这两份清单（scripts/test/browser.test.js）。
+ * 逐字比对这两份清单（test/browser.test.js）。
  *
  * 由三个子表拼成，而不是手写一个平铺列表：分类本身是有意义的
  * （要不要拦按键、是不是用户操作），拼起来又保证了不会漏。
@@ -177,6 +180,7 @@ function resolveBrowserShortcut(input) {
             case 'f': hit = { action: 'find' }; break;
             case 'g': hit = { action: shift ? 'findPrev' : 'findNext' }; break;
             case 'd': hit = { action: 'toggleBookmark' }; break;
+            case 'k': hit = { action: 'focusAgentInput' }; break;
             case 'i': hit = shift ? { action: 'toggleDevTools' } : null; break;
             // Ctrl+= / Ctrl++ / Ctrl+Shift+= 都给 '+'，归一到放大；Ctrl+- / Ctrl+_ 归一缩小
             case '=': case '+': hit = { action: 'zoomIn' }; break;
@@ -364,6 +368,20 @@ function reviewWebviewPreferences(webPreferences, params) {
         webPreferences.enableRemoteModule = false;
         stripped.push('enableRemoteModule');
     }
+    // 默认关闭、开起来只会扩大攻击面的能力。页面脚本可以自建 webview 并
+    // 在 webpreferences 串里带上这些，显式开启才剥 —— 正常站点用不到它们。
+    if (webPreferences.plugins) {
+        webPreferences.plugins = false;
+        stripped.push('plugins');
+    }
+    if (webPreferences.experimentalFeatures) {
+        webPreferences.experimentalFeatures = false;
+        stripped.push('experimentalFeatures');
+    }
+    if (webPreferences.enableBlinkFeatures) {
+        delete webPreferences.enableBlinkFeatures;
+        stripped.push('enableBlinkFeatures');
+    }
 
     const src = String((params && params.src) || '');
     if (src) {
@@ -430,6 +448,14 @@ function sanitizeDownloadName(name) {
     const base = ext ? cleaned.slice(0, cleaned.length - ext.length) : cleaned;
     if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(base)) {
         cleaned = '_' + cleaned;
+    }
+    // 过长文件名截断（保留扩展名，只截 base 到 100 字符）：
+    // 超长在 setSavePath 才抛，之前过长的名字已经进了快照污染界面，
+    // 而调用方的 catch 只会退回保存对话框 —— 用户要手动改名。
+    const LONG_EXT = path.extname(cleaned);
+    const LONG_BASE = LONG_EXT ? cleaned.slice(0, cleaned.length - LONG_EXT.length) : cleaned;
+    if (LONG_BASE.length > 100) {
+        cleaned = LONG_BASE.slice(0, 100) + LONG_EXT;
     }
     // Windows 不允许末尾的点与空格（会被静默截掉，导致重名判断错位）
     const loneDotExt = ext === '.';
@@ -617,6 +643,16 @@ const preparedSessions = new WeakSet();
 const downloadRecords = new Map();
 let downloadSeq = 0;
 
+/**
+ * 已分配但尚未落盘的保存路径。
+ *
+ * `uniqueSavePath` 只看"磁盘上有没有"，两次 will-download 紧挨着进来时
+ * 两边都看不到对方（上一个还没写出任何字节），会拿到同一个 candidate，
+ * 后落盘的覆盖先落盘的。JS 单线程让"查预留→占预留"天然原子，
+ * 所以分配即占位、终结即释放就能堵住这个竞态。
+ */
+const reservedSavePaths = new Set();
+
 /** 上一次推送进度的时间，用于节流 */
 const lastProgressAt = new Map();
 
@@ -631,22 +667,32 @@ let windowGetter = () => null;
 
 /** 往渲染层发一条浏览器命令 */
 function sendCommand(payload, webContents) {
-    const win = windowGetter();
-    if (!win || win.isDestroyed()) return;
-    // 带上来源 webContents 的 id：渲染层据此把命令路由到**发出它的那个标签页**，
-    // 而不是一律当成"当前标签页"。发声状态这类异步推送尤其需要它 ——
-    // 后台标签页开始放音频时，当前标签页根本没变。
-    win.webContents.send('browser-command', {
-        ...payload,
-        webContentsId: webContents && !webContents.isDestroyed() ? webContents.id : 0,
-    });
+    // isDestroyed 检查与 send 之间窗口可能被销毁（下载中关窗、shutdown 间隙的
+    // audio-state-changed），裸调会把异常抛进事件发射器。helper 内部兜住。
+    try {
+        const win = windowGetter();
+        if (!win || win.isDestroyed()) return;
+        // 带上来源 webContents 的 id：渲染层据此把命令路由到**发出它的那个标签页**，
+        // 而不是一律当成"当前标签页"。发声状态这类异步推送尤其需要它 ——
+        // 后台标签页开始放音频时，当前标签页根本没变。
+        win.webContents.send('browser-command', {
+            ...payload,
+            webContentsId: webContents && !webContents.isDestroyed() ? webContents.id : 0,
+        });
+    } catch (error) {
+        console.error('browser-command 下发失败:', error);
+    }
 }
 
 /** 往渲染层发一条下载快照 */
 function sendDownload(snapshot) {
-    const win = windowGetter();
-    if (!win || win.isDestroyed()) return;
-    win.webContents.send('browser-download', snapshot);
+    try {
+        const win = windowGetter();
+        if (!win || win.isDestroyed()) return;
+        win.webContents.send('browser-download', snapshot);
+    } catch (error) {
+        console.error('browser-download 下发失败:', error);
+    }
 }
 
 /**
@@ -702,7 +748,16 @@ function beginDownload(item, webContents) {
     let savePath = '';
     try {
         savePath = uniqueSavePath(app.getPath('downloads'), rawName);
+        if (reservedSavePaths.has(savePath)) {
+            // 并发同名：上一个已分配但还没落盘，existsSync 看不到它。
+            // 序号+时间戳双保险（同一毫秒内两次并发只靠时间戳仍会撞）。
+            const dir = app.getPath('downloads');
+            const dupExt = path.extname(rawName);
+            const dupBase = dupExt ? rawName.slice(0, rawName.length - dupExt.length) : rawName;
+            savePath = path.join(dir, dupBase + ' (' + Date.now() + '-' + downloadSeq + ')' + dupExt);
+        }
         item.setSavePath(savePath);
+        reservedSavePaths.add(savePath);
     } catch (error) {
         // 设不上就退回 Electron 的默认流程（弹保存对话框），至少不会丢文件
         console.error('设置下载路径失败，改用默认流程:', error);
@@ -723,6 +778,9 @@ function beginDownload(item, webContents) {
         canResume: false,
         startedAt: Date.now(),
         endedAt: 0,
+        // 已被移除的记录：监听闭包还在，updated/done 回来时必须跳过推送，
+        // 否则渲染层 upsert 会把删掉的下载"复活"回列表顶部。
+        disposed: false,
     };
 
     downloadRecords.set(id, record);
@@ -730,6 +788,7 @@ function beginDownload(item, webContents) {
     sendDownload(snapshotDownload(record));
 
     item.on('updated', (_event, state) => {
+        if (record.disposed) return;
         record.receivedBytes = item.getReceivedBytes();
         record.totalBytes = item.getTotalBytes();
         record.paused = item.isPaused();
@@ -745,12 +804,18 @@ function beginDownload(item, webContents) {
     });
 
     item.once('done', (_event, state) => {
+        lastProgressAt.delete(id);
+        if (record.disposed) return;
         record.receivedBytes = item.getReceivedBytes();
         record.totalBytes = item.getTotalBytes();
+        // 首个 updated 之前就失败/中断的下载，canResume 还停在初始 false，
+        // 即使服务端支持 Range 界面也会显示"无法继续"。收尾时刷新一次。
+        try { record.canResume = item.canResume(); } catch (_e) { /* 保持旧值 */ }
         record.state = state;
         record.paused = false;
         record.endedAt = Date.now();
-        lastProgressAt.delete(id);
+        // 落盘（或终结）后预留即释放：之后同名下载靠 existsSync 避让，不再占集合
+        if (record.savePath) reservedSavePaths.delete(record.savePath);
         sendDownload(snapshotDownload(record));
     });
 }
@@ -760,7 +825,13 @@ function pruneDownloadRecords() {
     if (downloadRecords.size <= DOWNLOAD_HISTORY_MAX) return;
     const ordered = [...downloadRecords.values()].sort((a, b) => a.startedAt - b.startedAt);
     const drop = ordered.slice(0, downloadRecords.size - DOWNLOAD_HISTORY_MAX);
-    for (const record of drop) downloadRecords.delete(record.id);
+    for (const record of drop) {
+        // 进行中/中断的不摘：监听闭包还活着，摘了旧推送会把记录"复活"，
+        // 而且中断的恢复还要写回原路径。只摘终结的。
+        if (record.state === 'progressing' || record.state === 'interrupted') continue;
+        if (record.savePath) reservedSavePaths.delete(record.savePath);
+        downloadRecords.delete(record.id);
+    }
 }
 
 /** 全部下载快照，新的在前 */
@@ -809,6 +880,11 @@ async function actOnDownload(id, action) {
                 }
                 break;
             case 'remove':
+                // 只摘记录不 cancel：下载本身继续在后台写文件（与 Chrome 的
+                // "从列表中移除"一致）。打 disposed 标记让后续 updated/done
+                // 跳过推送，否则渲染层 upsert 会把它"复活"回列表。
+                record.disposed = true;
+                if (record.savePath) reservedSavePaths.delete(record.savePath);
                 downloadRecords.delete(record.id);
                 return { success: true };
             default:
@@ -966,7 +1042,15 @@ function setupBrowserIpc(getWindow) {
 
     const { ipcMain } = require('electron');
 
-    ipcMain.handle('browser-downloads', async () => listDownloads());
+    ipcMain.handle('browser-downloads', async () => {
+        try {
+            return listDownloads();
+        } catch (error) {
+            // 与 action 通道对称：这里抛了渲染层会 hang 住等一个永远不来的列表
+            console.error('读取下载列表失败:', error);
+            return [];
+        }
+    });
     ipcMain.handle('browser-download-action', async (_event, payload) => {
         const id = payload && payload.id;
         const action = payload && payload.action;

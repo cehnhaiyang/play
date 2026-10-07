@@ -22,7 +22,11 @@ import {
     classifyNavigationError,
     shouldShowNavigationError,
     nextZoomLevel,
+    resolveInputUrl,
     zoomLevelToFactor,
+    zoomFactorToLevel,
+    ZOOM_MIN_LEVEL,
+    ZOOM_MAX_LEVEL,
     type NavigationError,
 } from '../services/BrowserService';
 export type { MergeStats } from '../services/BookmarkService';
@@ -44,7 +48,26 @@ import {
     type MergeStats,
 } from '../services/BookmarkService';
 import { loadJSON, loadStr, saveJSON, saveStr } from '../utils/persist';
-import { MEDIA_EXTENSIONS, generateId, isAcgUrl, isLinkFromPage, isRealUrl } from '../utils/utils';
+import { MEDIA_EXTENSIONS, generateId, isAcgUrl, isGenericTitle, isHlsSegmentPath, isLinkFromPage, isRealUrl, requiresFfmpeg, HLS_SEGMENT_RE_SOURCE } from '../utils/utils';
+
+/**
+ * webview 方法是否可用。
+ *
+ * vite 开发服（localhost:5173）里 `<webview>` 只是未知 HTML 标签，
+ * Electron 才给它装上 stop/reload/findInPage 这些方法。直接调用会抛
+ * `TypeError: webview.stop is not a function`，被各处的 try/catch 接住后
+ * 以 console.error 刷进运行日志 —— 看起来像"报错 2 条"，实际只是环境差异。
+ * 调用前先判 typeof：方法不存在时静默跳过（非 Electron 下本就做不了这件事），
+ * 只有方法存在但执行抛错时才记日志。
+ */
+const hasWebviewFn = (webview: unknown, name: string): boolean => {
+    try {
+        const el = webview as Record<string, unknown>;
+        return !!el && typeof el[name] === 'function';
+    } catch {
+        return false;
+    }
+};
 
 /**
  * ============================================================================
@@ -65,7 +88,7 @@ import { MEDIA_EXTENSIONS, generateId, isAcgUrl, isLinkFromPage, isRealUrl } fro
  *
  * 例外：两个**纯判据**函数是导出的（pickStoredTabs、shouldAddressBarFollow）。
  * 它们原本内联在 hook 里、读 localStorage 或闭包状态，无法单测；
- * 抽成纯函数后由 scripts/test 直接求值断言。它们不持有任何状态，
+ * 抽成纯函数后由 test/ 直接求值断言。它们不持有任何状态，
  * 导出不会让外部绕过协调器拿到"影子标签页"。
  */
 
@@ -84,6 +107,11 @@ const SNIFF_EXCLUDED_EXTS = new Set(['aibook']);
  * 按媒体类型归并的后缀表。
  * 唯一真值来自 utils.MEDIA_EXTENSIONS —— 播放器的类型判定与嗅探的扫描清单
  * 必须一致，各写一份必然会漂移（合并前此处、页内脚本、utils 共三份）。
+ *
+ * 页内脚本的 streamExts 也直接用这一份（含 `ts`），不再单独排除：
+ * 排除是因为旧逻辑"先定类型再判分片"，`.ts` 会在分片判定前就被标成 stream；
+ * 现在的顺序是「定类型 → 丢分片 → 按标签兜底」，分片照样被丢，
+ * 整段 .ts 视频却能正确归为 stream，与 utils 完全同源。
  */
 const CATEGORIES: Record<MediaType, string[]> = (() => {
     const map: Record<MediaType, string[]> = {
@@ -96,12 +124,24 @@ const CATEGORIES: Record<MediaType, string[]> = (() => {
 })();
 
 /**
- * 页内脚本的流媒体后缀刻意不含 `ts`。
- * 原逻辑里 `.ts` 走单独分支：先判是不是 HLS 分片，是则丢弃，
- * 不是则保持 defaultType（'other' 时最终丢弃）。把它并进 streamExts
- * 会让所有分片先被标成 stream 再走后面的兜底，语义就变了。
+ * 筛选栏的可选项，**唯一真值**。
+ *
+ * 筛选栏（Floating 的 SNIFF_FILTERS）与落盘校验（filterType 的初值）
+ * 原先各写一份，两份必然漂移：落盘校验放行 CATEGORIES 的**全部键**，
+ * 而界面只有下面这几项 —— 于是手改 localStorage 成 'gallery' 能通过校验，
+ * 界面上却没有那个按钮，表现为"列表空了却看不出为什么"。
+ * 现在两处都读这一份。
+ *
+ * 清单内容与原界面完全一致（5 项），**没有**擅自增减类型：
+ * document 要不要进筛选栏是一个待定的产品决定，见下方注释，不在本次修复范围内。
  */
-const INSPECTOR_STREAM_EXTS = CATEGORIES.stream.filter((ext) => ext !== 'ts');
+export const SNIFF_FILTER_OPTIONS: { value: MediaType | 'all'; label: string }[] = [
+    { value: 'all', label: '全部' },
+    { value: 'stream', label: '流媒体 (HLS)' },
+    { value: 'video', label: '视频 (MP4)' },
+    { value: 'audio', label: '音频' },
+    { value: 'image', label: '图片' },
+];
 
 const TABS_STORE_KEY = 'browse-tabs';
 const TABS_STORE_MAX = 20;
@@ -156,31 +196,13 @@ const ENGINE_URLS: Record<SearchEngine, string> = {
 
 const SEARCH_ENGINE_STORE_KEY = 'search-engine';
 
-/** 只有这三种协议会被当作"用户就是要访问这个地址"，其余一律退回搜索 */
-const SAFE_SCHEME_RE = /^(https?|file):\/\//i;
-const LOCALHOST_RE = /^localhost(:\d{1,5})?(\/.*)?$/i;
-const IPV4_RE = /^\d{1,3}(\.\d{1,3}){3}(:\d{1,5})?(\/.*)?$/;
 /**
- * 裸域名。TLD 不限长度 —— 旧版写死 `[a-z]{2,5}`，`example.museum`、`a.technology`
- * 这类合法域名会被误判成搜索词。
+ * 地址判据（isUrlLike / isAddressLike / resolveInputUrl）住在
+ * services/BrowserService：纯函数放 hook 里进不了单测。
+ * 这里只 re-export 给面板（它从 '../hooks' 拿 isAddressLike），
+ * 实现只有服务层那一份。
  */
-const HOSTNAME_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}(:\d{1,5})?(\/.*)?$/i;
-
-const isUrlLike = (target: string): boolean => {
-    // 含空白的输入几乎不可能是 URL（`site.com/a b` 也按搜索处理）
-    if (/\s/.test(target)) return false;
-    if (SAFE_SCHEME_RE.test(target)) return true;
-    if (LOCALHOST_RE.test(target)) return true;
-    if (IPV4_RE.test(target)) return true;
-    return HOSTNAME_RE.test(target);
-};
-
-/**
- * 地址栏要按同一判据决定"这是地址还是搜索词"：是地址就不该显示搜索引擎选择器，
- * 是搜索词才显示。导出的是**上面那一份实现**，不是抄一遍 ——
- * 抄一份的话，这里显示"搜索 Bing"、回车却当网址打开，是最难被发现的一类不一致。
- */
-export const isAddressLike = (input: string): boolean => isUrlLike(input.trim());
+export { isAddressLike } from '../services/BrowserService';
 
 /* -------------------------------------------------------------------------- */
 /*                              页内嗅探脚本                                    */
@@ -193,10 +215,11 @@ const IN_PAGE_INSPECTOR_SCRIPT = `
   const pageTitle = (document.title || '').trim();
   const pageUrl = window.location.href;
 
-  const streamExts = ${JSON.stringify(INSPECTOR_STREAM_EXTS)};
+  const streamExts = ${JSON.stringify(CATEGORIES.stream)};
   const videoExts = ${JSON.stringify(CATEGORIES.video)};
   const audioExts = ${JSON.stringify(CATEGORIES.audio)};
   const imageExts = ${JSON.stringify(CATEGORIES.image)};
+  const hlsSegmentRe = new RegExp(${JSON.stringify(HLS_SEGMENT_RE_SOURCE)}, 'i');
 
   const getMediaInfo = (rawUrl, defaultType) => {
     if (!rawUrl || typeof rawUrl !== 'string') return null;
@@ -218,21 +241,42 @@ const IN_PAGE_INSPECTOR_SCRIPT = `
 
     const extMatch = pathname.match(/\\.([a-zA-Z0-9]+)$/);
     let ext = extMatch ? extMatch[1] : '';
-    let type = defaultType || 'other';
 
-    if (streamExts.includes(ext) || url.includes('.m3u8') || url.includes('.mpd')) {
-      type = 'stream';
-      ext = ext || (url.includes('.mpd') ? 'mpd' : 'm3u8');
-    } else if (videoExts.includes(ext) || url.includes('.mp4') || url.includes('.webm') || url.includes('.m4s')) {
-      type = 'video';
-      ext = ext || 'mp4';
-    } else if (audioExts.includes(ext) || url.includes('.mp3') || url.includes('.m4a')) {
-      type = 'audio';
-      ext = ext || 'mp3';
-    } else if (imageExts.includes(ext)) {
-      type = 'image';
-      ext = ext || 'jpg';
+    /**
+     * 在整条 URL 上按后缀找类型（路径没有后缀时的兜底，如 ?file=movie.mp4）。
+     *
+     * 判据必须**成词**：末尾的负向前瞻保证后缀后面不再跟字母数字。
+     * 早先用的是裸 includes —— component.tsx 里含 .ts、backup.mpd2 里含 .mpd，
+     * 源码文件与备份文件都被当成流媒体收进列表，点下载才发现下回来一个文本。
+     */
+    const extInUrl = (list) => {
+      const lower = url.toLowerCase();
+      for (let i = 0; i < list.length; i++) {
+        if (new RegExp('\\\\.' + list[i] + '(?![a-z0-9])').test(lower)) return list[i];
+      }
+      return '';
+    };
+
+    let type = 'other';
+    if (streamExts.includes(ext)) type = 'stream';
+    else if (videoExts.includes(ext)) type = 'video';
+    else if (audioExts.includes(ext)) type = 'audio';
+    else if (imageExts.includes(ext)) type = 'image';
+
+    // 路径认不出时再看整条 URL。ext 与 type 必须一起定：
+    // 只改 type 会让条目变成"type=audio 但 ext=jpg"这种自相矛盾的组合
+    if (type === 'other') {
+      const hitStream = extInUrl(streamExts);
+      const hitVideo = hitStream ? '' : extInUrl(videoExts);
+      const hitAudio = hitStream || hitVideo ? '' : extInUrl(audioExts);
+      if (hitStream) { type = 'stream'; ext = hitStream; }
+      else if (hitVideo) { type = 'video'; ext = hitVideo; }
+      else if (hitAudio) { type = 'audio'; ext = hitAudio; }
     }
+
+    // 元素自身的标签是最后一层依据：<video>/<audio> 认得出的东西，
+    // 路径与 URL 都认不出时按标签归类（HLS 的 blob 型 src 常走到这里）
+    if (type === 'other' && defaultType) type = defaultType;
 
     // 智能兜底扩展名
     if (!ext) {
@@ -242,10 +286,11 @@ const IN_PAGE_INSPECTOR_SCRIPT = `
       else if (type === 'image') ext = 'jpg';
     }
 
-    // 过滤 TS 切片分段
+    // 过滤 TS 切片分段。
+    // 判据源码来自 utils.HLS_SEGMENT_RE_SOURCE（与文本兜底、主进程同一份语义），
+    // 这里 new RegExp 是因为脚本整体是模板字符串，没法 import 正则对象。
     if (ext === 'ts') {
-      const isSegment = /\\b(seg|chunk|slice|frag|part|track|\\d{2,})\\b/i.test(pathname) || /[-_]\\d+\\.ts/i.test(pathname);
-      if (isSegment && !url.includes('playlist')) return null;
+      if (hlsSegmentRe.test(pathname) && !url.includes('playlist')) return null;
     }
 
     if (type === 'other') return null;
@@ -1504,7 +1549,9 @@ const useTabs = (): TabsState => {
 
     const updateTabTitle = useCallback((tabId: string, title: string) => {
         setState((prev) => mapTab(prev, tabId, (tab) => {
-            const next = title.trim() || getTitleFromUrl(tab.url);
+            // 标题截 200 存：恶意页可下发任意长标题，全量进内存状态
+            // （还会被 20 条快照写进 localStorage），先在这里收敛
+            const next = title.trim().slice(0, 200) || getTitleFromUrl(tab.url);
             return next === tab.title ? tab : { ...tab, title: next };
         }));
     }, []);
@@ -1542,7 +1589,10 @@ const useTabs = (): TabsState => {
 
     const reload = useCallback((tabId: string) => {
         setState((prev) => mapTab(prev, tabId, (tab) => (
-            tab.url ? { ...tab, isLoading: true, reloadKey: (tab.reloadKey || 0) + 1 } : tab
+            // 同 URL 重载不会走 syncTabUrl 的"变地址清层"分支，错误/崩溃盖层
+            // 必须在这里清，否则 F5 后新页面在盖层底下加载、用户以为刷新无效。
+            // 重载再失败时 handleFail 会重新写回错误，不会丢信息。
+            tab.url ? { ...tab, isLoading: true, error: null, crashed: false, reloadKey: (tab.reloadKey || 0) + 1 } : tab
         )));
     }, []);
 
@@ -1556,8 +1606,9 @@ const useTabs = (): TabsState => {
      */
     const hardReload = useCallback((tabId: string) => {
         setState((prev) => mapTab(prev, tabId, (tab) => (
+            // 清层理由同 reload（两者走不同的 webview API，但盖层是同一套）
             tab.url
-                ? { ...tab, isLoading: true, hardReloadKey: (tab.hardReloadKey || 0) + 1 }
+                ? { ...tab, isLoading: true, error: null, crashed: false, hardReloadKey: (tab.hardReloadKey || 0) + 1 }
                 : tab
         )));
     }, []);
@@ -1918,15 +1969,10 @@ const useSearch = (): SearchState => {
      * 2. 像 URL（带安全协议 / localhost / IPv4 / 裸域名）→ 补全协议后返回
      * 3. 否则视为搜索关键词，拼搜索引擎地址
      */
-    const parseInputToUrl = useCallback((input: string): string => {
-        const target = input.trim();
-        if (!target) return '';
-        if (!isUrlLike(target)) {
-            return `${ENGINE_URLS[engine]}${encodeURIComponent(target)}`;
-        }
-        if (SAFE_SCHEME_RE.test(target)) return target;
-        return `https://${target}`;
-    }, [engine]);
+    const parseInputToUrl = useCallback((input: string): string => (
+        // 判据实现在 services/BrowserService（可单测），这里只喂当前引擎前缀
+        resolveInputUrl(input, ENGINE_URLS[engine])
+    ), [engine]);
 
     return useMemo(() => ({ engine, setEngine, parseInputToUrl }), [engine, setEngine, parseInputToUrl]);
 };
@@ -1956,6 +2002,12 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
     const setInputFocused = useCallback((focused: boolean) => {
         inputFocusedRef.current = focused;
     }, []);
+    /**
+     * 地址栏连击去重：非空白页每次提交都开新标签，连按两次回车
+     * （或回车+鼠标连点"转到"）会开出两个同 URL 标签。1 秒内同地址
+     * 只认第一次 —— 正常人不会在 1 秒内故意开两个相同页。
+     */
+    const lastSubmitRef = useRef<{ url: string; time: number }>({ url: '', time: 0 });
 
     // DOM 引用（不要用 state 存 webview，会触发 React DevTools 跨域错误）
     const webviewRefs = useRef<Map<string, WebviewElement>>(new Map());
@@ -2035,6 +2087,10 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
             if (!tab.url) return;
 
             if (webview && isReady) {
+                if (!hasWebviewFn(webview, 'loadURL')) {
+                    pendingNavigations.current.delete(tab.id);
+                    return;
+                }
                 try {
                     // 不做基于索引的 goBack/goForward 优化：React 状态与 webview 内部
                     // 历史栈不一致时会出现"地址变了但页面没变"，强制对齐两者。
@@ -2057,6 +2113,10 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
     const handleNavigate = useCallback((urlOrQuery: string) => {
         const finalUrl = parseInputToUrl(urlOrQuery);
         if (!finalUrl) return;
+
+        const now = Date.now();
+        if (finalUrl === lastSubmitRef.current.url && now - lastSubmitRef.current.time < 1000) return;
+        lastSubmitRef.current = { url: finalUrl, time: now };
 
         const currentActiveId = activeTabIdRef.current;
         const currentTab = tabsRef.current.find((t) => t.id === currentActiveId);
@@ -2107,7 +2167,13 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
             try {
                 const current = tabsRef.current.find((t) => t.id === tabId);
                 if (current) {
-                    if (current.zoomLevel) webview.setZoomFactor?.(zoomLevelToFactor(current.zoomLevel));
+                    // 持久化快照可能带非法有限值（如旧版本写入的 100）：zoomBy 路径
+                    // 有 nextZoomLevel 夹取，这里直接应用会算出天文数字 factor。
+                    // NaN/Infinity 由 zoomLevelToFactor 兜底为 0。
+                    if (current.zoomLevel) {
+                        const clamped = Math.min(ZOOM_MAX_LEVEL, Math.max(ZOOM_MIN_LEVEL, current.zoomLevel));
+                        webview.setZoomFactor?.(zoomLevelToFactor(clamped));
+                    }
                     if (current.muted) webview.setAudioMuted?.(true);
                 }
             } catch { /* webview 已卸载 */ }
@@ -2116,7 +2182,9 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
 
             const pendingUrl = pendingNavigations.current.get(tabId);
             if (pendingUrl) {
-                try {
+                if (!hasWebviewFn(webview, 'loadURL')) {
+                    pendingNavigations.current.delete(tabId);
+                } else try {
                     if (webview.getURL?.() !== pendingUrl) void webview.loadURL(pendingUrl);
                     pendingNavigations.current.delete(tabId);
                 } catch (e) {
@@ -2139,6 +2207,10 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
          */
         const handleFail = (e: Event) => {
             tabActions.setTabLoading(tabId, false);
+            // 回退/前进失败（或压根没走成）时历史标记必须清掉：
+            // 它只在 did-navigate 成功路径被消费，留着的话下一次普通导航
+            // 会被误记成"后退/前进"，historyIndex 从此错乱。
+            pendingHistoryNav.current.delete(tabId);
 
             const detail = e as Event & {
                 errorCode?: number;
@@ -2200,6 +2272,18 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
             });
         };
 
+        // 页内原生缩放回写：用户在页面里 Ctrl+滚轮走的是 Chromium 原生缩放，
+        // 不经过命令通道（zoomBy）。不同步的话地址栏百分比指示过期，
+        // 且下一次 Ctrl+加号会按过期基准直接跳变。
+        // 读 guest 当前 factor 而不是事件载荷：载荷形状各版本不一致，
+        // factor 才是两个方向换算的同一底数。
+        const handleZoomChanged = () => {
+            try {
+                const factor = webview.getZoomFactor();
+                if (Number.isFinite(factor)) tabActions.setTabZoom(tabId, zoomFactorToLevel(factor));
+            } catch { /* guest 已卸载 */ }
+        };
+
         const syncFromWebview = (url: string) => {
             const currentTab = tabsRef.current.find((t) => t.id === tabId);
             if (!url || !currentTab || url === currentTab.url) return;
@@ -2246,6 +2330,7 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
         webview.addEventListener('page-title-updated', handleTitle);
         webview.addEventListener('page-favicon-updated', handleFavicon);
         webview.addEventListener('found-in-page', handleFoundInPage);
+        webview.addEventListener('zoom-changed', handleZoomChanged);
         webview.addEventListener('render-process-gone', handleGone);
         webview.addEventListener('did-navigate', handleNavigateInternal);
         webview.addEventListener('did-navigate-in-page', handleInPageNavigate);
@@ -2267,7 +2352,11 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
             // 挂载时可能已经 ready（事件早于监听绑定），补一次探测
             window.setTimeout(() => {
                 try {
-                    if (el.getURL?.()) webviewReadyRefs.current.add(id);
+                    // 100ms 内标签已关闭会走 null 分支清掉 ready；这里再按身份
+                    // 确认一次，否则超时回调会给已删的 id 写回一条 stale 标记
+                    if (webviewRefs.current.get(id) === el && el.getURL?.()) {
+                        webviewReadyRefs.current.add(id);
+                    }
                 } catch { /* webview 已卸载 */ }
             }, 100);
             return;
@@ -2362,6 +2451,7 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
 
             const webview = webviewRefs.current.get(tab.id);
             if (webview) {
+                if (!hasWebviewFn(webview, 'reload')) return;
                 try { webview.reload(); } catch (e) { console.error(e); }
             }
         });
@@ -2383,6 +2473,7 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
 
             const webview = webviewRefs.current.get(tab.id);
             if (webview) {
+                if (!hasWebviewFn(webview, 'reloadIgnoringCache')) return;
                 try { webview.reloadIgnoringCache(); } catch (e) { console.error(e); }
             }
         });
@@ -2395,7 +2486,28 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
             const webview = webviewRefs.current.get(tab.id);
 
             if (webview && webviewReadyRefs.current.has(tab.id)) {
+                // 非 Electron 下这些方法不存在：静默收尾而不是抛 TypeError 刷日志。
+                // canGoBack/canGoForward 缺失时按"不能走"处理，与"走不动"同一分支。
+                if (!hasWebviewFn(webview, 'canGoBack') || !hasWebviewFn(webview, 'canGoForward')
+                    || !hasWebviewFn(webview, 'goBack') || !hasWebviewFn(webview, 'goForward')) {
+                    pendingHistoryNav.current.delete(tab.id);
+                    tabActions.clearPendingNavigation(tab.id);
+                    tabActions.setTabLoading(tab.id, false);
+                    return;
+                }
                 try {
+                    // webview 实际走不动时 goBack/goForward 是静默空操作
+                    // （无任何事件），pendingHistoryNav 会残留并污染下一次
+                    // 普通导航。先问能不能走，不能走就地清掉。
+                    const canGo = tab.pendingNavigation === 'back'
+                        ? webview.canGoBack()
+                        : webview.canGoForward();
+                    if (!canGo) {
+                        pendingHistoryNav.current.delete(tab.id);
+                        tabActions.clearPendingNavigation(tab.id);
+                        tabActions.setTabLoading(tab.id, false);
+                        return;
+                    }
                     pendingHistoryNav.current.set(tab.id, tab.pendingNavigation);
                     if (tab.pendingNavigation === 'back') webview.goBack();
                     else webview.goForward();
@@ -2450,8 +2562,12 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
     }, []);
 
     const findInPage = useCallback((tabId: string, text: string, options?: { forward?: boolean; findNext?: boolean }) => {
+        // 空串/空白串不进 webview：查找条 Enter 不受按钮 disabled 约束，
+        // 空条按 Enter 会直达这里（Chromium 空串查找语义是全位置匹配刷屏）。
+        if (!text || !String(text).trim()) return;
         const webview = webviewRefs.current.get(tabId);
         if (!webview || !webviewReadyRefs.current.has(tabId)) return;
+        if (!hasWebviewFn(webview, 'findInPage')) return;
         try {
             webview.findInPage(text, {
                 forward: options?.forward !== false,
@@ -2469,6 +2585,7 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
     const stopFindInPage = useCallback((tabId: string, keepSelection: boolean = false) => {
         const webview = webviewRefs.current.get(tabId);
         if (!webview) return;
+        if (!hasWebviewFn(webview, 'stopFindInPage')) return;
         try {
             webview.stopFindInPage(keepSelection ? 'keepSelection' : 'clearSelection');
         } catch (e) {
@@ -2513,13 +2630,23 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
         if (prev) stopFindInPage(tabId);
     }, [stopFindInPage]);
 
+    /** 上一个活动页：切页时停掉旧页的查找高亮（只清 state 的话旧页黄色高亮残留） */
+    const prevActiveTabIdRef = useRef(activeTabId);
+
     /** 切标签页时把查找条收掉：查找是针对具体页面的，跟着切会找错页 */
     useEffect(() => {
+        const prev = prevActiveTabIdRef.current;
+        prevActiveTabIdRef.current = activeTabId;
+        // 先停旧页的高亮再清 state：closeFind 停的是"当前页"（已是新页），
+        // 旧页 webview 还挂着（多标签常驻挂载），会话不清高亮一直在。
+        if (prev !== activeTabId && (findQueryRef.current || findOpenRef.current)) {
+            stopFindInPage(prev);
+        }
         if (!findQueryRef.current) return;
         findQueryRef.current = '';
         setFindQueryState('');
         setFindInfo({ matches: 0, active: 0 });
-    }, [activeTabId]);
+    }, [activeTabId, stopFindInPage]);
 
     /** 切标签页时同样收掉"开着但还没打词"的空查找条（与上面有词的分支互补） */
     useEffect(() => {
@@ -2532,9 +2659,11 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
 
     const stopLoading = useCallback((tabId: string) => {
         const webview = webviewRefs.current.get(tabId);
-        if (webview) {
+        if (webview && hasWebviewFn(webview, 'stop')) {
             try { webview.stop(); } catch (e) { console.error(e); }
         }
+        // 中止的导航不会再有 did-navigate，历史标记留着会污染下一次导航
+        pendingHistoryNav.current.delete(tabId);
         // 无论 webview 在不在，都要把加载态落下来 —— 否则按钮会永远转下去
         tabActions.setTabLoading(tabId, false);
     }, [tabActions]);
@@ -2553,7 +2682,7 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
         const tab = tabsRef.current.find((t) => t.id === tabId);
         const next = nextZoomLevel(tab ? tab.zoomLevel : 0, delta);
         const webview = webviewRefs.current.get(tabId);
-        if (webview) {
+        if (webview && hasWebviewFn(webview, 'setZoomFactor')) {
             try { webview.setZoomFactor(zoomLevelToFactor(next)); } catch (e) { console.error(e); }
         }
         tabActions.setTabZoom(tabId, next);
@@ -2563,7 +2692,7 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
         const tab = tabsRef.current.find((t) => t.id === tabId);
         const next = !(tab ? tab.muted : false);
         const webview = webviewRefs.current.get(tabId);
-        if (webview) {
+        if (webview && hasWebviewFn(webview, 'setAudioMuted')) {
             try { webview.setAudioMuted(next); } catch (e) { console.error(e); }
         }
         tabActions.setTabMuted(tabId, next);
@@ -2580,10 +2709,42 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
         tabActions.setTabCrashed(tabId, false);
         tabActions.setTabError(tabId, null);
         const webview = webviewRefs.current.get(tabId);
-        if (webview) {
-            try { webview.reload(); } catch (e) { console.error(e); }
+        if (!webview) {
+            // webview 不在（已关闭/尚未挂载）：没有任何事件能把 loading 落下来，
+            // 置 true 等于转圈卡死。直接落下来。
+            tabActions.setTabLoading(tabId, false);
+            return;
+        }
+        if (!hasWebviewFn(webview, 'reload')) {
+            // 非 Electron 下没有 reload：同"不在"处理，直接落 loading。
+            tabActions.setTabLoading(tabId, false);
+            return;
+        }
+        try {
+            webview.reload();
+        } catch (e) {
+            console.error(e);
+            tabActions.setTabLoading(tabId, false);
+            return;
         }
         tabActions.setTabLoading(tabId, true);
+        // 兜底：reload() 成功调用、但后续无任何事件时 loading 会永久卡死
+        // （crashed/error 已清，用户连恢复入口都看不到）。12 秒后若 guest
+        // 自己都不在加载中，说明事件丢了，直接落下来；慢页面 guest 仍在
+        // 加载（isLoading 为 true），不会误伤。
+        window.setTimeout(() => {
+            try {
+                const current = webviewRefs.current.get(tabId);
+                if (!current) return;
+                if (!hasWebviewFn(current, 'isLoading')) {
+                    tabActions.setTabLoading(tabId, false);
+                    return;
+                }
+                if (!current.isLoading()) tabActions.setTabLoading(tabId, false);
+            } catch {
+                tabActions.setTabLoading(tabId, false);
+            }
+        }, 12000);
     }, [tabActions]);
 
     // 供 Tamper 等外部调用
@@ -2624,7 +2785,7 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
 
             // 只属于界面层的动作直接转发给面板（它持有地址栏 input 与 Agent 输入框）
             if (command.action === 'focusAddressBar' || command.action === 'analyzeElement'
-                || command.action === 'searchSelection') {
+                || command.action === 'searchSelection' || command.action === 'focusAgentInput') {
                 uiActionListeners.current.forEach((cb) => {
                     try { cb(command); } catch (e) { console.error('ui action listener failed:', e); }
                 });
@@ -2818,14 +2979,28 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
 const isFileUrl = (url: unknown): boolean =>
     typeof url === 'string' && url.trim().toLowerCase().startsWith('file:');
 
+/**
+ * blob: 是**页面自己那块内存**的句柄，不是可下载的远端资源。
+ *
+ * 它跨不过进程边界：主进程下载器按这个地址去请求只会 404/协议不支持，
+ * 播放器（file:// 或 localhost:5173 源）也不在页面那个源上，同样读不到。
+ * 也就是说这条目进了列表之后，两个按钮点下去都不会成功。
+ *
+ * 页内脚本与网络层都已各自拦掉 blob:，唯独 AI 提取那条路径允许它
+ * —— 所以真正的闸口放在这里（所有入库通道共用），不再指望每个来源自觉。
+ */
+const isBlobUrl = (url: unknown): boolean =>
+    typeof url === 'string' && url.trim().toLowerCase().startsWith('blob:');
+
 /** 读 webview 当前 URL。webview 卸载后调用会抛，统一吞掉返回空串 */
 const readWebviewUrlSafe = (webview: WebviewElement): string => {
     try { return webview.getURL?.() || ''; } catch { return ''; }
 };
-/** ACG 专属资源与本地文件一律不进嗅探列表（所有入库通道统一在此拦截） */
+/** ACG 专属资源、本地文件与 blob 一律不进嗅探列表（所有入库通道统一在此拦截） */
 const isSniffable = (item: FoundLink | null | undefined): boolean =>
     !!item && typeof item.url === 'string' &&
     !isFileUrl(item.url) && !isFileUrl(item.pageUrl) && !isFileUrl(item.referer) &&
+    !isBlobUrl(item.url) &&
     !isAcgUrl(item.url) && !isAcgUrl(item.pageUrl) && !isAcgUrl(item.referer);
 
 interface SniffDeps {
@@ -2873,7 +3048,9 @@ const useSniffer = (deps: SniffDeps): SnifferState => {
     const [statusMessage, setStatusMessage] = useState('');
     const [filterType, setFilterType] = useState<MediaType | 'all'>(() => {
         const saved = loadJSON<string>('sniff-filter', 'all');
-        const all = ['all', ...Object.keys(CATEGORIES)] as (MediaType | 'all')[];
+        // 校验走筛选栏那一份清单，而不是 CATEGORIES 的全部键：
+        // 后者含 gallery/other，它们从不产出条目，放行等于允许一个"永远空列表"的筛选态
+        const all = SNIFF_FILTER_OPTIONS.map((option) => option.value);
         return all.includes(saved as MediaType | 'all') ? (saved as MediaType | 'all') : 'all';
     });
     const [scopeFilter, setScopeFilter] = useState<'all' | 'current'>(() =>
@@ -2935,21 +3112,23 @@ const useSniffer = (deps: SniffDeps): SnifferState => {
             usable.forEach((item) => {
                 const existing = map.get(item.url);
                 if (existing) {
-                    // 现有标题普通而新标题更好时更新
-                    if (item.title && item.title !== existing.title && existing.title.startsWith('Media_')) {
+                    // 升级条件：**现有标题没信息量、而新标题有**。
+                    // 判据与新增分支共用 isGenericTitle —— 原先这里只看
+                    // startsWith('Media_')，于是标题为文件名（index.m3u8）的旧条目
+                    // 永远升不了级：入库时页面标题还没拿到，之后再也没机会补。
+                    //
+                    // 要求新标题**非**通用：两个都通用时保持原样，
+                    // 否则一次网络层推送就能把 "index.m3u8" 换成更差的 "Media_stream"。
+                    // 已有好标题时同样不覆盖 —— 后来的"页面标题+后缀"不该把它顶掉。
+                    if (item.title && item.title !== existing.title
+                        && isGenericTitle(existing.title) && !isGenericTitle(item.title)) {
                         map.set(item.url, { ...existing, ...item });
                     }
                     return;
                 }
 
                 let enhancedTitle = item.title;
-                const cleanTitle = (enhancedTitle || '').replace(/\.[a-zA-Z0-9]+$/, '');
-                const isGeneric =
-                    !enhancedTitle ||
-                    /^(media_|detected|hls|playlist|index|stream|chunk)/i.test(enhancedTitle) ||
-                    /^[0-9a-f]{16,}$/i.test(cleanTitle) ||
-                    /^\d{8,}$/.test(cleanTitle);
-                if (isGeneric && activeTabRef.current?.title) {
+                if (isGenericTitle(enhancedTitle) && activeTabRef.current?.title) {
                     enhancedTitle = `${activeTabRef.current.title} (${item.ext || item.type})`;
                 }
                 map.set(item.url, {
@@ -3068,6 +3247,11 @@ const useSniffer = (deps: SniffDeps): SnifferState => {
                         const extMatch = urlObj.pathname.match(/\.([a-zA-Z0-9]+)$/);
                         const ext = extMatch ? extMatch[1].toLowerCase() : '';
                         if (!exts.includes(ext)) continue;
+
+                        // HLS 分片同样要丢：主进程网络层与页内脚本都有这道闸，
+                        // 少了它，页面源码里那几十上百个 segNNN.ts 会被这里单独收进列表
+                        // —— 同一个页面走两条路径，结论不同。
+                        if (ext === 'ts' && isHlsSegmentPath(urlObj.pathname) && !cleanUrl.includes('playlist')) continue;
 
                         seen.add(cleanUrl);
                         const filename = urlObj.pathname.split('/').pop() || 'Resource';
@@ -3214,14 +3398,29 @@ const useSniffer = (deps: SniffDeps): SnifferState => {
                         (exts) => exts.some((ext) => new RegExp(`\\.${ext}(\\?|#|$)`, 'i').test(targetUrl))
                     );
                     if (!isBinary) {
+                        // 超时与 scan 用同一个值：这个 fetch 只是"拿不到 webview 源码时"的
+                        // 兜底，站点挂着不回时它会把 isAnalyzing 一直占着 ——
+                        // 界面表现为 AI 按钮永久变灰、两个操作都点不动。
+                        const controller = new AbortController();
+                        const timer = window.setTimeout(() => controller.abort(), 8000);
                         try {
-                            const response = await fetch(targetUrl);
+                            const response = await fetch(targetUrl, { signal: controller.signal });
                             const contentType = response.headers.get('content-type') || '';
                             if (response.ok && (/text|html|json|xml|javascript/i.test(contentType) || !contentType)) {
                                 content = await response.text();
                             }
-                        } catch { /* 无内容可分析 */ }
+                        } catch { /* 无内容可分析 */ } finally {
+                            window.clearTimeout(timer);
+                        }
                     }
+                }
+
+                // 一个字都没拿到就别调 AI：空内容进去必然是空结果，
+                // 白花一次接口调用与十几秒等待，最后还报"未发现额外结构化资源"
+                // —— 那句话会把"页面根本没读到"说成"页面里确实没有"。
+                if (!content.trim()) {
+                    if (stillOnPage()) setStatusMessage('未能读取页面内容（页面未就绪或不可跨域读取），AI 分析已跳过。');
+                    return;
                 }
 
                 setStatusMessage('AI 正在深度解析页面流媒体与直链...');
@@ -3283,7 +3482,7 @@ const useSniffer = (deps: SniffDeps): SnifferState => {
             return { success: true, message: '已触发浏览器下载。' };
         }
 
-        if (link.type === 'stream' && !downloadCapabilities.ffmpegAvailable) {
+        if (requiresFfmpeg(link.type, link.ext) && !downloadCapabilities.ffmpegAvailable) {
             const message = downloadCapabilities.ffmpegMessage || '当前无法下载流媒体资源。';
             setError(message);
             setStatusMessage(message);
@@ -3293,7 +3492,7 @@ const useSniffer = (deps: SniffDeps): SnifferState => {
         setDownloadingUrl(link.url);
         setDownloadProgress(null);
         setError('');
-        setStatusMessage(link.type === 'stream' ? '正在使用 ffmpeg 下载流媒体...' : '正在下载资源...');
+        setStatusMessage(requiresFfmpeg(link.type, link.ext) ? '正在使用 ffmpeg 下载流媒体...' : '正在下载资源...');
 
         try {
             const result = await electronAPI.downloadMedia({

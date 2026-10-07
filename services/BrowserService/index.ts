@@ -13,7 +13,7 @@
  *     → 留在渲染层，就是这里。
  *
  * 分界的实际好处是**可单测**：主进程目录只能写 .js，而
- * scripts/test/tsconfig.json 不 include electron/ —— 判据放在那边就没法测。
+ * test/tsconfig.json 不 include electron/ —— 判据放在那边就没法测。
  * 放在 services/ 下是 TS，测试直接 import 编译产物求值。
  *
  * 反过来说，**判据绝不能两边各写一份**。错误码表尤其危险：主进程与渲染层
@@ -171,6 +171,21 @@ export const zoomLevelToFactor = (level: number): number =>
     Math.pow(1.2, Number.isFinite(level) ? level : 0);
 
 /**
+ * Electron 的缩放系数 → zoomLevel。
+ *
+ * `zoom-changed` 事件（用户在页内 Ctrl+滚轮）只给 factor 不给 level，
+ * 但 Tab 状态存的是 level：不换算回写的话地址栏百分比指示过期，
+ * 且下一次 Ctrl+加号会按过期基准跳变。factor = 1.2 ^ level 的逆运算，
+ * 四舍五入到最近档并夹在上下限内 —— 原生缩放的任意值（如 1.33）都会
+ * 落到最近的整数档，显示与实际最多差半档。
+ */
+export const zoomFactorToLevel = (factor: number): number => {
+    if (!Number.isFinite(factor) || factor <= 0) return 0;
+    const level = Math.round(Math.log(factor) / Math.log(1.2));
+    return Math.min(ZOOM_MAX_LEVEL, Math.max(ZOOM_MIN_LEVEL, level));
+};
+
+/**
  * 键盘事件是不是发生在可编辑控件里。
  *
  * 用于决定某些**不带修饰键**的快捷键该不该放行：在输入框里按 F3 应该
@@ -185,4 +200,66 @@ export const isEditableTarget = (target: EventTarget | null): boolean => {
     const tag = el.tagName.toLowerCase();
     if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
     return el.isContentEditable === true;
+};
+
+/* -------------------------------------------------------------------------- */
+/* 地址栏输入判据：地址还是搜索词                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 只有这三种协议会被当作"用户就是要访问这个地址"，其余一律退回搜索。
+ *
+ * 从 hooks/useBrowse 搬过来：判据放 hook 里就进不了单测（测试只编译
+ * services/），而这里与错误码表、缩放换算一样是纯函数。hook 与面板
+ * 只 import，不许再各写一份。
+ */
+const SAFE_SCHEME_RE = /^(https?|file):\/\//i;
+const ABOUT_BLANK_RE = /^about:blank$/i;
+const LOCALHOST_RE = /^localhost(:\d{1,5})?(\/.*)?$/i;
+const IPV4_RE = /^\d{1,3}(\.\d{1,3}){3}(:\d{1,5})?(\/.*)?$/;
+/**
+ * 裸域名。TLD 不限长度 —— 旧版写死 `[a-z]{2,5}`，`example.museum`、
+ * `a.technology` 这类合法域名会被误判成搜索词。
+ */
+const HOSTNAME_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}(:\d{1,5})?(\/.*)?$/i;
+
+/** IPv4 每段必须 ≤255：`999.999.999.999` 按网址打开只会落到 DNS 错误页，不如直接搜 */
+export const isValidIPv4Host = (target: string): boolean => {
+    const m = target.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(:\d{1,5})?(\/.*)?$/);
+    return !!m && m.slice(1, 5).every((oct) => Number(oct) <= 255);
+};
+
+export const isUrlLike = (target: string): boolean => {
+    // 含空白的输入几乎不可能是 URL（`site.com/a b` 也按搜索处理）
+    if (/\s/.test(target)) return false;
+    if (ABOUT_BLANK_RE.test(target)) return true;
+    if (SAFE_SCHEME_RE.test(target)) return true;
+    if (LOCALHOST_RE.test(target)) return true;
+    if (IPV4_RE.test(target)) return isValidIPv4Host(target);
+    return HOSTNAME_RE.test(target);
+};
+
+/**
+ * 地址栏要按同一判据决定"这是地址还是搜索词"：是地址就不该显示搜索引擎选择器，
+ * 是搜索词才显示。面板与提交逻辑都调这一份 —— 各抄一份的话，这里显示
+ * "搜索 Bing"、回车却当网址打开，是最难被发现的一类不一致。
+ */
+export const isAddressLike = (input: string): boolean => isUrlLike(input.trim());
+
+/**
+ * 地址栏输入 → 最终 URL。纯函数版本：搜索引擎以前缀字符串传入，
+ * 不依赖 hook 里的 SearchEngine 类型（类型在 hook 那边，判据在这一边，
+ * 依赖只能单向）。
+ */
+export const resolveInputUrl = (input: string, searchUrlPrefix: string): string => {
+    const target = input.trim();
+    if (!target) return '';
+    // about:blank 是合法导航目标，不能按"无协议裸词"加 https:// 前缀，
+    // 否则打开的是搜索页而非空白页（与 isUrlLike 的特判对称）
+    if (ABOUT_BLANK_RE.test(target)) return 'about:blank';
+    if (!isUrlLike(target)) {
+        return `${searchUrlPrefix}${encodeURIComponent(target)}`;
+    }
+    if (SAFE_SCHEME_RE.test(target)) return target;
+    return `https://${target}`;
 };

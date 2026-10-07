@@ -115,6 +115,14 @@ const CHORD_INTERVALS: Record<string, number[]> = {
   'sus': [0, 5, 7],
   'sus4': [0, 5, 7],
   'sus2': [0, 2, 7],
+  // 挂留七和弦：通用展开分支处理不了（sus 前缀与七度组合会掉进大三和弦基线），
+  // 而 7sus4 是流行/爵士里最常见的挂留写法，必须进表。
+  '7sus4': [0, 5, 7, 10],
+  '7sus2': [0, 2, 7, 10],
+  '9sus4': [0, 5, 7, 10, 14],
+  'maj7sus4': [0, 5, 7, 11],
+  'm7sus4': [0, 5, 7, 10],
+  '13sus4': [0, 5, 7, 10, 14, 21],
 
   /* --- 六和弦 --- */
   '6': [0, 4, 7, 9],
@@ -139,6 +147,7 @@ const CHORD_INTERVALS: Record<string, number[]> = {
   'mM7': [0, 3, 7, 11],
   'mMaj7': [0, 3, 7, 11],
   'minMaj7': [0, 3, 7, 11],
+  'mM9': [0, 3, 7, 11, 14],
   'aug7': [0, 4, 8, 10],
   '+7': [0, 4, 8, 10],
   'augM7': [0, 4, 8, 11],
@@ -223,13 +232,25 @@ function expandQuality(quality: string): number[] | null {
   let base: number[];
   /** `maj` 前缀决定七度是**大七度**(11) 而不是属七度(10) */
   let majorSeventh = false;
+  /**
+   * 减和弦基线（dim/o）的七度是**减七度**(9) 而不是属七度(10)：
+   * `Co9` = dim7 + 9 = [0,3,6,9,14]。不区分的话，下面的"隐含七度"规则
+   * 会补一个属七度 10 进去，减九和弦静默变成半减九和弦。
+   * 半减（ø）仍用小七度 10，与普通分支一致。
+   */
+  let dimSeventh = false;
 
   if (/^(min|minor|-)/.test(rest)) { base = [0, 3, 7]; rest = rest.replace(/^(min|minor|-)/, ''); }
   else if (/^(maj|major|M|Δ)/.test(rest)) { base = [0, 4, 7]; majorSeventh = true; rest = rest.replace(/^(maj|major|M|Δ)/, ''); }
-  else if (/^(dim|o)(?![0-9])/.test(rest)) { base = [0, 3, 6]; rest = rest.replace(/^(dim|o)/, ''); }
+  // dim/o 基线不能加 (?![0-9]) 守卫：'o7' 这类有和弦表直接命中、根本到不了这里；
+  // 加了守卫反而让 'o9'/'o11' 掉进大三和弦基线，减和弦静默变成属和弦。
+  else if (/^(dim|o)/.test(rest)) { base = [0, 3, 6]; dimSeventh = true; rest = rest.replace(/^(dim|o)/, ''); }
+  else if (/^ø/.test(rest)) { base = [0, 3, 6]; rest = rest.replace(/^ø/, ''); }
   else if (/^(aug|\+)/.test(rest)) { base = [0, 4, 8]; rest = rest.replace(/^(aug|\+)/, ''); }
-  else if (/^(sus4?)/.test(rest)) { base = [0, 5, 7]; rest = rest.replace(/^sus4?/, ''); }
+  // sus2 必须在 sus4 之前：/^(sus4?)/ 会把 'sus2' 的 'sus' 吃掉，
+  // 剩下 '2' 无法识别 —— sus2 静默变成 sus4。
   else if (/^sus2/.test(rest)) { base = [0, 2, 7]; rest = rest.replace(/^sus2/, ''); }
+  else if (/^(sus4?)/.test(rest)) { base = [0, 5, 7]; rest = rest.replace(/^sus4?/, ''); }
   else if (/^m/.test(rest)) { base = [0, 3, 7]; rest = rest.replace(/^m/, ''); }
   else { base = [0, 4, 7]; }
 
@@ -249,6 +270,28 @@ function expandQuality(quality: string): number[] | null {
     }
   }
 
+  /**
+   * 扩展音标志必须在变化音摘除**之后**取。
+   *
+   * 反过来的话，变化音里的数字会被当成自然扩展音：`#11` 含子串 `11`，
+   * 于是 `C7#11` 在删掉自然十一度、插入 F#(18) 之后，又被 `has11` 分支
+   * 补回一个自然十一度 F(17)，得到一个既有 F 又有 F# 的和弦；
+   * `b9`/`#9`/`b13` 同理各自多出一个与变化音打架的自然音。
+   * 听感上只是"有点浑"，但和声已经错了。
+   *
+   * 曾经担心后取会让 `C#9` 丢掉隐含七度 —— 不会：`#` 被根音正则
+   * `/^([A-Ga-g])([#b♯♭]*)/` 吃进根音，rest 就是干净的 `9`，
+   * has9 照样为真。
+   */
+  const has7 = /7/.test(rest);
+  const has9 = /9/.test(rest);
+  const has11 = /11/.test(rest);
+  const has13 = /13/.test(rest);
+  const has6 = /6/.test(rest);
+  // 单独的 2 = add9（如 C2）：流行写法，不认会报"无法识别的和弦符号"。
+  // 注意 sus2 到这里 rest 已被基线分支吃干净，不会误伤。
+  const has2 = /(^|[^0-9])2([^0-9]|$)/.test(rest);
+
   // 省略音
   if (/(no|omit)3/.test(rest)) { intervals.delete(3); intervals.delete(4); rest = rest.replace(/(no|omit)3/, ''); matched = true; }
   if (/(no|omit)5/.test(rest)) { intervals.delete(7); rest = rest.replace(/(no|omit)5/, ''); matched = true; }
@@ -260,13 +303,7 @@ function expandQuality(quality: string): number[] | null {
   const isAdd = /add/.test(rest);
   if (isAdd) rest = rest.replace(/add/g, '');
 
-  // 先取标志位，再把数字从 rest 里摘干净（残余检查依赖 rest 已被清空）
-  const has7 = /7/.test(rest);
-  const has9 = /9/.test(rest);
-  const has11 = /11/.test(rest);
-  const has13 = /13/.test(rest);
-  const has6 = /6/.test(rest);
-
+  if (has2) intervals.add(14);
   if (has9) intervals.add(14);
   if (has11) { intervals.add(14); intervals.add(17); }   // 11 隐含 9
   if (has13) { intervals.add(14); intervals.add(21); }   // 13 隐含 9
@@ -282,12 +319,13 @@ function expandQuality(quality: string): number[] | null {
    * `maj` 前缀则用大七度：`Cmaj7#11` 必须是 C E G B F#，而不是 C E G Bb。
    */
   if (!isAdd && (has7 || has9 || has11 || has13)) {
-    intervals.add(majorSeventh ? 11 : 10);
+    intervals.add(majorSeventh ? 11 : dimSeventh ? 9 : 10);
   }
   if (has6) { intervals.add(9); matched = true; }
+  if (has2) matched = true;
 
   // 摘掉已识别的扩展音数字；剩下的才是真正无法识别的字符
-  rest = rest.replace(/1[13]|[679]/g, '');
+  rest = rest.replace(/1[13]|[679]|2/g, '');
 
   // 仍有残余字符说明是拼错的和弦名，宁可报错也不要静默给出错误和声
   if (rest.replace(/[()\s]/g, '').length > 0) return null;
@@ -313,15 +351,25 @@ export function parseChordSymbol(text: string): ChordSymbol | null {
     }
   }
 
-  const rootMatch = /^([A-Ga-g])([#b♯♭]?)(.*)$/.exec(body.trim());
+  const rootMatch = /^([A-Ga-g])([#b♯♭]*)(.*)$/.exec(body.trim());
   if (!rootMatch) return null;
   const rootParsed = parseNoteName(rootMatch[1] + rootMatch[2]);
   if (!rootParsed) return null;
 
   const qualityRaw = rootMatch[3].trim();
+  /**
+   * 多字母性质的大小写归一：'MAJ7'/'Maj7' 必须等于 'maj7'。
+   *
+   * 不归一的后果是静默错和声 —— expandQuality 的基线分支全是小写，
+   * 'MAJ7' 匹配不上 maj 分支、又匹配不上 /^m/（大小写敏感），
+   * 于是掉进大三和弦基线再补一个属七度：maj7 静默变成 dominant 7。
+   * 单字母 'm'/'M' 不碰（大小写区分小七与大七，是刻意的设计）。
+   */
+  const qualityNorm = qualityRaw.replace(/^(maj|min|dim|aug|sus|add)/i,
+    (m) => m.toLowerCase());
   // 精确命中优先；`m`/`M` 这类单字母性质必须走表，否则会被通用展开误判
-  const direct = CHORD_INTERVALS[qualityRaw] ?? CHORD_INTERVALS[qualityRaw.replace(/\s+/g, '')];
-  const intervals = direct ?? expandQuality(qualityRaw);
+  const direct = CHORD_INTERVALS[qualityNorm] ?? CHORD_INTERVALS[qualityNorm.replace(/\s+/g, '')];
+  const intervals = direct ?? expandQuality(qualityNorm);
   if (!intervals || intervals.length === 0) return null;
 
   return { root: rootParsed.name, quality: qualityRaw, bass, intervals: [...intervals] };
@@ -345,9 +393,12 @@ export function voicingToPitches(
   voicing: VoicingStyle = 'close'
 ): string[] {
   const rootLetter = chord.root[0].toUpperCase();
+  // 变音记号要数个数：'Bbb' 是降两次（-2），includes 只算一次会差两个半音，
+  // 整个和弦的音高全部错位 —— 而频率"听起来差不多"，极难排查。
+  const rootSharps = (chord.root.match(/[#♯]/g) || []).length;
+  const rootFlats = (chord.root.match(/[b♭]/g) || []).length;
   const rootMidi = (octave + 1) * 12 + (NOTE_LETTERS[rootLetter] ?? 0)
-    + (chord.root.includes('#') || chord.root.includes('♯') ? 1 : 0)
-    + (chord.root.includes('b') || chord.root.includes('♭') ? -1 : 0);
+    + rootSharps - rootFlats;
 
   const preferFlats = /[b♭]/.test(chord.root) || /[b♭]/.test(chord.quality);
 

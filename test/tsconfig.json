@@ -7,7 +7,7 @@
     "skipLibCheck": true,
     "noEmit": false,
     "outDir": "./build",
-    "rootDir": "../../",
+    "rootDir": "../",
     "esModuleInterop": true,
     "allowJs": true,
     "strict": false,
@@ -17,14 +17,14 @@
     "isolatedModules": false
   },
   "include": [
-    "../../services/AudioService/**/*.ts",
-    "../../services/AiService.ts",
-    "../../services/BookmarkService/**/*.ts",
-    "../../services/BrowserService/**/*.ts",
-    "../../services/KbService/**/*.ts",
-    "../../services/LogService.ts",
-    "../../services/SearchService/**/*.ts",
-    "../../utils/**/*.ts",
-    "../../meta/**/*.ts"
+    "../services/AudioService/**/*.ts",
+    "../services/AiService.ts",
+    "../services/BookmarkService/**/*.ts",
+    "../services/BrowserService/**/*.ts",
+    "../services/KbService/**/*.ts",
+    "../services/LogService.ts",
+    "../services/SearchService/**/*.ts",
+    "../utils/**/*.ts",
+    "../meta/**/*.ts"
   ]
 }

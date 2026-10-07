@@ -82,6 +82,62 @@ export const MEDIA_EXTENSIONS: Record<string, MediaType> = {
     'gallery': 'gallery',
 };
 
+/**
+ * HLS 分片路径判据的**正则源码**（不是正则对象）。
+ *
+ * 导出字符串而不是正则对象：页内嗅探脚本整体是一个模板字符串、注入浏览器执行，
+ * 它没法 import 一个正则对象，只能把源码插值进去自己 new RegExp。
+ * 三处共用这一份语义：页内脚本（插值源码）、文本兜底提取（isHlsSegmentPath）、
+ * 主进程网络层（electron/main.js 逐字复制，独立进程不能 import TS，
+ * 由 test/sniffer.test.js 盯着两边不漂移）。
+ *
+ * 用途：判断一个 **.ts** 地址是 HLS 分片（丢弃）还是整段视频（保留）。
+ * 判据只在 ext === 'ts' 时被调用，所以每条分支都锚在 .ts 上 ——
+ * 不写成通用"像不像分片"，那样会把 `seg.mp4` 这种正常文件也判进来。
+ *
+ * 四条判据，都是实测见过的分片命名：
+ *  1. 目录段是分片词（`/ts/000.ts`、`/seg/1.ts`、`/seg-1/x.ts`）——
+ *     分片常被集中放在固定目录下；
+ *  2. 文件名以分片词开头（`seg1.ts`、`chunk_00001.ts`、`part.ts`）——
+ *     `\d*` 不能省：`seg1.ts` 里 `g` 与 `1` 都是词字符，`\bseg\b` 整条漏掉；
+ *  3. 文件名整个是数字（`000.ts`、`1.ts`）；
+ *  4. `[-_]\d+.ts`，兜住 `xxx-1.ts`。
+ *
+ * 数字判据**锚在文件名上**，不是"路径里出现两位数字"：
+ * 后者会把 `/video/2024/lecture.ts` 这种带年份目录的整段视频当成分片丢掉
+ * —— 而整段 .ts 同样可下载，正是这份判据要保护的东西。
+ */
+export const HLS_SEGMENT_RE_SOURCE =
+    '(?:^|/)(?:segment|seg|chunk|slice|frag|part|track|ts)[-_]?\\d*/'
+    + '|(?:^|/)(?:segment|seg|chunk|slice|frag|part|track)[-_]?\\d*\\.ts$'
+    + '|(?:^|/)\\d+\\.ts$'
+    + '|[-_]\\d+\\.ts$';
+
+/** 判断一个 URL 的路径是不是 HLS 分片（只对 .ts 有意义，大小写不敏感） */
+export const isHlsSegmentPath = (pathname: string): boolean =>
+    !!pathname && new RegExp(HLS_SEGMENT_RE_SOURCE, 'i').test(pathname);
+
+/**
+ * 这条资源是否**必须交给 ffmpeg** 才能得到可用文件。
+ *
+ * 判据取或，两个都要看：
+ *  - `type === 'stream'`：渲染层已经把它归类为流（页内脚本按后缀判、AI 提取按模型给的类型判）；
+ *  - 后缀属 stream 类：`ext='flv'` 但 `type='video'` 是真实存在的组合 ——
+ *    AI 提取时模型给的 type 与 URL 后缀不必自洽（`{"url":"...x.flv","type":"video"}`）。
+ *
+ * **三处必须同源**，否则界面与实际行为对不上：
+ *  - 主进程 handleMediaDownload 的 isStream（决定走 ffmpeg 还是裸 HTTP）；
+ *  - 嗅探面板的「下载」按钮禁用条件（ffmpeg 缺失时该不该拦）；
+ *  - 下载提示文案。
+ * 判据不一致的后果实测过：界面按 type 判、主进程按 ext 判，
+ * 于是一个 .flv 条目在 ffmpeg 缺失时按钮照常可点，点下去才报"未找到 ffmpeg"。
+ *
+ * 主进程是独立进程不能 import 本文件，那边是逐字复制的副本，
+ * 由 test/sniffer.test.js 盯着两边不漂移。
+ */
+export const requiresFfmpeg = (type: string | undefined, ext: string | undefined): boolean =>
+    type === 'stream' || MEDIA_EXTENSIONS[(ext || '').toLowerCase()] === 'stream';
+
 /* -------------------------------------------------------------------------- */
 /*                                工具函数定义                                 */
 /* -------------------------------------------------------------------------- */
@@ -383,6 +439,32 @@ export const revokeVideoFile = (videoFile: VideoFile) => {
 };
 
 /**
+ * 触发一次"下载文件"（音频工程包导出 / 画廊与绘本另存回退 / Agent 会话导出共用）。
+ *
+ * 原先三处各写一份，差异只在 revoke 时机与是否入文档 —— 而这两点写错都不报错：
+ * 前者表现为"下载到一半失败"，后者表现为"点了没反应"。统一成一份之后，
+ * 只剩这一个地方需要被盯住。两个细节都是有意的：
+ *
+ * - **入文档再点**：游离节点在部分内核上不触发下载；
+ * - **延迟 revoke**：`click()` 只是发起导航，Chromium 是异步读 Blob 的，
+ *   紧接着 revoke 有概率拿到已回收的 URL。留一拍再释放更稳，
+ *   5 秒对用户无感（文件此时早已落盘）。
+ *
+ * Electron 下这次下载会被 session 的 will-download 接管，落进下载目录并
+ * 出现在下载列表里（见 electron/browserService.js 的 beginDownload）。
+ */
+export const downloadBlob = (blob: Blob, fileName: string): void => {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+};
+
+/**
  * data URL 拆成 { mimeType, base64 }。
  * 非 data URL（http/blob）返回 null——调用方需自行先取回字节。
  */
@@ -440,7 +522,7 @@ export const dataUrlToBlobUrl = (dataUrl: string): string => {
 /*                                                                            */
 /*  引擎（注入脚本）、面板、Agent 工具三处都要判断"这条规则引擎会不会用"。      */
 /*  引擎那份在模板字符串里、无法 import，所以这里是**面板与工具**的单一实现，   */
-/*  与引擎的一致性由回归测试交叉验证（见 scripts/test/tamper.test.js）。        */
+/*  与引擎的一致性由回归测试交叉验证（见 test/tamper.test.js）。        */
 /* -------------------------------------------------------------------------- */
 
 /**
@@ -520,6 +602,31 @@ export const isLinkFromPage = (
     link: { pageUrl?: string } | null | undefined,
     pageUrl: string,
 ): boolean => !!link && (!link.pageUrl || link.pageUrl === pageUrl);
+
+/**
+ * 标题是不是"没信息量"的那种。
+ *
+ * 命中即说明这个标题来自文件名或占位符，而不是页面标题 ——
+ * 嗅探列表应当用宿主页面标题把它顶掉。
+ *
+ * 三类：
+ *  - 占位与通用名（`Media_xxx` / `detected` / `hls` / `playlist` / `index` / `stream` / `chunk`）；
+ *  - 纯哈希文件名（16 位以上十六进制，CDN 常见）；
+ *  - 纯数字文件名（8 位以上，如时间戳命名）。
+ * 判据前先剥掉扩展名，否则 `index.m3u8` 这类会被当成"有内容"。
+ *
+ * **新增与更新两条路径必须共用这一个判据**（useBrowse 的 addLinks）。
+ * 原先它们各写一份：新增用这套较全的，更新只看 `startsWith('Media_')` ——
+ * 于是标题为文件名（`index.m3u8`，入库时页面标题还没拿到）的条目
+ * 永远升不了级，列表里一直挂着那个文件名。
+ */
+export const isGenericTitle = (title: string | undefined | null): boolean => {
+    if (!title) return true;
+    const cleanTitle = title.replace(/\.[a-zA-Z0-9]+$/, '');
+    return /^(media_|detected|hls|playlist|index|stream|chunk)/i.test(title)
+        || /^[0-9a-f]{16,}$/i.test(cleanTitle)
+        || /^\d{8,}$/.test(cleanTitle);
+};
 
 /* -------------------------------------------------------------------------- */
 /*                              Cookie 工具                                     */

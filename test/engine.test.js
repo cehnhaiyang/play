@@ -2,8 +2,8 @@
 /**
  * SPG 引擎回归测试。
  *
- * 运行：npm run test:spg
- * （该命令会先用 tsc 把引擎编译到 scripts/spg-test/build/，再执行本文件）
+ * 运行：npm run test
+ * （该命令会先用 tsc 把引擎编译到 test/build/，再执行本文件）
  *
  * 这套测试的重点不是"覆盖率"，而是**锁住那些曾经真实出错的行为**：
  * 每一条断言背后都对应一个具体的 bug 或一条刻意的语法设计，改动引擎时它们会立刻报警。
@@ -21,6 +21,8 @@ const { parseDuration, getMidi, midiToFreq } = require(`${ROOT}/services/AudioSe
 let passed = 0;
 const failures = [];
 let currentGroup = '';
+/** 异步断言挂载点：check() 是同步的，需要跨 turn 等待的断言先挂在这里，run() 里统一结算 */
+const pendingAsync = [];
 
 const group = (name) => { currentGroup = name; };
 
@@ -625,6 +627,194 @@ check('长衰减鼓组在离线渲染长度内不被截断', () => {
 sequence(name="d"){ rest("1m") hit("crash","4n") }
 `);
   assert(totalDuration > 2.0, `crash 尾音未计入总时长: ${totalDuration}`);
+});
+
+/* ========================================================================== */
+/*                    9. 回归修复（本轮审查发现的问题）                        */
+/* ========================================================================== */
+
+group('回归修复 · 严格数字与布尔');
+
+check('数字截断写法报错（gain=0.5x）', () => {
+  const e = lineOfError(`define_instrument(name="t"){ gain: 0.5x }
+sequence(name="s", instrument="t"){ note("C4","4n") }`);
+  assert(e && /需要数字/.test(e.message), `应报需要数字: ${e && e.message}`);
+});
+
+check('包络里的截断数字报错', () => {
+  throws(() => parse(`define_instrument(name="t"){ envelope: adsr(0.01x, 0.2, 0.6, 0.4) }
+sequence(name="s", instrument="t"){ note("C4","4n") }`));
+});
+
+check('拼错的布尔值报错（accent=maybe）', () => {
+  const e = lineOfError(`sequence(name="s"){ note("C4","4n", accent=maybe) }`);
+  assert(e && /布尔/.test(e.message), `应报布尔值错误: ${e && e.message}`);
+});
+
+check('合法布尔值不受影响', () => {
+  const r = parse(`sequence(name="s"){ note("C4","4n", accent=true) hit("kick","4n") }`);
+  eq(r.sequences.get('s').commands[0].velocity, 1);
+});
+
+group('回归修复 · 白名单静默参数');
+
+check('run 的 from= 报错（曾静默忽略）', () => {
+  const e = lineOfError(`sequence(name="s"){ run(["C4","D4"], "16n", from="C4") }`);
+  assert(e && /未知参数/.test(e.message), `应报未知参数: ${e && e.message}`);
+});
+
+check('progression 的 duration= 报错（曾静默忽略）', () => {
+  const e = lineOfError(`sequence(name="s"){ progression(["C","G"], "1n", duration="2n") }`);
+  assert(e && /未知参数/.test(e.message), `应报未知参数: ${e && e.message}`);
+});
+
+group('回归修复 · 乐器校验');
+
+check('fm_wave 写噪声名报错', () => {
+  const e = lineOfError(`define_instrument(name="t"){ fm_wave: "white_noise", fm_ratio: 2 }
+sequence(name="s", instrument="t"){ note("C4","4n") }`);
+  assert(e && /fm_wave/.test(e.message), `应报 fm_wave 非法: ${e && e.message}`);
+});
+
+check('fm_ratio=0 报错', () => {
+  throws(() => parse(`define_instrument(name="t"){ fm_wave: "sine", fm_ratio: 0 }
+sequence(name="s", instrument="t"){ note("C4","4n") }`));
+});
+
+check('wave=custom 不配 harmonics 报错', () => {
+  const e = lineOfError(`define_instrument(name="t"){ wave: "custom" }
+sequence(name="s", instrument="t"){ note("C4","4n") }`);
+  assert(e && /harmonics/.test(e.message), `应提示配 harmonics: ${e && e.message}`);
+});
+
+check('wave=custom 配 harmonics 合法且可合成', () => {
+  render(`define_instrument(name="t"){ wave: "custom", harmonics: [1, 0.5, 0.25] }
+sequence(name="s", instrument="t"){ note("C4","4n") }`);
+});
+
+check('负 glide / pitch_decay / loop_point 报错', () => {
+  for (const p of ['glide: -0.1', 'pitch_decay: -0.1', 'loop_point: -1']) {
+    const e = lineOfError(`define_instrument(name="t"){ ${p} }
+sequence(name="s", instrument="t"){ note("C4","4n") }`);
+    assert(e && /不能为负数/.test(e.message), `${p} 应报不能为负数: ${e && e.message}`);
+  }
+});
+
+check('未知预设报错里列出可用名', () => {
+  const e = lineOfError(`define_instrument(name="t"){ preset: "nope" }
+sequence(name="s", instrument="t"){ note("C4","4n") }`);
+  assert(e && /piano/.test(e.message), `应列出可用预设: ${e && e.message}`);
+});
+
+group('回归修复 · 和弦符号');
+
+// 本组插在第 7 节（和弦符号）的 require 之前，用独立的局部引用避免 TDZ
+const { parseChordSymbol: parseChord9, voicingToPitches: voicing9 } =
+  require(`${ROOT}/services/AudioService/audioEngine/chords`);
+const names9 = (ps) => ps.join(',');
+
+check('7sus4 族可解析', () => {
+  eq(parseChord9('G7sus4').intervals.join(','), '0,5,7,10');
+  eq(parseChord9('G7sus2').intervals.join(','), '0,2,7,10');
+  eq(parseChord9('Cmaj7sus4').intervals.join(','), '0,5,7,11');
+});
+
+check('7sus4 可走完解析与合成', () => {
+  render(`sequence(name="s"){ chord("G7sus4", "1n") progression(["Dm7sus4","G7sus4"], "1n") }`);
+});
+
+check('大写性质 MAJ7 等于 maj7（曾静默变属七）', () => {
+  eq(parseChord9('CMAJ7').intervals.join(','), parseChord9('Cmaj7').intervals.join(','));
+  eq(parseChord9('CMIN7').intervals.join(','), parseChord9('Cm7').intervals.join(','));
+  eq(parseChord9('CSUS4').intervals.join(','), parseChord9('Csus4').intervals.join(','));
+});
+
+check('o9 按减和弦展开（含减七度 9）', () => {
+  eq(parseChord9('Co9').intervals.join(','), '0,3,6,9,14');
+  eq(parseChord9('Cdim9').intervals.join(','), '0,3,6,9,14');
+});
+
+check('sus2+add9 组合展开正确（分支顺序）', () => {
+  eq(parseChord9('Csus2add9').intervals.join(','), '0,2,7,14');
+});
+
+check('C2 等于 Cadd9', () => {
+  eq(parseChord9('C2').intervals.join(','), parseChord9('Cadd9').intervals.join(','));
+});
+
+check('双降号根音音高正确', () => {
+  // Abb = G：Abbm 应展开成 G4,Bb4,D5
+  eq(names9(voicing9(parseChord9('Abbm'), 4)), 'G4,Bb4,D5');
+});
+
+group('回归修复 · 调度与合成');
+
+check('同一音序同轨叠加时随机流错开', () => {
+  const { events } = compile(`sequence(name="s", humanize=0.5){ note("C4","4n") }
+mix { track(source="s", time=0) track(source="s", time=0) }`);
+  eq(events.length, 2);
+  assert(events[0].gain !== events[1].gain,
+    `两遍 humanize 抖动完全相同，叠加等于单轨加响：${events[0].gain} vs ${events[1].gain}`);
+});
+
+check('filter 扫频跟随 timeOffset（实时播放可听见）', () => {
+  const ctx = new MockBaseContext(44100);
+  const { events } = compile(`sequence(name="s"){ note("C4","2n") }`);
+  const synth = new AudioSynthesizer(ctx);
+  const dest = ctx.createGain();
+  const fx = [{ type: 'filter', kind: 'lowpass', from: 200, to: 4000, Q: 1, duration: 2, start: 0 }];
+  synth.scheduleEvents(ctx, dest, events, fx, () => {}, 100);
+  const biquads = ctx._nodes.filter((n) => n.kind === 'BiquadFilterNode');
+  assert(biquads.length > 0, '应建滤波节点');
+  const times = biquads[0].frequency.events.map((e) => e.t);
+  assert(times.length > 0 && times.every((t) => t >= 100),
+    `扫频自动化应整体后移 100s，实际 ${JSON.stringify(times)}`);
+});
+
+check('噪声缓存在不同采样率下各自稳定', () => {
+  const code = `define_instrument(name="n"){ wave:"white_noise" }
+sequence(name="s", instrument="n"){ note("C4","4n") }`;
+  // 两个采样率各渲染：缓存键必须带采样率，且同采样率的纹理可复现
+  const snap = (rate) => {
+    const ctx = new MockBaseContext(rate);
+    const { parsed, events } = compile(code);
+    const synth = new AudioSynthesizer(ctx);
+    synth.scheduleEvents(ctx, ctx.createGain(), events, parsed.effects, () => {});
+    const key = [...synth.noiseBuffers.keys()].find((k) => k.startsWith('white@'));
+    assert(key === `white@${rate}`, `缓存键应带采样率，实际 ${key}`);
+    return Array.from(synth.noiseBuffers.get(key).getChannelData(0).slice(0, 64)).join(',');
+  };
+  eq(snap(44100), snap(44100), '同采样率噪声纹理应一致');
+  snap(48000);
+});
+
+check('长混响尾音计入总时长（导出不切尾）', () => {
+  // 尾音余量是 BrowserAudioEngine.compile 加的（调度器只算事件时钟），必须走引擎整链
+  global.window = { AudioContext: MockBaseContext, OfflineAudioContext: MockOfflineAudioContext };
+  const { BrowserAudioEngine } = require(`${ROOT}/services/AudioService/audioEngine/index`);
+  const engine = new BrowserAudioEngine();
+  const err = engine.compile(`sequence(name="s"){ note("C4","4n") }
+effect_chain { reverb(decay=8, mix=0.5) }`);
+  eq(err, null, `编译应成功: ${JSON.stringify(err)}`);
+  assert(engine.getDuration() > 8, `8 秒混响尾音未计入总时长: ${engine.getDuration()}`);
+});
+
+group('回归修复 · 编译失败不残留旧数据');
+
+check('无事件编译后时长清零', () => {
+  global.window = { AudioContext: MockBaseContext, OfflineAudioContext: MockOfflineAudioContext };
+  const { BrowserAudioEngine } = require(`${ROOT}/services/AudioService/audioEngine/index`);
+  const engine = new BrowserAudioEngine();
+  eq(engine.compile(BASIC), null);
+  assert(engine.getDuration() > 0, '前置条件：正常编译有时长');
+  const err = engine.compile(`sequence(name="s"){ rest("4n") }`);
+  assert(err && /没有产生任何音符事件/.test(err.message), `应报无事件: ${JSON.stringify(err)}`);
+  eq(engine.getDuration(), 0, '失败后时长应清零，否则导出的是旧音频的长度');
+  // 异步：无事件后导出必须失败（不能吐出上一次的旧音频）
+  pendingAsync.push(engine.renderOffline().then(
+    () => { throw new Error('无事件后导出应失败，实际成功（吐出的是旧音频）'); },
+    (e) => { assert(/编译/.test(e.message), `导出错误信息不符: ${e && e.message}`); }
+  ));
 });
 
 /* ========================================================================== */
@@ -1371,7 +1561,7 @@ const path = require('path');
  * 直接对原始文本做正则匹配会全部落空。这里先把转义还原成提示词的真实内容。
  */
 const aiSource = fs.readFileSync(
-  path.join(__dirname, '..', '..', 'services', 'AiService.ts'), 'utf8'
+  path.join(__dirname, '..', 'services', 'AiService.ts'), 'utf8'
 ).replace(/\\`/g, '`').replace(/\\\$/g, '$').replace(/\\\\/g, '\\');
 
 check('提示词里的完整示例可编译', () => {
@@ -1549,6 +1739,12 @@ check('提示词里的乐器参数名全部合法', () => {
 
 /** 汇总本次结果，返回是否全部通过 */
 const run = async () => {
+  // 跨 turn 的异步断言先结算（失败会计入 failures）
+  for (const p of pendingAsync) {
+    try { await p; passed++; } catch (e) {
+      failures.push({ group: '回归修复', name: '异步断言', error: e });
+    }
+  }
   // 离线渲染是异步 API，单独跑一遍
   try {
     global.window = { AudioContext: MockBaseContext, OfflineAudioContext: MockOfflineAudioContext };

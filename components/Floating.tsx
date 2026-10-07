@@ -36,14 +36,14 @@ import {
     Zap,
 } from 'lucide-react';
 import type { SnifferState } from '../hooks';
+import { SNIFF_FILTER_OPTIONS } from '../hooks';
 import type {
     AiConfig,
     FoundLink,
     MediaDownloadProgress,
-    MediaType,
 } from '../meta';
 import { getElectronAPI } from '../meta';
-import { isLinkFromPage } from '../utils/utils';
+import { isLinkFromPage, requiresFfmpeg } from '../utils/utils';
 import { formatBytes } from '../services/SearchService';
 import {
     AI_PROVIDERS,
@@ -238,13 +238,14 @@ interface SnifferResultsProps {
     currentUrl: string;
 }
 
-const SNIFF_FILTERS: { value: MediaType | 'all'; label: string }[] = [
-    { value: 'all', label: '全部' },
-    { value: 'stream', label: '流媒体 (HLS)' },
-    { value: 'video', label: '视频 (MP4)' },
-    { value: 'audio', label: '音频' },
-    { value: 'image', label: '图片' },
-];
+/**
+ * 筛选栏的可选项从 hooks 导入，不在这里另写一份。
+ *
+ * 界面这份原先写死一份字面量，而落盘校验读的是 CATEGORIES 的全部键 ——
+ * 两份必然漂移：手改 localStorage 成 'gallery' 能通过校验，
+ * 界面上却没有那个按钮，表现为"列表空了却看不出为什么"。
+ */
+const SNIFF_FILTERS = SNIFF_FILTER_OPTIONS;
 
 const TYPE_ICONS: Record<string, React.ReactNode> = {
     stream: <Radio className="h-4 w-4" />,
@@ -386,7 +387,9 @@ const SniffCard = React.memo(function SniffCard({
                                 {source.label}
                             </span>
                         )}
-                        {link.type === 'stream' && (
+                        {/* 徽章同样按 requiresFfmpeg 判：只看 type 会让
+                            "ext=flv 但 type=video"的条目既没有徽章、又被主进程走 ffmpeg */}
+                        {requiresFfmpeg(link.type, link.ext) && (
                             <span
                                 className={`rounded border px-1.5 py-0.5 text-[9px] font-bold ${canDownload
                                     ? 'border-indigo-400/30 bg-indigo-500/10 text-indigo-200'
@@ -631,9 +634,13 @@ const SniffResults: React.FC<SnifferResultsProps> = ({ sniffer, onPlay, onAiAnal
                     </EmptyHint>
                 ) : (
                     filteredLinks.map((link, index) => {
-                        const canDownload = link.type !== 'stream' || ffmpegAvailable;
+                        // 判据与主进程、与 useBrowse 的 download 同源（utils.requiresFfmpeg）：
+                        // 只看 type 会漏掉"ext=flv 但 type=video"这类 AI 提取产物，
+                        // 界面按钮照常可点、主进程却会走 ffmpeg，点下去才报错。
+                        const needsFfmpeg = requiresFfmpeg(link.type, link.ext);
+                        const canDownload = !needsFfmpeg || ffmpegAvailable;
                         const downloadHint =
-                            link.type === 'stream'
+                            needsFfmpeg
                                 ? ffmpegAvailable
                                     ? '使用 ffmpeg 下载流媒体资源'
                                     : downloadCapabilities.ffmpegMessage
@@ -748,10 +755,11 @@ const SETTINGS_BTN = `flex items-center justify-center gap-2 rounded-2xl px-4 py
 /** 预设地址去掉协议头，用作服务商按钮的副标题 */
 const providerHost = (baseUrl: string): string => baseUrl.replace(/^https?:\/\//i, '');
 
-/** 档位展示：映射后取值不同才写出来 */
+/** 档位展示：不下发写成「不思考」，映射后取值不同才写出箭头 */
 const formatEffort = (config: AiConfig): string => {
     const wire = resolveReasoningEffort(config);
-    return wire === config.reasoningEffort ? config.reasoningEffort : `${config.reasoningEffort} → ${wire}`;
+    if (!wire) return '不思考';
+    return wire === config.reasoningEffort ? wire : `${config.reasoningEffort} → ${wire}`;
 };
 
 /**
@@ -766,16 +774,16 @@ const formatEffort = (config: AiConfig): string => {
  * AI 语义：
  * - 走 OpenAI 兼容协议（POST {baseUrl}/chat/completions）；
  * - 服务商是填表模板（AiService 的 AI_PROVIDERS）：点一下填好地址、密钥与模型；
- * - 思考强度只有低 / 高 / 最大三档，各家取值不同（OFM 认 light / balanced / deep），
- *   下发前由 AiService.resolveReasoningEffort 映射，映射结果显示在按钮下方；
+ * - 思考强度可选：不思考 / 低 / 高 / 最大，各家取值可能不同，
+ *   下发前由 AiService.resolveReasoningEffort 映射，实际下发的取值显示在按钮下方；
+ *   「不思考」与不需要思考的服务商（gcli2api）都不下发 reasoning_effort；
  * - 配置落在主进程 settings.json（浏览器调试时回落 localStorage，见 AiService）。
  *
  * 保存值落在主进程 userData/settings.json：主进程启动时（渲染层还没起来）
  * 就要知道走不走代理，localStorage 那时读不到。
  */
 const SettingsFloating: React.FC = () => {
-    const api = getElectronAPI();
-    const settingsApi = api?.settings;
+    const settingsApi = getElectronAPI()?.settings;
 
     /* ------------------------------ 代理端口 ------------------------------ */
     const [draft, setDraft] = useState('');
@@ -882,8 +890,10 @@ const SettingsFloating: React.FC = () => {
     // 草稿地址对应的服务商：档位映射与模型候选都看它
     const activeProvider = useMemo(() => findAiProvider(aiDraft.baseUrl), [aiDraft.baseUrl]);
     const modelPresets = useMemo(() => getModelPresets(aiDraft.baseUrl), [aiDraft.baseUrl]);
+    /** 自定义地址（不在预设表里）按需要思考处理，与 AiService 的判定一致 */
+    const supportsReasoning = activeProvider?.reasoning !== false;
 
-    /** 三档 + 各自下发的取值（显示用） */
+    /** 各档位 + 实际下发的取值（显示用）；wire 为空即「不下发」 */
     const effortRows = useMemo(
         () => EFFORT_OPTIONS.map((option) => ({ ...option, wire: resolveReasoningEffort(aiDraft, option.value) })),
         [aiDraft]
@@ -895,7 +905,8 @@ const SettingsFloating: React.FC = () => {
             baseUrl: preset.baseUrl,
             apiKey: preset.apiKey,
             model: preset.models[0] || prev.model,
-            reasoningEffort: 'high',
+            // 不需要思考的服务商留空（= 不思考），否则会显示一个永远不会下发的档位
+            reasoningEffort: preset.reasoning === false ? undefined : 'high',
         }));
         setAiError('');
         setTestResult(null);
@@ -955,14 +966,6 @@ const SettingsFloating: React.FC = () => {
     const isDirect = !savedValue;
     // 协议标签：只在真正生效时显示，避免"直连模式（SOCKS5）"这种自相矛盾的组合
     const protocolLabel = proxyProtocol === 'socks5' ? 'SOCKS5' : proxyProtocol === 'http' ? 'HTTP' : '';
-
-    if (!api) {
-        return (
-            <EmptyHint icon={<Globe className="h-6 w-6" />} title="设置仅在 Electron 桌面端可用">
-                <p className="text-xs text-slate-500">浏览器环境下不涉及主进程网络层配置。</p>
-            </EmptyHint>
-        );
-    }
 
     return (
         <div className="custom-scrollbar flex h-full flex-col gap-5 overflow-y-auto pb-1 pr-1">
@@ -1243,15 +1246,17 @@ const SettingsFloating: React.FC = () => {
                     <div className="grid grid-cols-3 gap-2" role="group" aria-label="思考强度">
                         {effortRows.map((option) => {
                             const isActive = aiDraft.reasoningEffort === option.value;
-                            const isMapped = option.wire !== option.value;
+                            // 不需要思考的服务商：三档按钮点了也不会被下发，标灰避免误解
+                            const isMuted = !supportsReasoning && option.value !== undefined;
                             return (
                                 <button
-                                    key={option.value}
+                                    key={option.value ?? 'none'}
                                     type="button"
                                     onClick={() => patchAiDraft({ reasoningEffort: option.value })}
                                     title={option.hint}
                                     aria-pressed={isActive}
-                                    className={`flex flex-col items-center gap-0.5 rounded-2xl border px-3 py-2.5 transition ${FOCUS_RING} ${isActive
+                                    disabled={isMuted}
+                                    className={`flex flex-col items-center gap-0.5 rounded-2xl border px-3 py-2.5 transition disabled:cursor-not-allowed disabled:opacity-40 ${FOCUS_RING} ${isActive
                                         ? 'border-violet-500/50 bg-violet-500/15 text-violet-200'
                                         : 'border-white/10 bg-slate-950 text-slate-400 hover:border-white/20 hover:text-slate-200'
                                         }`}
@@ -1261,12 +1266,17 @@ const SettingsFloating: React.FC = () => {
                                         {option.label}
                                     </span>
                                     <span className="max-w-full truncate font-mono text-[10px] text-slate-500">
-                                        {isMapped ? option.wire : option.value}
+                                        {option.wire ?? '不下发'}
                                     </span>
                                 </button>
                             );
                         })}
                     </div>
+                    {!supportsReasoning && (
+                        <p className="text-xs text-slate-500">
+                            该服务商不需要思考档位（档位在模型名里），请求不会下发 reasoning_effort。
+                        </p>
+                    )}
                 </div>
 
                 {aiError && (

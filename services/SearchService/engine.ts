@@ -84,7 +84,7 @@ function rank(value: number): number {
 }
 
 /**
- * 导出排序比较器供测试直接断言其契约（见 scripts/test/search.test.js）。
+ * 导出排序比较器供测试直接断言其契约（见 test/search.test.js）。
  * 只测"最终顺序"抓不到 NaN：V8 会把 NaN 当成"不大于"，结果碰巧仍是对的。
  */
 export function compareBy(sort: SearchSort): (a: SearchHit, b: SearchHit) => number {

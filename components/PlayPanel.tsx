@@ -1,50 +1,14 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
-    Play,
-    Pause,
-    SkipBack,
-    SkipForward,
-    Volume2,
-    VolumeX,
-    Maximize2,
-    Minimize2,
-    Repeat,
-    Shuffle,
-    Folder,
-    FolderOpen,
-    ChevronRight,
-    ChevronDown,
-    Library,
-    Plus,
-    Trash2,
-    ArrowLeft,
-    Link,
-    Music,
-    Image as ImageIcon,
-    Sparkles,
-    HelpCircle,
-    Film,
-    Tv,
-    FileText,
-    FileQuestion,
-    X,
-    PanelLeftClose,
-    PanelLeftOpen,
-    FastForward,
-    Rewind,
-    Radio,
-    Archive,
-    Repeat1,
-    CircleStop,
-    Search,
-    GripVertical,
-    ListMusic,
-    Inbox,
-    Volume1,
-    AlertTriangle,
+    Play, Pause, SkipBack, SkipForward, Volume2, VolumeX, Volume1, Maximize2, Minimize2,
+    Repeat, Repeat1, Shuffle, CircleStop, Folder, FolderOpen, ChevronRight, ChevronDown, ChevronLeft,
+    Library, Plus, Trash2, ArrowLeft, Link, Music, Image as ImageIcon, Sparkles, HelpCircle,
+    Film, Tv, FileText, FileQuestion, X, PanelLeftClose, PanelLeftOpen, FastForward, Rewind,
+    Radio, Archive, Search, GripVertical, ListMusic, Inbox, AlertTriangle, Keyboard, Upload,
+    Loader2, Wand2, Images, BookOpen,
 } from 'lucide-react';
-import { UsePlayReturn } from '../../hooks/usePlay';
-import { PlaybackMode, ObjectFitMode, VideoFile, MediaType, getElectronAPI, type AiStory } from '../../meta';
+import { UsePlayReturn } from '../hooks/usePlay';
+import { PlaybackMode, ObjectFitMode, VideoFile, MediaType, getElectronAPI, type AiStory } from '../meta';
 import {
     isValidMediaUrl,
     resolveProbeMedia,
@@ -52,29 +16,28 @@ import {
     readAiBookFile,
     isAiBookFileName,
     dataUrlToBlobUrl,
+    downloadBlob,
     buildAiBookBlob,
     toDataUrl,
     sanitizeBookName,
-} from '../../utils/utils';
-import { loadStr, saveStr } from '../../utils/persist';
+    generateId,
+} from '../utils/utils';
+import { loadStr, saveStr } from '../utils/persist';
 import {
     collectPackSources,
     packToGalleryBlob,
     sanitizePackName,
     unpackGalleryPack,
     isGalleryPackFile,
-} from '../../utils/galleryPack';
-import { ShortcutsModal } from './ShortcutsModal';
-import { StoryGenerator, type StoryPageSource } from './StoryGenerator';
-import { StoryReader } from './StoryReader';
-import { IconButton, Pill, Modal, RangeSlider, EqualizerBars, useClickOutside, type PillTone } from './ui';
+} from '../utils/galleryPack';
+import { generateStoryFromImages, toImageInput, AIBOOK_MAX_SOURCE_IMAGES, generateSpeech } from '../services/AiService';
 
 interface PlayPanelProps {
     player: UsePlayReturn;
     onBackToBrowse: () => void;
 }
 
-// 播放模式 / 画面比例中文标签：枚举值是英文（'List Loop'），直接展示会裸奔英文
+// 枚举值为英文，此处统一中文化，避免 UI 裸奔英文
 const PLAYBACK_MODE_LABEL: Record<PlaybackMode, string> = {
     [PlaybackMode.ListLoop]: '列表循环',
     [PlaybackMode.SingleLoop]: '单曲循环',
@@ -86,64 +49,32 @@ const OBJECT_FIT_LABEL: Record<ObjectFitMode, string> = {
     cover: '填充',
     fill: '拉伸',
 };
-// 媒体类型中文标签：此前直接把 mediaType 小写拼进 UI（VIDEO/AUDIO/GALLERY），
-// 中文界面里裸奔英文；这里统一口径，列表与顶部标题共用。
-const MEDIA_TYPE_LABEL: Record<MediaType, string> = {
-    video: '视频',
-    stream: '流媒体',
-    audio: '音频',
-    image: '图片',
-    document: '文档',
-    gallery: '画廊',
-    other: '其它',
+// 媒体类型展示元数据：标签 / 图标 / 语义色集中一处，列表行、标题徽章、进度条共用
+type PillTone = 'slate' | 'indigo' | 'teal' | 'amber' | 'rose' | 'emerald' | 'cyan' | 'sky';
+interface MediaTypeMeta {
+    label: string;
+    icon: React.ComponentType<{ className?: string }>;
+    /** Tailwind 文本色（图标、徽章用） */
+    accent: string;
+    /** 十六进制形态：原生 range 填充只能吃 CSS 颜色值 */
+    hex: string;
+    tone: PillTone;
+}
+const MEDIA_TYPE_META: Record<MediaType, MediaTypeMeta> = {
+    video: { label: '视频', icon: Film, accent: 'text-indigo-400', hex: '#818cf8', tone: 'indigo' },
+    stream: { label: '流媒体', icon: Radio, accent: 'text-sky-400', hex: '#38bdf8', tone: 'sky' },
+    audio: { label: '音频', icon: Music, accent: 'text-pink-400', hex: '#f472b6', tone: 'rose' },
+    image: { label: '图片', icon: ImageIcon, accent: 'text-emerald-400', hex: '#34d399', tone: 'emerald' },
+    document: { label: '文档', icon: FileText, accent: 'text-cyan-400', hex: '#22d3ee', tone: 'cyan' },
+    gallery: { label: '画廊', icon: Library, accent: 'text-amber-400', hex: '#fbbf24', tone: 'amber' },
+    other: { label: '其它', icon: FileQuestion, accent: 'text-slate-400', hex: '#94a3b8', tone: 'slate' },
 };
-const MEDIA_TYPE_ICON: Record<MediaType, React.ComponentType<{ className?: string }>> = {
-    video: Film,
-    stream: Radio,
-    audio: Music,
-    image: ImageIcon,
-    document: FileText,
-    gallery: Library,
-    other: FileQuestion,
-};
-// 列表行图标配色：与顶部类型徽章、底部控制条保持同一套语义色
-const MEDIA_TYPE_ACCENT: Record<MediaType, string> = {
-    video: 'text-indigo-400',
-    stream: 'text-sky-400',
-    audio: 'text-pink-400',
-    image: 'text-emerald-400',
-    document: 'text-cyan-400',
-    gallery: 'text-amber-400',
-    other: 'text-slate-400',
-};
-// 同一套语义色的十六进制形态：原生 range 的填充与滑块描边只能吃 CSS 颜色值，
-// 用 Tailwind 类名表达不了，而这里又必须与上面那张表保持一致，故并列维护。
-const MEDIA_TYPE_HEX: Record<MediaType, string> = {
-    video: '#818cf8',
-    stream: '#38bdf8',
-    audio: '#f472b6',
-    image: '#34d399',
-    document: '#22d3ee',
-    gallery: '#fbbf24',
-    other: '#94a3b8',
-};
-// 徽章底色：顶部标题旁的类型标签用柔和色块，避免十来个灰底徽章糊成一片
-const MEDIA_TYPE_TONE: Record<MediaType, PillTone> = {
-    video: 'indigo',
-    stream: 'sky',
-    audio: 'rose',
-    image: 'emerald',
-    document: 'cyan',
-    gallery: 'amber',
-    other: 'slate',
-};
-// 侧栏宽度可拖拽，这两组是夹取范围与「双击复位」的目标值
+// 侧栏宽度：可拖拽，落盘记忆
 const SIDEBAR_MIN = 248;
 const SIDEBAR_MAX = 560;
 const SIDEBAR_DEFAULT = 320;
-// 侧栏宽度落盘：用户调过一次之后，下次进播放器不该又弹回默认
 const SIDEBAR_STORE_KEY = 'theplay.player.sidebarWidth';
-// 格式化时间为 mm:ss 或 hh:mm:ss
+// mm:ss 或 hh:mm:ss
 const formatTime = (seconds: number) => {
     if (isNaN(seconds) || seconds < 0 || !Number.isFinite(seconds)) return '00:00';
     const hrs = Math.floor(seconds / 3600);
@@ -155,14 +86,7 @@ const formatTime = (seconds: number) => {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
 };
 
-/**
- * 现代专业视频播放器进度条组件
- * 支持：
- * 1. 拖拽快进时内部锁定状态，避免与播放器 timeupdate 产生回弹冲突（彻底解决无法快进）
- * 2. 真实已播放高亮槽、已缓冲进度槽、背景底槽三层视觉
- * 3. 鼠标悬停实时 Tooltip 预览时间气泡与刻度指示
- * 4. 移动端与桌面端点击、滑动平滑快进
- */
+/** 进度条：拖拽时内部锁定，避免与 timeupdate 回弹冲突；三层视觉（已播/缓冲/底槽）+ 悬停时间预览，支持鼠标与触屏 */
 interface ProgressBarProps {
     currentTime: number;
     duration: number;
@@ -186,9 +110,7 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
     const [isSeeking, setIsSeeking] = useState(false);
     const [seekPreviewTime, setSeekPreviewTime] = useState<number>(0);
 
-    // 拖拽期间挂在 window 上的监听器回收句柄。
-    // 只在 mouseup/touchend 里摘除是不够的：拖到一半切媒体会让进度条卸载，
-    // 监听器会永久驻留并持有过期闭包，下一次松开鼠标就对已经切走的媒体 seek。
+    // 拖拽监听回收句柄：切媒体导致卸载时也要摘除，否则过期闭包会对已切走的媒体 seek
     const dragCleanupRef = useRef<(() => void) | null>(null);
     const endDrag = useCallback(() => {
         dragCleanupRef.current?.();
@@ -196,10 +118,9 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
     }, []);
     useEffect(() => () => dragCleanupRef.current?.(), []);
 
-    // 确保 duration 是有效数值
     const validDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
 
-    // 当前有效显示时间（拖拽快进中优先显示预览时间）
+    // 拖拽中优先显示预览时间
     const activeTime = isSeeking ? seekPreviewTime : currentTime;
     const progressPercent = validDuration > 0 ? Math.min(100, Math.max(0, (activeTime / validDuration) * 100)) : 0;
     const bufferedPercent = validDuration > 0 ? Math.min(100, Math.max(0, (bufferedEnd / validDuration) * 100)) : 0;
@@ -211,14 +132,12 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
         return ratio * validDuration;
     }, [validDuration]);
 
-    // 鼠标悬停位置计算
     const handleMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
         if (disabled || isLive || validDuration <= 0) return;
         const time = calculateTimeFromEvent(e.clientX);
         setHoverPosition(time);
     }, [calculateTimeFromEvent, disabled, isLive, validDuration]);
 
-    // 鼠标点击或拖拽开始
     const handleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
         if (disabled || isLive || validDuration <= 0) return;
         e.preventDefault();
@@ -247,7 +166,7 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
         window.addEventListener('mouseup', onGlobalMouseUp);
     }, [calculateTimeFromEvent, disabled, endDrag, isLive, onSeek, validDuration]);
 
-    // 触控拖拽支持（以 touchend 落点为准，避免闭包旧值导致永远回到起点）
+    // 以 touchend 落点为准，避免闭包旧值导致回到起点
     const handleTouchStart = useCallback((e: React.TouchEvent<HTMLDivElement>) => {
         if (disabled || isLive || validDuration <= 0 || !e.touches[0]) return;
         endDrag();
@@ -365,7 +284,7 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
     );
 };
 
-// 文档/文本内容展示组件（大文件截断 + PDF 不做文本转储）
+// 文档/文本展示：大文件截断，PDF 不做文本转储
 const MAX_DOC_CHARS = 200_000;
 const DocumentDisplay: React.FC<{ file: VideoFile }> = ({ file }) => {
     const [content, setContent] = useState<string>('');
@@ -383,8 +302,7 @@ const DocumentDisplay: React.FC<{ file: VideoFile }> = ({ file }) => {
                 let text = '';
                 if (file.file) {
                     if (file.file.size > 2 * 1024 * 1024) {
-                        // 大文件只读前 MAX_DOC_CHARS 字节：整文件 text() 会把几百 MB 日志
-                        // 一次性读进内存再截断，直接卡死渲染进程
+                        // 大文件只读头部，避免几百 MB 日志一次读进内存卡死渲染进程
                         text = await file.file.slice(0, MAX_DOC_CHARS).text();
                         if (!cancelled) {
                             setContent(text);
@@ -397,7 +315,7 @@ const DocumentDisplay: React.FC<{ file: VideoFile }> = ({ file }) => {
                 } else if (file.url) {
                     const res = await fetch(file.url);
                     const reader = res.body?.getReader();
-                    // 流式读取并上限截断，避免超大日志卡死渲染
+                    // 流式读取 + 上限截断，避免超大日志卡死渲染
                     if (reader) {
                         const decoder = new TextDecoder();
                         let acc = '';
@@ -484,18 +402,1039 @@ const DocumentDisplay: React.FC<{ file: VideoFile }> = ({ file }) => {
     );
 };
 
+/* ========================================================================== */
+/* UI 原子件：统一深色玻璃胶囊样式，避免 30+ 处手写 className 漂移              */
+/* ========================================================================== */
+
+/* 点击外部关闭 */
+
+/** 点击是否落在元素之外（用 composedPath 兼容 Shadow DOM / 跨根节点） */
+const isOutside = (el: HTMLElement | null, target: EventTarget | null): boolean => {
+    if (!el || !target || !(target instanceof Node)) return false;
+    const path = typeof (target as unknown as { composedPath?: () => EventTarget[] }).composedPath === 'function'
+        ? (target as unknown as { composedPath: () => EventTarget[] }).composedPath()
+        : null;
+    if (path && path.length > 0) return !path.includes(el);
+    return !el.contains(target);
+};
+
+/** 点击/触摸外部即回调（enabled=false 时不挂监听）；用于倍速菜单类轻量浮层 */
+const useClickOutside = (
+    ref: React.RefObject<HTMLElement | null>,
+    onOutside: () => void,
+    enabled = true
+) => {
+    const cbRef = useRef(onOutside);
+    cbRef.current = onOutside;
+    useEffect(() => {
+        if (!enabled) return;
+        const handler = (e: MouseEvent | TouchEvent) => {
+            if (isOutside(ref.current, e.target)) cbRef.current();
+        };
+        document.addEventListener('mousedown', handler);
+        document.addEventListener('touchstart', handler, { passive: true });
+        return () => {
+            document.removeEventListener('mousedown', handler);
+            document.removeEventListener('touchstart', handler);
+        };
+    }, [ref, enabled]);
+};
+
+/* 图标按钮 */
+
+type IconButtonTone = 'default' | 'accent' | 'danger' | 'teal' | 'amber' | 'ghost';
+type IconButtonSize = 'sm' | 'md' | 'lg' | 'xl';
+
+const ICON_TONES: Record<IconButtonTone, string> = {
+    default: 'text-slate-400 hover:text-white hover:bg-white/10',
+    accent: 'text-indigo-300 hover:text-white hover:bg-indigo-500/20',
+    danger: 'text-slate-400 hover:text-rose-400 hover:bg-rose-500/15',
+    teal: 'text-teal-300 hover:text-white hover:bg-teal-500/20',
+    amber: 'text-amber-300 hover:text-white hover:bg-amber-500/20',
+    ghost: 'text-slate-300 hover:text-white hover:bg-white/10',
+};
+
+const ICON_SIZES: Record<IconButtonSize, string> = {
+    sm: 'p-1.5 rounded-lg',
+    md: 'p-2 rounded-xl',
+    lg: 'p-2.5 rounded-xl',
+    xl: 'p-3 rounded-2xl',
+};
+
+/** 各尺寸对应的图标边长，保证图标与内边距同步放大 */
+const ICON_GLYPH: Record<IconButtonSize, string> = {
+    sm: 'w-3.5 h-3.5',
+    md: 'w-4 h-4',
+    lg: 'w-[18px] h-[18px]',
+    xl: 'w-5 h-5',
+};
+
+interface IconButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+    size?: IconButtonSize;
+    tone?: IconButtonTone;
+    /** 同时作为 title 与 aria-label */
+    label: string;
+    /** 实心背景（主操作按钮用），覆盖 tone 的悬停底色 */
+    solid?: boolean;
+}
+
+const IconButton: React.FC<IconButtonProps> = ({
+    size = 'md',
+    tone = 'default',
+    label,
+    solid = false,
+    className = '',
+    children,
+    ...rest
+}) => (
+    <button
+        type="button"
+        title={label}
+        aria-label={label}
+        className={[
+            'inline-flex items-center justify-center shrink-0 transition',
+            solid ? '' : ICON_TONES[tone],
+            ICON_SIZES[size],
+            'disabled:opacity-40 disabled:cursor-not-allowed',
+            className,
+        ].filter(Boolean).join(' ')}
+        {...rest}
+    >
+        {children}
+    </button>
+);
+
+/** IconButton 配套的图标尺寸类，供调用方复用同一档位 */
+const iconGlyph = (size: IconButtonSize): string => ICON_GLYPH[size];
+
+/* 胶囊按钮 / 徽章                                                             */
+/* -------------------------------------------------------------------------- */
+
+const PILL_TONES: Record<PillTone, string> = {
+    slate: 'bg-white/5 border-white/10 text-slate-300',
+    indigo: 'bg-indigo-500/15 border-indigo-500/30 text-indigo-300',
+    teal: 'bg-teal-500/15 border-teal-500/30 text-teal-300',
+    amber: 'bg-amber-500/15 border-amber-500/30 text-amber-300',
+    rose: 'bg-rose-500/15 border-rose-500/30 text-rose-300',
+    emerald: 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300',
+    cyan: 'bg-cyan-500/15 border-cyan-500/30 text-cyan-300',
+    sky: 'bg-sky-500/15 border-sky-500/30 text-sky-300',
+};
+
+/** 小徽章：统一描边、圆角与字重 */
+const Pill: React.FC<{
+    tone?: PillTone;
+    className?: string;
+    children: React.ReactNode;
+    title?: string;
+}> = ({ tone = 'slate', className = '', children, title }) => (
+    <span
+        title={title}
+        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border text-[10px] font-semibold leading-4 whitespace-nowrap ${PILL_TONES[tone]} ${className}`}
+    >
+        {children}
+    </span>
+);
+
+/* 模态框外壳 */
+
+interface ModalProps {
+    open: boolean;
+    onClose: () => void;
+    title: string;
+    /** 标题左侧图标 */
+    icon?: React.ReactNode;
+    /** 标题右侧、关闭按钮前的补充操作 */
+    headerExtra?: React.ReactNode;
+    /** 底部操作区 */
+    footer?: React.ReactNode;
+    maxWidth?: string;
+    children: React.ReactNode;
+}
+
+/** 统一模态框：遮罩/Esc 关闭，打开聚焦首个可输入元素，Tab 框内循环 */
+const Modal: React.FC<ModalProps> = ({
+    open,
+    onClose,
+    title,
+    icon,
+    headerExtra,
+    footer,
+    maxWidth = 'max-w-md',
+    children,
+}) => {
+    const panelRef = useRef<HTMLDivElement>(null);
+    const titleId = React.useId();
+
+    // 打开时把焦点移进弹窗（优先输入框）
+    useEffect(() => {
+        if (!open) return;
+        const panel = panelRef.current;
+        if (!panel) return;
+        const focusable = panel.querySelector<HTMLElement>(
+            'input:not([type="hidden"]):not([disabled]), textarea:not([disabled]), select:not([disabled])'
+        );
+        (focusable || panel).focus({ preventScroll: true });
+    }, [open]);
+
+    const onKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+        if (e.key !== 'Tab') return;
+        const panel = panelRef.current;
+        if (!panel) return;
+        const nodes = Array.from(
+            panel.querySelectorAll<HTMLElement>(
+                'a[href], button:not([disabled]), input:not([type="hidden"]):not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+            )
+        ).filter((el) => el.offsetParent !== null || el === document.activeElement);
+        if (nodes.length === 0) return;
+        const first = nodes[0];
+        const last = nodes[nodes.length - 1];
+        const active = document.activeElement as HTMLElement | null;
+        if (e.shiftKey && (active === first || !panel.contains(active))) {
+            e.preventDefault();
+            last.focus();
+        } else if (!e.shiftKey && active === last) {
+            e.preventDefault();
+            first.focus();
+        }
+    }, []);
+
+    if (!open) return null;
+
+    return (
+        <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 animate-in fade-in duration-150"
+            onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
+        >
+            <div
+                ref={panelRef}
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby={titleId}
+                tabIndex={-1}
+                onKeyDown={onKeyDown}
+                className={`bg-slate-900 border border-white/10 rounded-2xl w-full ${maxWidth} shadow-2xl animate-in zoom-in-95 duration-150 outline-none max-h-[90vh] flex flex-col`}
+            >
+                <div className="flex items-center justify-between gap-3 border-b border-white/10 px-6 py-4 shrink-0">
+                    <h3 id={titleId} className="text-base font-bold text-white flex items-center gap-2 min-w-0">
+                        {icon}
+                        <span className="truncate">{title}</span>
+                    </h3>
+                    <div className="flex items-center gap-1 shrink-0">
+                        {headerExtra}
+                        <IconButton label="关闭 (Esc)" onClick={onClose}>
+                            <X className="w-4 h-4" />
+                        </IconButton>
+                    </div>
+                </div>
+
+                <div className="px-6 py-4 overflow-y-auto custom-scrollbar">{children}</div>
+
+                {footer && (
+                    <div className="px-6 py-4 border-t border-white/10 flex justify-end gap-2 shrink-0">{footer}</div>
+                )}
+            </div>
+        </div>
+    );
+};
+
+/* 滑杆 */
+
+interface RangeSliderProps {
+    value: number;
+    min?: number;
+    max?: number;
+    step?: number;
+    onChange: (value: number) => void;
+    /** 强调色（CSS 颜色值），不传用主题 indigo */
+    color?: string;
+    label: string;
+    disabled?: boolean;
+    className?: string;
+}
+
+/** 带已填充轨道的原生 range：Chromium 无进度伪元素，靠渐变 + `--tp-fill` 伪造（见 index.css） */
+const RangeSlider: React.FC<RangeSliderProps> = ({
+    value,
+    min = 0,
+    max = 1,
+    step = 0.01,
+    onChange,
+    color,
+    label,
+    disabled = false,
+    className = '',
+}) => {
+    const span = max - min;
+    const pct = span > 0 ? Math.min(100, Math.max(0, ((value - min) / span) * 100)) : 0;
+    const style = {
+        '--tp-fill': `${pct}%`,
+        ...(color ? { '--tp-range-color': color } : {}),
+    } as React.CSSProperties;
+
+    return (
+        <input
+            type="range"
+            aria-label={label}
+            title={label}
+            min={min}
+            max={max}
+            step={step}
+            value={value}
+            disabled={disabled}
+            onChange={(e) => onChange(parseFloat(e.target.value))}
+            style={style}
+            className={`w-full disabled:opacity-40 disabled:cursor-not-allowed ${className}`}
+        />
+    );
+};
+
+/* 播放中的均衡器指示 */
+
+/** 三根跳动竖条：高度写死、仅 transform 动画，避免重排 */
+const EqualizerBars: React.FC<{ active: boolean; className?: string }> = ({ active, className = '' }) => (
+    <span className={`inline-flex items-end gap-[2px] h-3 ${className}`} aria-hidden="true">
+        {[0, 0.18, 0.36].map((delay, i) => (
+            <span
+                key={i}
+                className={`w-[2px] rounded-full bg-current ${active ? 'tp-eq-bar' : ''}`}
+                style={{
+                    height: `${[10, 12, 8][i]}px`,
+                    animationDelay: `${delay}s`,
+                    ...(active ? {} : { transform: 'scaleY(0.3)' }),
+                }}
+            />
+        ))}
+    </span>
+);
+
+/* 快捷键说明弹窗 */
+
+interface ShortcutsModalProps {
+    isOpen: boolean;
+    onClose: () => void;
+}
+
+/** 快捷键分组：分页媒体（图集/文档/绘本）下方向键为翻页而非快进，单独成组避免误解 */
+const SHORTCUT_GROUPS: { title: string; items: { label: string; keys: string[] }[] }[] = [
+    {
+        title: '播放控制',
+        items: [
+            { label: '播放 / 暂停', keys: ['Space', 'K'] },
+            { label: '上一个 / 下一个', keys: ['P', 'N'] },
+            { label: '快退 / 快进 10 秒', keys: ['J', 'L'] },
+            { label: '快退 / 快进 5 秒', keys: ['←', '→'] },
+            { label: '增加 / 减小音量', keys: ['↑', '↓'] },
+            { label: '静音切换', keys: ['M'] },
+        ],
+    },
+    {
+        title: '画面与窗口',
+        items: [
+            { label: '全屏模式', keys: ['F'] },
+            { label: '退出全屏 / 关闭浮层', keys: ['Esc'] },
+            { label: '收起 / 展开播放列表', keys: ['['] },
+            { label: '本快捷键说明', keys: ['?'] },
+        ],
+    },
+];
+
+/** 图集 / 文档 / 绘本下，方向键与 J L P N 全部改为翻页 */
+const PAGED_SHORTCUTS: { label: string; keys: string[] }[] = [
+    { label: '上一页', keys: ['P', '←'] },
+    { label: '下一页', keys: ['N', '→'] },
+    { label: '播放 / 暂停轮播', keys: ['Space', 'K'] },
+];
+
+const KeyCap: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+    <kbd className="min-w-[26px] text-center px-2 py-1 bg-slate-800/90 border border-slate-600/70 border-b-2 rounded-md text-[11px] font-mono font-bold text-slate-100 shadow-sm">
+        {children}
+    </kbd>
+);
+
+const ShortcutRow: React.FC<{ label: string; keys: string[] }> = ({ label, keys }) => (
+    <div className="flex items-center justify-between gap-3">
+        <span className="text-xs text-slate-300">{label}</span>
+        <div className="flex gap-1 shrink-0">
+            {keys.map((k) => <KeyCap key={k}>{k}</KeyCap>)}
+        </div>
+    </div>
+);
+
+const ShortcutsModal: React.FC<ShortcutsModalProps> = ({ isOpen, onClose }) => {
+    useEffect(() => {
+        if (!isOpen) return;
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') onClose();
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, [isOpen, onClose]);
+
+    if (!isOpen) return null;
+
+    return (
+        <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 animate-in fade-in duration-150"
+            onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
+        >
+            <div
+                role="dialog"
+                aria-modal="true"
+                aria-label="快捷键指南"
+                className="bg-slate-900 border border-white/10 rounded-2xl w-full max-w-xl shadow-2xl animate-in zoom-in-95 duration-150 max-h-[90vh] overflow-y-auto custom-scrollbar"
+            >
+                <div className="flex items-center justify-between border-b border-white/10 px-6 py-4 sticky top-0 bg-slate-900/95 backdrop-blur z-10">
+                    <div className="flex items-center gap-2.5">
+                        <span className="p-1.5 rounded-lg bg-indigo-500/15 border border-indigo-500/25">
+                            <Keyboard className="w-4 h-4 text-indigo-400" />
+                        </span>
+                        <div>
+                            <h3 className="text-sm font-bold text-white">快捷键指南</h3>
+                            <p className="text-[11px] text-slate-500 mt-0.5">输入框聚焦时，除 Esc 外均不生效</p>
+                        </div>
+                    </div>
+                    <IconButton label="关闭 (Esc)" onClick={onClose}>
+                        <X className="w-4 h-4" />
+                    </IconButton>
+                </div>
+
+                <div className="px-6 py-4 grid gap-4 sm:grid-cols-2">
+                    {SHORTCUT_GROUPS.map((group) => (
+                        <section key={group.title}>
+                            <h4 className="text-[11px] font-bold text-indigo-300/90 tracking-wide mb-2">{group.title}</h4>
+                            <div className="space-y-1.5 bg-slate-950/50 p-3 rounded-xl border border-white/5">
+                                {group.items.map((item) => (
+                                    <ShortcutRow key={item.label} label={item.label} keys={item.keys} />
+                                ))}
+                            </div>
+                        </section>
+                    ))}
+                </div>
+
+                {/* 分页媒体的按键映射与视频不同，单独说明 */}
+                <div className="px-6 pb-2">
+                    <h4 className="text-[11px] font-bold text-emerald-300/90 tracking-wide mb-2">
+                        图集 / 文档 / 绘本模式
+                    </h4>
+                    <div className="space-y-1.5 bg-slate-950/50 p-3 rounded-xl border border-white/5">
+                        {PAGED_SHORTCUTS.map((item) => (
+                            <ShortcutRow key={item.label} label={item.label} keys={item.keys} />
+                        ))}
+                    </div>
+                </div>
+
+                <div className="px-6 py-4 border-t border-white/10 flex items-center justify-between gap-4">
+                    <p className="text-[11px] text-slate-500">
+                        翻页媒体下 <span className="font-mono text-slate-400">← →</span> 用于翻页，不触发快退快进
+                    </p>
+                    <button
+                        onClick={onClose}
+                        className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold transition shadow-md shadow-indigo-600/25 shrink-0"
+                    >
+                        知道了
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+/* AI 绘本故事家 */
+
+/** 生成器里的待用图片（组件内部状态，就近定义） */
+interface StoryPageSource {
+    id: string;
+    file: File | null;
+    url: string;
+}
+
+/** 用 File 造一个生成器页面源 */
+const createStoryPageSource = (file: File): StoryPageSource => ({
+    id: generateId(),
+    file,
+    url: URL.createObjectURL(file),
+});
+
+/** 释放生成器页面源占用的 Blob URL */
+const revokeStoryPageSource = (source: StoryPageSource): void => {
+    try {
+        if (source.url && source.url.startsWith('blob:')) URL.revokeObjectURL(source.url);
+    } catch {
+        // 已释放或非法 URL：忽略
+    }
+};
+
+interface StoryGeneratorProps {
+    onComplete: (story: AiStory, sources: StoryPageSource[]) => void;
+    onClose: () => void;
+}
+
+/** 上传一组图片，让模型按顺序串成一个故事（网格仅支持删除，不支持拖拽重排） */
+const StoryGenerator: React.FC<StoryGeneratorProps> = ({ onComplete, onClose }) => {
+    const [sources, setSources] = useState<StoryPageSource[]>([]);
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [showStyle, setShowStyle] = useState(false);
+    const [styleInstruction, setStyleInstruction] = useState('');
+    const [isDragging, setIsDragging] = useState(false);
+    const dragDepthRef = useRef(0);
+
+    const fileInputRef = useRef<HTMLInputElement>(null);
+
+    // 卸载时回收 Blob URL；已交接给播放列表时跳过。sourcesRef 同步写入，
+    // 避免连续 addFiles 间无重渲染导致 ref 滞后覆盖
+    const handedOffRef = useRef(false);
+    const sourcesRef = useRef<StoryPageSource[]>([]);
+    const commitSources = useCallback((next: StoryPageSource[]) => {
+        sourcesRef.current = next;
+        setSources(next);
+    }, []);
+    useEffect(() => () => {
+        if (handedOffRef.current) return;
+        sourcesRef.current.forEach(revokeStoryPageSource);
+    }, []);
+
+    const addFiles = useCallback((files: FileList | File[] | null) => {
+        const list = Array.from(files || []).filter((f) => f && f.type.startsWith('image/'));
+        if (list.length === 0) return;
+
+        // updater 须为纯函数：在外算好再 setState，避免 StrictMode 重放导致渲染期改状态
+        const current = sourcesRef.current;
+        const room = AIBOOK_MAX_SOURCE_IMAGES - current.length;
+        if (room <= 0) {
+            setError(`最多支持 ${AIBOOK_MAX_SOURCE_IMAGES} 张图片`);
+            return;
+        }
+        const accepted = list.slice(0, room);
+        setError(accepted.length < list.length
+            ? `最多支持 ${AIBOOK_MAX_SOURCE_IMAGES} 张图片，已忽略多余的 ${list.length - accepted.length} 张`
+            : null);
+        commitSources([...current, ...accepted.map(createStoryPageSource)]);
+    }, [commitSources]);
+
+    const removeAt = useCallback((id: string) => {
+        const target = sourcesRef.current.find((s) => s.id === id);
+        if (target) revokeStoryPageSource(target);
+        commitSources(sourcesRef.current.filter((s) => s.id !== id));
+        setError(null);
+    }, [commitSources]);
+
+    const clearAll = useCallback(() => {
+        sourcesRef.current.forEach(revokeStoryPageSource);
+        commitSources([]);
+        setError(null);
+    }, [commitSources]);
+
+    /* 拖拽投放 */
+    const hasFiles = (e: React.DragEvent) =>
+        Array.from(e.dataTransfer?.types || []).includes('Files');
+
+    const handleDragEnter = useCallback((e: React.DragEvent) => {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+        dragDepthRef.current += 1;
+        if (dragDepthRef.current === 1) setIsDragging(true);
+    }, []);
+
+    const handleDragOver = useCallback((e: React.DragEvent) => {
+        if (!hasFiles(e)) return;
+        // 不阻止默认则不会触发 drop
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+    }, []);
+
+    const handleDragLeave = useCallback((e: React.DragEvent) => {
+        // dragleave 的 types 可能为空，不能用 hasFiles 守卫，否则计数器减不回去
+        e.preventDefault();
+        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+        if (dragDepthRef.current === 0) setIsDragging(false);
+    }, []);
+
+    const handleDrop = useCallback((e: React.DragEvent) => {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+        dragDepthRef.current = 0;
+        setIsDragging(false);
+        if (busy) return;
+        const files = e.dataTransfer?.files;
+        if (files && files.length > 0) addFiles(files);
+    }, [addFiles, busy]);
+
+    // 拖出窗口 / 取消拖拽时 drop 不触发，窗口级兜底收尾
+    useEffect(() => {
+        const reset = () => {
+            dragDepthRef.current = 0;
+            setIsDragging(false);
+        };
+        const onWindowDragLeave = (e: DragEvent) => {
+            if (e.relatedTarget === null) reset();
+        };
+        window.addEventListener('drop', reset);
+        window.addEventListener('dragend', reset);
+        window.addEventListener('dragleave', onWindowDragLeave);
+        return () => {
+            window.removeEventListener('drop', reset);
+            window.removeEventListener('dragend', reset);
+            window.removeEventListener('dragleave', onWindowDragLeave);
+        };
+    }, []);
+
+    const handleGenerate = useCallback(async () => {
+        if (sources.length === 0 || busy) return;
+        setBusy(true);
+        setError(null);
+        try {
+            const usable = sources.filter((s): s is StoryPageSource & { file: File } => !!s.file);
+            if (usable.length === 0) throw new Error('没有可用的图片');
+            const images = await Promise.all(usable.map((s) => toImageInput(s.file)));
+            const story = await generateStoryFromImages(images, styleInstruction.trim());
+            // 交接给播放列表后再卸载，避免误回收 Blob URL
+            handedOffRef.current = true;
+            onComplete(story, usable);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : '生成失败');
+        } finally {
+            setBusy(false);
+        }
+    }, [sources, busy, styleInstruction, onComplete]);
+
+    return (
+        <div
+            className="absolute inset-0 z-40 bg-slate-950 overflow-y-auto custom-scrollbar"
+            onDragEnter={handleDragEnter}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+        >
+            {/* 拖拽提示层：整屏响应，覆盖在内容之上，pointer-events-none 以免自己吃掉 drop */}
+            {isDragging && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-teal-950/70 backdrop-blur-sm pointer-events-none">
+                    <div className="flex flex-col items-center gap-3 px-10 py-8 rounded-2xl border-2 border-dashed border-teal-400/60 bg-slate-950/70">
+                        <Images className="w-8 h-8 text-teal-300" />
+                        <span className="text-sm font-bold text-white">松开即可加入故事</span>
+                        <span className="text-[11px] text-slate-400">
+                            按拖入顺序排列 · 最多 {AIBOOK_MAX_SOURCE_IMAGES} 张
+                        </span>
+                    </div>
+                </div>
+            )}
+
+            <div className="max-w-4xl mx-auto px-6 py-8 pb-20">
+                <button
+                    onClick={onClose}
+                    disabled={busy}
+                    className="mb-6 flex items-center gap-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed text-slate-300 rounded-xl text-xs font-semibold transition border border-white/5"
+                >
+                    <ArrowLeft className="w-3.5 h-3.5" />
+                    <span>返回媒体</span>
+                </button>
+
+                <div className="text-center mb-8">
+                    <h2 className="text-2xl font-bold text-white flex items-center justify-center gap-2">
+                        <Sparkles className="w-6 h-6 text-teal-400" />
+                        <span>AI 绘本故事家</span>
+                    </h2>
+                    <p className="text-xs text-slate-400 mt-2">
+                        上传一组照片，AI 会为您编织一个图文并茂的故事，并加入播放列表
+                    </p>
+                </div>
+
+                <div className="bg-slate-900/60 border border-white/8 rounded-2xl p-5 flex flex-col gap-4">
+                    {/* 图片网格 / 空态投放区 */}
+                    {sources.length === 0 ? (
+                        <button
+                            onClick={() => fileInputRef.current?.click()}
+                            disabled={busy}
+                            className={`w-full py-14 rounded-xl border-2 border-dashed transition flex flex-col items-center justify-center gap-2 ${isDragging
+                                ? 'border-teal-400/70 bg-teal-500/10 text-teal-200'
+                                : 'border-white/12 hover:border-teal-500/50 hover:bg-teal-500/5 text-slate-400 disabled:opacity-40'
+                                }`}
+                        >
+                            <Upload className="w-7 h-7 opacity-60" />
+                            <span className="text-sm font-semibold text-slate-200">点击上传图片序列，或直接拖入</span>
+                            <span className="text-[11px]">支持多选 · 顺序即叙事顺序 · 最多 {AIBOOK_MAX_SOURCE_IMAGES} 张</span>
+                        </button>
+                    ) : (
+                        <>
+                            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-2.5">
+                                {sources.map((s, i) => (
+                                    <div key={s.id} className="relative aspect-square rounded-xl overflow-hidden border border-white/10 bg-black group">
+                                        <img src={s.url} alt={`第 ${i + 1} 页`} className="w-full h-full object-cover" />
+                                        {/* 序号用不透明底：浅色图片上半透明底会糊 */}
+                                        <span className="absolute top-1 left-1 px-1.5 py-0.5 rounded-md bg-black/80 backdrop-blur text-[10px] font-mono font-bold text-teal-300 border border-white/10">
+                                            #{i + 1}
+                                        </span>
+                                        <button
+                                            onClick={() => removeAt(s.id)}
+                                            disabled={busy}
+                                            className="absolute top-1 right-1 p-1 rounded-md bg-black/80 hover:bg-rose-600/90 disabled:opacity-40 text-white/80 hover:text-white transition sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100"
+                                            title={`移除第 ${i + 1} 张`}
+                                            aria-label={`移除第 ${i + 1} 张`}
+                                        >
+                                            <X className="w-3 h-3" />
+                                        </button>
+                                    </div>
+                                ))}
+                                <button
+                                    onClick={() => fileInputRef.current?.click()}
+                                    disabled={busy}
+                                    className={`aspect-square rounded-xl border-2 border-dashed transition flex flex-col items-center justify-center gap-1 disabled:opacity-40 ${isDragging
+                                        ? 'border-teal-400/70 bg-teal-500/10 text-teal-200'
+                                        : 'border-white/12 hover:border-teal-500/50 hover:bg-teal-500/5 text-slate-500 hover:text-teal-300'
+                                        }`}
+                                    title="添加更多图片"
+                                >
+                                    <Upload className="w-5 h-5" />
+                                    <span className="text-[10px]">添加更多</span>
+                                </button>
+                            </div>
+
+                            {/* 统计与清空 */}
+                            <div className="flex items-center justify-between text-[11px] text-slate-500">
+                                <span className="flex items-center gap-1.5">
+                                    <Images className="w-3.5 h-3.5" />
+                                    共 {sources.length} 张 · 将生成 {sources.length} 页故事
+                                </span>
+                                <button
+                                    onClick={clearAll}
+                                    disabled={busy}
+                                    className="hover:text-rose-400 disabled:opacity-40 transition"
+                                >
+                                    清空
+                                </button>
+                            </div>
+                        </>
+                    )}
+
+                    {/* 自定义故事风格（默认收起） */}
+                    <div className="border-t border-white/8 pt-3">
+                        <button
+                            onClick={() => setShowStyle((v) => !v)}
+                            aria-expanded={showStyle}
+                            className="flex items-center gap-1.5 text-[11px] text-slate-400 hover:text-slate-200 transition"
+                        >
+                            {showStyle ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                            <span>自定义故事风格（可选）</span>
+                        </button>
+                        {showStyle && (
+                            <>
+                                <textarea
+                                    value={styleInstruction}
+                                    onChange={(e) => setStyleInstruction(e.target.value)}
+                                    disabled={busy}
+                                    rows={3}
+                                    aria-label="自定义故事风格"
+                                    placeholder="例如：用冷峻的硬汉侦探口吻叙述，短句为主，带黑色幽默……（留空则用默认风格）"
+                                    className="mt-2 w-full px-3 py-2 bg-black/40 border border-white/10 rounded-xl text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-teal-500/50 resize-y disabled:opacity-50 transition"
+                                />
+                                {/* 该描述会顶掉默认人设（非叠加）；忠实度与不回避要求始终生效 */}
+                                <p className="mt-1.5 text-[10.5px] text-slate-500 leading-4">
+                                    这段描述会作为系统人设发送，替代默认的故事风格；画面忠实度与不回避的要求始终生效。
+                                </p>
+                            </>
+                        )}
+                    </div>
+
+                    {/* 生成按钮 */}
+                    <button
+                        onClick={handleGenerate}
+                        disabled={sources.length === 0 || busy}
+                        className="w-full py-3 rounded-xl bg-teal-600 hover:bg-teal-500 disabled:bg-white/5 disabled:text-slate-500 disabled:cursor-not-allowed text-white text-sm font-bold transition shadow-lg shadow-teal-600/20 flex items-center justify-center gap-2"
+                    >
+                        {busy ? (
+                            <>
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                                <span>AI 正在构思剧情…</span>
+                            </>
+                        ) : (
+                            <>
+                                <Wand2 className="w-4 h-4" />
+                                <span>开始创作故事</span>
+                            </>
+                        )}
+                    </button>
+
+                    {error && (
+                        <div className="flex items-start gap-2 px-3 py-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-200 text-[11px] leading-relaxed">
+                            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                            <span className="break-all">{error}</span>
+                        </div>
+                    )}
+                </div>
+
+                <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    accept="image/*"
+                    onChange={(e) => {
+                        addFiles(e.target.files);
+                        e.target.value = '';
+                    }}
+                    className="hidden"
+                />
+            </div>
+        </div>
+    );
+};
+
+/* 绘本阅读器 */
+
+interface StoryReaderProps {
+    file: VideoFile;
+    pages: VideoFile[];
+    /** 语音合成结果写回条目，避免重复请求 */
+    onCacheAudio: (fileId: string, base64: string) => void;
+    onPrevPage: () => void;
+    onNextPage: () => void;
+}
+
+/** Gemini TTS 输出：24kHz 单声道 16bit PCM */
+const TTS_SAMPLE_RATE = 24000;
+
+/** Base64 PCM(16bit LE) → AudioBuffer（奇数字节丢弃末尾半采样） */
+const pcmToAudioBuffer = (base64: string, ctx: AudioContext): AudioBuffer => {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const sampleCount = Math.floor(bytes.length / 2);
+    const samples = new Int16Array(bytes.buffer, 0, sampleCount);
+    const buffer = ctx.createBuffer(1, sampleCount, TTS_SAMPLE_RATE);
+    const channel = buffer.getChannelData(0);
+    for (let i = 0; i < sampleCount; i++) channel[i] = samples[i] / 32768;
+    return buffer;
+};
+
+/** 绘本阅读器：左图右文（文案为主，3:2 分栏）+ 朗读 */
+const StoryReader: React.FC<StoryReaderProps> = ({ file, pages, onCacheAudio, onPrevPage, onNextPage }) => {
+    const [ttsBusy, setTtsBusy] = useState(false);
+    const [ttsPlaying, setTtsPlaying] = useState(false);
+    const [ttsError, setTtsError] = useState<string | null>(null);
+
+    const ctxRef = useRef<AudioContext | null>(null);
+    const sourceRef = useRef<AudioBufferSourceNode | null>(null);
+
+    const pageIndex = Math.max(0, pages.findIndex((p) => p.id === file.id));
+    const text = file.description || '';
+
+    // 停止当前朗读：卸载/翻页时调用，防止上一页声音继续
+    const stop = useCallback(() => {
+        if (sourceRef.current) {
+            try { sourceRef.current.stop(); } catch { /* 已停止 */ }
+            sourceRef.current = null;
+        }
+        setTtsPlaying(false);
+    }, []);
+
+    // 翻页前先停止朗读
+    const prevPage = useCallback(() => {
+        stop();
+        onPrevPage();
+    }, [stop, onPrevPage]);
+    const nextPage = useCallback(() => {
+        stop();
+        onNextPage();
+    }, [stop, onNextPage]);
+
+    // 翻页/换书时中断朗读并清空错误
+    useEffect(() => {
+        stop();
+        setTtsError(null);
+    }, [file.id, stop]);
+
+    // 卸载时释放 AudioContext（浏览器并发数有限，避免泄漏）
+    useEffect(() => () => {
+        if (sourceRef.current) {
+            try { sourceRef.current.stop(); } catch { /* 已停止 */ }
+            sourceRef.current = null;
+        }
+        const ctx = ctxRef.current;
+        ctxRef.current = null;
+        if (ctx && ctx.state !== 'closed') void ctx.close().catch(() => { /* 忽略关闭失败 */ });
+    }, []);
+
+    const handleRead = useCallback(async () => {
+        if (ttsPlaying) {
+            stop();
+            return;
+        }
+        if (!text.trim()) return;
+
+        setTtsBusy(true);
+        setTtsError(null);
+        try {
+            const ctx = ctxRef.current ?? new AudioContext();
+            ctxRef.current = ctx;
+            if (ctx.state === 'suspended') await ctx.resume();
+
+            // 已缓存直接播，不再请求网络
+            let base64 = file.audioData || '';
+            if (!base64) {
+                const generated = await generateSpeech(text);
+                if (!generated) throw new Error('语音合成没有返回音频');
+                base64 = generated;
+                onCacheAudio(file.id, base64);
+            }
+
+            const buffer = pcmToAudioBuffer(base64, ctx);
+            const source = ctx.createBufferSource();
+            source.buffer = buffer;
+            source.connect(ctx.destination);
+            source.onended = () => {
+                // 迟到的旧 source 不得清除新播放状态
+                if (sourceRef.current === source) {
+                    sourceRef.current = null;
+                    setTtsPlaying(false);
+                }
+            };
+            source.start();
+            sourceRef.current = source;
+            setTtsPlaying(true);
+        } catch (err) {
+            setTtsError(err instanceof Error ? err.message : '朗读失败');
+            setTtsPlaying(false);
+        } finally {
+            setTtsBusy(false);
+        }
+    }, [ttsPlaying, stop, text, file.audioData, file.id, onCacheAudio]);
+
+    return (
+        <div className="w-full h-full flex min-h-0">
+            {/* 左：插图 */}
+            <div className="flex-[3] relative bg-black flex items-center justify-center min-w-0">
+                <div
+                    className="absolute inset-0 bg-cover bg-center opacity-20 blur-3xl"
+                    style={{ backgroundImage: `url(${file.url})` }}
+                    aria-hidden="true"
+                />
+                <img
+                    src={file.url}
+                    alt={file.groupName ? `${file.groupName} 第 ${pageIndex + 1} 页插图` : file.name}
+                    referrerPolicy="no-referrer"
+                    className="relative z-10 max-w-full max-h-full object-contain p-4 drop-shadow-2xl"
+                />
+
+                {/* 翻页热区：左右各 18%，中间留空防误触 */}
+                {pageIndex > 0 && (
+                    <button
+                        onClick={prevPage}
+                        aria-label="上一页"
+                        title="上一页 (P / ←)"
+                        className="absolute left-0 top-0 bottom-0 w-[18%] z-20 flex items-center justify-start pl-3 group/nav focus:outline-none focus-visible:bg-white/5"
+                    >
+                        <span className="p-2 rounded-full bg-black/50 backdrop-blur border border-white/10 text-white/70 group-hover/nav:text-white group-hover/nav:bg-black/70 opacity-0 group-hover/nav:opacity-100 focus-visible:opacity-100 transition">
+                            <ChevronLeft className="w-5 h-5" />
+                        </span>
+                    </button>
+                )}
+                {pageIndex >= 0 && pageIndex < pages.length - 1 && (
+                    <button
+                        onClick={nextPage}
+                        aria-label="下一页"
+                        title="下一页 (N / →)"
+                        className="absolute right-0 top-0 bottom-0 w-[18%] z-20 flex items-center justify-end pr-3 group/nav focus:outline-none focus-visible:bg-white/5"
+                    >
+                        <span className="p-2 rounded-full bg-black/50 backdrop-blur border border-white/10 text-white/70 group-hover/nav:text-white group-hover/nav:bg-black/70 opacity-0 group-hover/nav:opacity-100 focus-visible:opacity-100 transition">
+                            <ChevronRight className="w-5 h-5" />
+                        </span>
+                    </button>
+                )}
+            </div>
+
+            {/* 右：文案 */}
+            <div className="flex-[2] min-w-[260px] bg-gradient-to-b from-slate-900 to-slate-950 border-l border-white/8 flex flex-col">
+                <div className="px-6 py-4 border-b border-white/8 shrink-0">
+                    <h2 className="text-base font-bold text-white mb-2 truncate" title={file.groupName}>
+                        {file.groupName || '未命名故事'}
+                    </h2>
+                    <div className="flex items-center gap-2 flex-wrap">
+                        <span className="inline-flex items-center gap-1.5 text-[10px] font-mono tracking-widest text-teal-400">
+                            <span className="w-1.5 h-1.5 rounded-full bg-teal-400 animate-pulse" />
+                            AI STORY
+                        </span>
+                        <span className="text-[10px] font-mono text-slate-400 tabular-nums">
+                            第 {pageIndex + 1} / {pages.length} 页
+                        </span>
+                        {/* 朗读状态提到页眉 */}
+                        {file.audioData && (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-mono text-indigo-300">
+                                <Volume2 className="w-3 h-3" />
+                                已缓存语音
+                            </span>
+                        )}
+                    </div>
+                </div>
+
+                {/* 划词不被当成「暂停」：外层点击处理器据 data-text-select 放行 */}
+                <div className="flex-1 overflow-y-auto custom-scrollbar px-7 py-6 select-text" data-text-select>
+                    <p className="text-[15px] leading-loose text-slate-300 whitespace-pre-wrap">
+                        {text || '（本页暂无文案）'}
+                    </p>
+                </div>
+
+                {/* 阅读进度 */}
+                <div className="px-6 pt-3 shrink-0">
+                    <div className="h-1 rounded-full bg-white/8 overflow-hidden">
+                        <div
+                            className="h-full rounded-full bg-gradient-to-r from-teal-500 to-cyan-400 transition-[width] duration-300"
+                            style={{ width: `${pages.length > 1 ? ((pageIndex + 1) / pages.length) * 100 : 100}%` }}
+                        />
+                    </div>
+                </div>
+
+                <div className="px-6 py-4 shrink-0">
+                    <button
+                        onClick={handleRead}
+                        disabled={ttsBusy || !text.trim()}
+                        className={`w-full py-3 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 border disabled:opacity-40 disabled:cursor-not-allowed ${ttsPlaying
+                            ? 'bg-rose-500/10 border-rose-500/40 text-rose-300 hover:bg-rose-500/20'
+                            : 'bg-white/5 border-white/10 text-slate-200 hover:bg-white/10'
+                            }`}
+                    >
+                        {ttsBusy ? (
+                            <>
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                                <span>正在合成语音…</span>
+                            </>
+                        ) : ttsPlaying ? (
+                            <>
+                                <Pause className="w-4 h-4" />
+                                <span>停止朗读</span>
+                            </>
+                        ) : (
+                            <>
+                                <Volume2 className="w-4 h-4" />
+                                <span>{file.audioData ? '朗读本页（已缓存）' : '朗读故事'}</span>
+                            </>
+                        )}
+                    </button>
+                    {ttsError && (
+                        <p role="alert" className="mt-2 text-[10.5px] leading-relaxed text-rose-300/90 break-all">{ttsError}</p>
+                    )}
+                    {!ttsError && !text.trim() && (
+                        <p className="mt-2 text-[10.5px] text-slate-500 flex items-center gap-1">
+                            <BookOpen className="w-3 h-3" />
+                            本页没有文案，无法朗读
+                        </p>
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+};
+
 export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) => {
     const { state, playlist, videoRef, currentFile, mediaError, mediaWarning, pageInfo, methods } = player;
 
-    // 播放器容器引用（用于真正的纯视频全屏，隔离左侧播放列表）
+    // 纯视频全屏容器：隔离左侧播放列表
     const playerContainerRef = useRef<HTMLDivElement>(null);
 
-    // 界面状态
     const [isSidebarOpen, setIsSidebarOpen] = useState(true);
     const [isControlsVisible, setIsControlsVisible] = useState(true);
     const controlsTimerRef = useRef<number | null>(null);
 
-    // 画面操作提示反馈徽章 (如 +5s, -5s, 音量调节等)
+    // 画面操作反馈徽章（如 +5s、音量）
     const [badgeText, setBadgeText] = useState<{ id: number; text: string; icon?: string } | null>(null);
     const badgeTimerRef = useRef<number | null>(null);
 
@@ -516,7 +1455,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
     const [showRateMenu, setShowRateMenu] = useState(false);
     const [showShortcuts, setShowShortcuts] = useState(false);
 
-    // ACG 直推抓取模态框
+    // ACG 抓取
     const [showAcgModal, setShowAcgModal] = useState(false);
     const [acgInput, setAcgInput] = useState('');
     const [isAcgLoading, setIsAcgLoading] = useState(false);
@@ -524,16 +1463,14 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
 
     // 播放列表分类过滤
     const [playlistFilter, setPlaylistFilter] = useState<'all' | 'video' | 'stream' | 'audio' | 'image' | 'gallery' | 'book' | 'document'>('all');
-    // 侧栏搜索词：列表长到几十项后，靠肉眼在折叠树里找一条比重建列表还慢
     const [listQuery, setListQuery] = useState('');
-    // 树节点展开状态（缺省全展开，只记手动收起的）
+    // 缺省全展开，只记手动收起的节点
     const [collapsedNodes, setCollapsedNodes] = useState<Record<string, boolean>>({});
     const toggleNode = useCallback((id: string) => {
         setCollapsedNodes((prev) => ({ ...prev, [id]: !prev[id] }));
     }, []);
 
-    // 侧栏宽度：可拖拽 + 落盘。初值从 localStorage 读，越界值夹回范围内，
-    // 避免上次在超宽屏拖到 560 之后换到小屏时侧栏吃掉整个视口。
+    // 侧栏宽度可拖拽 + 落盘记忆，越界值夹回范围
     const [sidebarWidth, setSidebarWidth] = useState(() => {
         const saved = parseInt(loadStr(SIDEBAR_STORE_KEY, '', ''), 10);
         if (!Number.isFinite(saved)) return SIDEBAR_DEFAULT;
@@ -546,8 +1483,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         resizeCleanupRef.current = null;
         document.body.classList.remove('tp-resizing');
     }, []);
-    // 拖到一半切走视图/卸载时，挂在 window 上的监听器必须回收，
-    // 否则它持有过期闭包，之后每次移动鼠标都在改一个不存在的侧栏宽度
+    // 卸载时回收 window 监听（避免过期闭包残留）
     useEffect(() => () => endSidebarResize(), [endSidebarResize]);
 
     const startSidebarResize = useCallback((e: React.MouseEvent | React.TouchEvent) => {
@@ -565,7 +1501,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         const onTouchMove = (ev: TouchEvent) => { if (ev.touches[0]) apply(ev.touches[0].clientX); };
         const onUp = () => {
             endSidebarResize();
-            // 松手时才落盘：拖动过程中每帧写一次 localStorage 是没必要的同步 I/O
+            // 松手时落盘，避免拖动中每帧写 localStorage
             setSidebarWidth((w) => { saveStr(SIDEBAR_STORE_KEY, String(w), ''); return w; });
         };
 
@@ -590,10 +1526,10 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
     const folderInputRef = useRef<HTMLInputElement>(null);
     const packFolderInputRef = useRef<HTMLInputElement>(null);
 
-    // 单文件 .gallery 打包/导入状态行（6 秒自动消失）
+    // .gallery 打包/导入状态行（6 秒自动消失）
     const [packStatus, setPackStatus] = useState<string | null>(null);
 
-    // AI 绘本生成器开关（覆盖在主视口上的整屏面板）
+    // AI 绘本生成器（整屏覆盖面板）
     const [showGenerator, setShowGenerator] = useState(false);
     useEffect(() => {
         if (!packStatus) return;
@@ -601,17 +1537,13 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         return () => window.clearTimeout(t);
     }, [packStatus]);
 
-    // 倍速菜单此前只有「选中某一项」会关，点别处一律不关：浮层会一直挂在
-    // 控制条上方，直到用户再点一次倍速按钮。补上点击外部关闭。
+    // 倍速菜单：点击外部关闭
     const rateMenuRef = useRef<HTMLDivElement>(null);
     useClickOutside(rateMenuRef, () => setShowRateMenu(false), showRateMenu);
 
-    /* ---------------------------------------------------------------------- */
-    /* 模态框提交 / 关闭                                                       */
-    /* ---------------------------------------------------------------------- */
+    /* 模态框提交 / 关闭 */
 
-    // 地址合法性算一次给三处用（边框变色、禁用按钮、提交守卫），
-    // 此前在 JSX 里重复调了三遍 isValidMediaUrl
+    // 地址合法性算一次，供边框/禁用/提交三处共用
     const urlIsValid = !!inputUrl.trim() && isValidMediaUrl(inputUrl.trim());
 
     const submitUrl = useCallback(() => {
@@ -623,7 +1555,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         setShowUrlModal(false);
     }, [inputUrl, inputTitle, methods]);
 
-    // ACG 状态文案里带「失败 / 异常 / 不支持」时按错误着色，成功路径保持中性
+    // ACG 状态含失败关键词时按错误着色
     const acgStatusIsError = !!acgStatus && /失败|异常|不支持|未解析|错误/.test(acgStatus);
 
     const closeAcgModal = useCallback(() => {
@@ -631,15 +1563,12 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         setAcgStatus(null);
     }, []);
 
-    // 智能导入：先按后缀挑出 .aibook（AI 绘本 JSON），再按魔数挑出单文件
-    // .gallery 包（ZIP），各自解包成组；其它文件（含旧式 JSON 徽标画廊文件夹）
-    // 原样走 addFiles，不破坏原有成组逻辑
+    // 智能导入：先解 .aibook，再解单文件 .gallery 包，其余原样走 addFiles
     const importFilesSmart = useCallback(async (files: FileList | File[]) => {
         const list = Array.from(files || []);
         if (list.length === 0) return;
 
-        // AI 绘本：JSON 解析失败（后缀对但内容坏）时回落成普通文件，
-        // 用户至少能在播放器里看到这个文件，而不是「点了导入什么都没发生」
+        // .aibook 解析失败回落成普通文件，避免「导入无反应」
         const bookFiles = list.filter((f) => f && isAiBookFileName(f.name || ''));
         const afterBooks: File[] = [];
         for (const f of bookFiles) {
@@ -648,8 +1577,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                 const pages = book.pages
                     .map((p) => {
                         const image = p.image.trim();
-                        // 常规形态是内联 data URL，转成 blob: 后入列（见 utils 的 .aibook 段）；
-                        // 手写的 .aibook 也可能直接引用网络图片，这类原样透传。
+                        // 内联 data URL 转 blob: 入列，网络图片原样透传
                         const url = /^data:/i.test(image)
                             ? dataUrlToBlobUrl(image)
                             : (/^(https?|blob):/i.test(image) ? image : '');
@@ -695,9 +1623,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         }
     }, [methods]);
 
-    // 绘本生成完成：把故事分页与图片一起入列，并关掉生成器。
-    // 连同生成器已建好的 blob: 一起交出（所有权转移），避免同一张图存在两个
-    // Blob URL 而其中一个永远没人回收。
+    // 生成完成：故事分页与图片一起入列，blob: 所有权转移避免重复建 URL
     const handleStoryComplete = useCallback((story: AiStory, sources: StoryPageSource[]) => {
         const pages = sources.map((s, i) => ({
             file: s.file,
@@ -709,7 +1635,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         setPackStatus(`✅ 故事《${story.title}》已加入播放列表（${pages.length} 页）`);
     }, [methods]);
 
-    // 导出当前绘本为单文件 .aibook（图片内联 data URL，文案与语音一并带走）
+    // 导出当前绘本为 .aibook（图片内联 data URL，含文案与语音）
     const handleExportBook = useCallback(async (file: VideoFile) => {
         const groupId = file.groupId;
         if (!groupId) return;
@@ -719,7 +1645,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         try {
             const payload = [];
             for (const p of pages) {
-                // 本地 File 直接读；导入的绘本只有 blob: URL，取回字节再编码
+                // 本地 File 直接读；导入绘本只有 blob: URL，取回字节再编码
                 const image = p.file ? await toDataUrl(p.file) : await toDataUrl(p.url);
                 payload.push({ image, text: p.description || '', audio: p.audioData || undefined });
             }
@@ -731,14 +1657,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                 const res = await api.galleryPack.savePack({ fileName, data: await blob.arrayBuffer() });
                 setPackStatus(res.success ? `✅ ${res.message}` : `ℹ️ ${res.message || '未保存'}`);
             } else {
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = fileName;
-                document.body.append(a);
-                a.click();
-                a.remove();
-                window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+                downloadBlob(blob, fileName);
                 setPackStatus(`✅ 已导出《${title}》`);
             }
         } catch (err) {
@@ -746,8 +1665,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         }
     }, [playlist.files]);
 
-    // 打包为单文件 .gallery：选目录 → 按 .name + 数字图片规则收集 → ZIP →
-    // Electron 弹另存为（位置自选），纯浏览器回退走下载
+    // 打包目录为单文件 .gallery（Electron 另存为，浏览器回退下载）
     const handlePackFolder = useCallback(async (files: FileList | File[]) => {
         const list = Array.from(files || []);
         if (list.length === 0) return;
@@ -763,14 +1681,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                 const res = await api.galleryPack.savePack({ fileName, data });
                 setPackStatus(res.success ? `✅ ${res.message}` : `ℹ️ ${res.message || '未保存'}`);
             } else {
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = fileName;
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
-                window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+                downloadBlob(blob, fileName);
                 setPackStatus(`✅ 已导出 ${fileName}（浏览器下载）`);
             }
         } catch (e) {
@@ -778,13 +1689,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         }
     }, []);
 
-    /* ---------------------------------------------------------------------- */
-    /* 拖拽导入                                                                */
-    /* ---------------------------------------------------------------------- */
-    // 空态文案一直写着「拖拽文件到播放器」，但整条链路从未实现过拖拽处理：
-    // 拖进来的文件会被 Electron 直接导航打开。这里补上。
-    // dragenter/dragleave 会在子元素间反复冒泡，用计数器判断是否真的离开了窗口，
-    // 否则鼠标一划过子元素提示层就闪一下。
+    /* 拖拽导入：dragenter/leave 子元素冒泡用计数器判断真离开 */
     const [isDragging, setIsDragging] = useState(false);
     const dragDepthRef = useRef(0);
 
@@ -800,15 +1705,13 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
 
     const handleDragOver = useCallback((e: React.DragEvent) => {
         if (!hasFiles(e)) return;
-        // 必须阻止默认行为，否则浏览器不会触发 drop，而是直接打开文件
+        // 不阻止默认则触发 drop 失败，文件会被直接打开
         e.preventDefault();
         e.dataTransfer.dropEffect = 'copy';
     }, []);
 
     const handleDragLeave = useCallback((e: React.DragEvent) => {
-        // 这里**不能**用 hasFiles 守卫：dragleave 的 dataTransfer.types 在部分场景
-        // （拖出窗口、拖拽被取消）是空的，一旦提前 return，计数器就永远减不回去，
-        // 提示层会一直糊在画面上。递减用 Math.max 夹底，多余的 dragleave 无害。
+        // dragleave 的 types 可能为空，不能守卫，否则计数器减不回去导致提示层常驻
         e.preventDefault();
         dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
         if (dragDepthRef.current === 0) setIsDragging(false);
@@ -823,9 +1726,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         if (files && files.length > 0) void importFilesSmart(files);
     }, [importFilesSmart]);
 
-    // 兜底收尾：拖到窗口外松手、或拖拽被取消时，drop 不会触发。
-    // dragend 只在拖拽源上触发（跨窗口拖入时根本不发），所以还要认「真正离开窗口」
-    // 的 dragleave —— relatedTarget 为 null 即指针离开了文档。
+    // 拖出窗口松手/取消时 drop 不触发：窗口级兜底 + relatedTarget 为 null 判离开文档
     useEffect(() => {
         const reset = () => {
             dragDepthRef.current = 0;
@@ -873,7 +1774,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         methods.toggleFullscreen(playerContainerRef.current);
     }, [methods]);
 
-    // 快进 / 快退逻辑封装 (带视觉提示)
+    // 快进/快退（带视觉提示）
     const handleSeekDelta = useCallback((delta: number) => {
         if (!videoRef.current) return;
         const target = Math.max(0, Math.min(state.duration || 0, state.currentTime + delta));
@@ -881,16 +1782,13 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         showFeedback(delta > 0 ? `+${delta}s` : `${delta}s`, delta > 0 ? 'forward' : 'rewind');
     }, [methods, showFeedback, state.currentTime, state.duration, videoRef]);
 
-    // 单击/双击消歧：单击延迟 260ms 生效，双击直接取消单击，避免双击快进时连带暂停两次
+    // 单击延迟 260ms，双击取消单击，避免双击快进连带暂停
     const clickTimerRef = useRef<number | null>(null);
 
-    // 单击/双击画面响应。两条护栏：文档分支直接放行（选词/滚动不许误触播放态），
-    // 按钮/链接/输入/代码块冒泡一律忽略（下载、导入按钮点下去不再连带暂停）。
-    // 图集/文档双击按区域翻页（左上页、右下页、中暂停/继续）；视频保持左退10s、右进10s、中全屏。
+    // 画面单击/双击：文档分支放行（选词/滚动不误触），按钮等冒泡忽略；
+    // 图集/文档按区域翻页，视频左退/右进/中全屏
     const pagedKind = currentFile?.mediaType === 'image' || currentFile?.mediaType === 'document';
-    // AI 绘本页：走「左图右文」阅读器版式而不是普通图片浏览。
-    // 只按分组判定，不要求本页有文案——同一本书里各页版式必须一致，
-    // 否则某页文案缺失就会突然退回普通图片视图，翻页时版式来回跳。
+    // AI 绘本只按分组判定：同书版式一致，避免缺文案页突然退回普通图片视图
     const storyPages = useMemo(
         () => (currentFile?.groupType === 'ai-book' && currentFile.groupId
             ? playlist.files.filter((f) => f.groupId === currentFile.groupId)
@@ -898,7 +1796,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         [playlist.files, currentFile?.groupType, currentFile?.groupId]
     );
     const isStoryPage = !!currentFile && storyPages.length > 0;
-    // 有真实播放态的媒体：音视频/流，以及走幻灯片轮播的图集与文档
+    // 有播放态：音视频/流 + 幻灯片轮播的图集与文档
     const isPlayableMedia = !!currentFile
         && (currentFile.mediaType === 'video'
             || currentFile.mediaType === 'stream'
@@ -908,8 +1806,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         const target = e.target as HTMLElement;
         if (target.closest?.('button, a, input, textarea, select, pre')) return;
         if (currentFile?.mediaType === 'document') return;
-        // 绘本正文区是可选中的阅读内容：单击不该被当成「暂停」，
-        // 否则用户想划词复制一段文案，画面先停了
+        // 绘本正文可选中的阅读内容，划词不触发暂停
         if (target.closest?.('[data-text-select]')) return;
         const rect = e.currentTarget.getBoundingClientRect();
         const clickX = e.clientX - rect.left;
@@ -920,7 +1817,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                 window.clearTimeout(clickTimerRef.current);
                 clickTimerRef.current = null;
             }
-            // 双击事件
+            // 双击
             if (pagedKind) {
                 if (clickX < width * 0.35) {
                     methods.prevPage();
@@ -945,8 +1842,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
             const wasPlaying = state.isPlaying;
             clickTimerRef.current = window.setTimeout(() => {
                 clickTimerRef.current = null;
-                // 纯静态占位页（画廊徽标/other）没有播放态，togglePlay 是空操作，
-                // 这里同步不弹提示，避免"提示播放中但画面毫无变化"的误导
+                // 静态占位页无播放态：不同步提示，避免「提示播放但画面无变化」
                 if (!pagedKind && !isPlayableMedia) return;
                 methods.togglePlay();
                 showFeedback(wasPlaying ? '已暂停' : '播放中', wasPlaying ? 'pause' : 'play');
@@ -958,7 +1854,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         if (clickTimerRef.current !== null) window.clearTimeout(clickTimerRef.current);
     }, []);
 
-    // 免下载直接抓取网络作品推送到播放器（与 App 共用 resolveProbeMedia）
+    // 免下载抓取网络作品直推播放器
     const handleFetchAcg = async () => {
         const target = acgInput.trim();
         if (!target) return;
@@ -980,7 +1876,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
 
             methods.addMultipleStreams(
                 resolved.kind === 'image'
-                    // 多图集才建画廊分组（带标题 + 页码）；音视频走上面的纯直推，不进分组
+                    // 多图集建画廊分组；音视频纯直推不进分组
                     ? resolved.streams.map((s, i) => ({ ...s, groupId: `acg:${probe.gid}`, groupName: probe.title, groupType: 'gallery' as const, page: i + 1 }))
                     : resolved.streams,
                 true,
@@ -991,10 +1887,9 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
             setAcgInput('');
             setAcgStatus(null);
 
-            // 图集后续页面异步流式抓取并追加到列表（带页码+分组，供有序合并）
+            // 图集后续页异步续抓追加（旧轮次回包直接丢弃）
             if (resolved.kind === 'image' && resolved.totalPages > 1 && electronAPI.acgmho.fetchPages) {
                 fetchAcgRemainingPages(electronAPI.acgmho.fetchPages, probe, 'playpanel').then(({ runId, pages }) => {
-                    // 空 runId 即旧轮回包（用户又开了一本新的），直接丢弃不灌进新分组
                     if (!runId || pages.length === 0) return;
                     methods.appendStreams(pages.map((p) => ({
                         url: p.url,
@@ -1007,7 +1902,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                         page: p.page,
                     })));
                 }).catch((e: any) => {
-                    // 后台续页失败不打断已展示的首屏，只记日志
+                    // 后台续页失败只记日志，不打断首屏
                     console.warn(`ACG ${probe.gid} 后续页抓取失败:`, e?.message || e);
                 });
             }
@@ -1017,8 +1912,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         }
     };
 
-    // 图片自动轮播 (顺序翻页，走 nextPage；间隔受倍速控制：2x 则 2 秒一页)
-    // 绘本页要读文案，4 秒根本读不完，按阅读节奏给 12 秒；普通图片维持 4 秒。
+    // 图片轮播：绘本 12s/页（留阅读时间），普通图片 4s/页，均受倍速缩放
     useEffect(() => {
         if (currentFile?.mediaType !== 'image' || !state.isPlaying) return;
         const rate = Number.isFinite(state.playbackRate) && state.playbackRate > 0 ? state.playbackRate : 1;
@@ -1029,7 +1923,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         return () => clearInterval(timer);
     }, [currentFile?.mediaType, currentFile?.id, state.isPlaying, state.playbackRate, methods, isStoryPage]);
 
-    // 一键关闭所有浮层（URL/ACG/快捷键/倍速菜单）：Esc 分支凭此执行，handler 只绑一次
+    // 一键关闭所有浮层（Esc 用）
     const closeOverlaysRef = useRef(() => { });
     closeOverlaysRef.current = () => {
         setShowUrlModal(false);
@@ -1039,7 +1933,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         setShowRateMenu(false);
     };
 
-    // 全局快捷键处理：用 ref 承接高频 state，避免 timeupdate 每次重绑监听
+    // 全局快捷键：ref 承接高频 state，避免 timeupdate 频繁重绑监听
     const shortcutsRef = useRef({ methods, handleSeekDelta, handleToggleFullscreen, showFeedback });
     shortcutsRef.current = { methods, handleSeekDelta, handleToggleFullscreen, showFeedback };
     const mediaKindRef = useRef(currentFile?.mediaType);
@@ -1049,8 +1943,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
 
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
-            // Esc 优先关闭一切浮层（含弹窗输入框内）：放 INPUT 守卫之前，
-            // 否则框内聚焦时按 Esc 永远关不掉弹窗
+            // Esc 优先关闭浮层（含输入框内），放输入守卫之前
             if (e.code === 'Escape') {
                 closeOverlaysRef.current();
                 return;
@@ -1060,10 +1953,9 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
             if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tag) || target.isContentEditable) {
                 return;
             }
-            // 焦点在进度条滑杆上时方向键交给滑杆自身（自带 ±5s 步进），
-            // 全局不再重复 seek 一次，否则每次跳 10s
+            // 滑杆聚焦时方向键交给滑杆（自带 ±5s），避免重复 seek 跳 10s
             if (target.closest?.('[role="slider"]')) return;
-            // 聚焦在按钮上时空格交给按钮默认行为，避免一次空格触发两次 toggle
+            // 按钮聚焦时空格交给默认行为，避免一次空格触发两次 toggle
             if (e.code === 'Space' && (tag === 'BUTTON' || target.closest?.('button'))) {
                 return;
             }
@@ -1160,15 +2052,13 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, []);
 
-    // 工作区文件树：画廊成组（头=画廊名，底下按页码排）、文件夹按层级嵌套、散文件平铺。
-    // 过滤对叶子生效，空组/空目录自动隐藏；顺序按首次出现位置，不打乱原列表。
+    // 播放列表文件树：画廊/绘本成组、文件夹嵌套、散文件平铺；过滤对叶子生效，空组隐藏
     interface TreeFileLeaf { kind: 'file'; file: VideoFile; originalIndex: number }
     interface TreeGroupNode {
         kind: 'group';
         id: string;
         name: string;
         gallery: boolean;
-        /** AI 绘本组：图标与副标题文案与画廊区分 */
         book?: boolean;
         children: TreeFileLeaf[];
     }
@@ -1180,8 +2070,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
     }
     type TreeNode = TreeFileLeaf | TreeGroupNode | TreeFolderNode;
 
-    // 成组条目：画廊（.gallery/ACG 图集）与 AI 绘本都按「组」折叠展示，
-    // 差别只在图标与副标题文案。散文件不满足任何一条，正常平铺。
+    // 画廊与 AI 绘本按组折叠展示，其余平铺
     const isGroupedFile = useCallback((file: VideoFile): boolean => {
         if (!file.groupId) return false;
         return file.groupType === 'gallery'
@@ -1191,13 +2080,12 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
             || file.groupId.startsWith('aibook:');
     }, []);
 
-    /** 该组是否为 AI 绘本（决定图标与「N 页」文案） */
+    /** 是否 AI 绘本（决定图标与文案） */
     const isBookFile = useCallback((file: VideoFile): boolean =>
         file.groupType === 'ai-book' || !!file.groupId?.startsWith('aibook:'), []);
 
     const leafVisible = useCallback((file: VideoFile): boolean => {
-        // 类型筛选：视频与流媒体分开——此前 video 把 stream 一并吞掉，纯 HLS 直播/音轨
-        // 会被算进「视频」，用户按「视频」筛却看到音频，按「音频」筛又找不到它。
+        // 视频与流媒体分开：此前 video 吞掉 stream，HLS 会被错分
         let typeOk = true;
         if (playlistFilter === 'video') typeOk = file.mediaType === 'video';
         else if (playlistFilter === 'stream') typeOk = file.mediaType === 'stream';
@@ -1208,9 +2096,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         else if (playlistFilter === 'book') typeOk = isBookFile(file);
         if (!typeOk) return false;
 
-        // 关键词：名称或所属分组名命中即保留。带上分组名是必要的——
-        // 搜「某本画册」时用户期望看到它下面的每一页，而不是因为子页标题里
-        // 没有这几个字就整组消失。
+        // 关键词同时匹配名称与分组名，避免搜画册名时子页因标题无关键词整组消失
         if (!listQuery) return true;
         const q = listQuery;
         return file.name.toLowerCase().includes(q) || (file.groupName || '').toLowerCase().includes(q);
@@ -1275,7 +2161,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
             roots.push({ kind: 'file', file, originalIndex });
         });
 
-        // 画廊子页按页码升序（迟到/重试页归位后这里自然有序）；无页码保持原顺序
+        // 画廊子页按页码升序（迟到/重试页归位后自然有序）；无页码保持原顺序
         for (const node of groupMap.values()) {
             node.children.sort((a, b) => (a.file.page ?? Number.MAX_SAFE_INTEGER) - (b.file.page ?? Number.MAX_SAFE_INTEGER));
         }
@@ -1283,12 +2169,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [playlist.files, playlistFilter, listQuery]);
 
-    /**
-     * 各分类的条目数，给过滤标签做角标。
-     * 用同一套 leafVisible 判定，但把搜索词排除在外——角标要回答的是
-     * 「这个分类里一共有多少」，而不是「当前搜索命中了多少」，
-     * 否则一搜索所有角标一起归零，看着像列表被清空了。
-     */
+    /** 各分类条目数：过滤标签角标用（排除搜索词，避免搜索时角标归零误导） */
     const filterCounts = useMemo(() => {
         const counts = {
             all: 0, video: 0, stream: 0, audio: 0,
@@ -1310,8 +2191,9 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
     // —— 工作区文件树渲染 ——
     const renderFileRow = (file: VideoFile, originalIndex: number, depth: number) => {
         const isActive = playlist.currentIndex === originalIndex;
-        const TypeIcon = MEDIA_TYPE_ICON[file.mediaType] || FileQuestion;
-        // 正在出声的那一条：只有它显示跳动指示条，而不是所有行都点一个静止圆点
+        const meta = MEDIA_TYPE_META[file.mediaType] || MEDIA_TYPE_META.other;
+        const TypeIcon = meta.icon;
+        // 仅当前播放行显示跳动指示
         const isSounding = isActive && state.isPlaying;
         return (
             <div
@@ -1326,7 +2208,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                 {/* 选中指示条：比整行左侧 4px 边框更克制，不会让列表看起来歪掉 */}
                 {isActive && <span className="absolute left-0 top-1 bottom-1 w-[3px] rounded-r-full bg-indigo-400" />}
 
-                <div className={`shrink-0 transition-colors ${isActive ? MEDIA_TYPE_ACCENT[file.mediaType] : 'text-slate-500 group-hover:text-slate-300'}`}>
+                <div className={`shrink-0 transition-colors ${isActive ? meta.accent : 'text-slate-500 group-hover:text-slate-300'}`}>
                     <TypeIcon className="w-4 h-4" />
                 </div>
                 <div className="flex-1 min-w-0">
@@ -1339,7 +2221,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                     <p className="text-[10px] text-slate-500 font-mono mt-0.5 flex items-center gap-1.5">
                         <span className="shrink-0">{file.page != null ? `P${file.page}` : `#${originalIndex + 1}`}</span>
                         <span className="opacity-50">·</span>
-                        <span className="truncate">{MEDIA_TYPE_LABEL[file.mediaType]}</span>
+                        <span className="truncate">{meta.label}</span>
                         {file.artist && (
                             <>
                                 <span className="opacity-50">·</span>
@@ -1804,8 +2686,8 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                                             {currentFile.name}
                                         </span>
                                         {currentFile.mediaType && (
-                                            <Pill tone={MEDIA_TYPE_TONE[currentFile.mediaType]}>
-                                                {MEDIA_TYPE_LABEL[currentFile.mediaType]}
+                                            <Pill tone={MEDIA_TYPE_META[currentFile.mediaType].tone}>
+                                                {MEDIA_TYPE_META[currentFile.mediaType].label}
                                             </Pill>
                                         )}
                                     </div>
@@ -2177,7 +3059,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                                     min={pageInfo.firstIndex}
                                     max={Math.max(pageInfo.lastIndex, pageInfo.firstIndex)}
                                     step={1}
-                                    color={MEDIA_TYPE_HEX[currentFile?.mediaType || 'image']}
+                                    color={MEDIA_TYPE_META[currentFile?.mediaType || 'image'].hex}
                                     value={playlist.currentIndex >= 0 ? playlist.currentIndex : pageInfo.firstIndex}
                                     onChange={(v) => methods.selectTrack(Math.round(v))}
                                 />

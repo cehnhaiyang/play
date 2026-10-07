@@ -69,7 +69,14 @@ export class EventScheduler {
             startTime: number,
             trackGain: number,
             trackPan: number,
-            trackTranspose: number
+            trackTranspose: number,
+            /**
+             * 随机流盐：种子原来只含 (音序名, 起始时刻)，于是 mix 里
+             * 同一音序同一时刻出现两次（如齐奏叠加），两遍的 humanize 抖动
+             * 逐采样相同 —— 双轨叠加等于单轨加 6dB，还多了一倍节点。
+             * 调用方传入 track/loop 下标即可错开随机流。
+             */
+            salt = ''
         ): number => {
             const seq = sequences.get(seqName);
             if (!seq) {
@@ -77,7 +84,7 @@ export class EventScheduler {
             }
 
             const inst = instruments.get(seq.instrumentName) ?? instruments.get('default');
-            const rand = createRandom(hashSeed(`${seqName}:${startTime.toFixed(6)}`));
+            const rand = createRandom(hashSeed(`${seqName}:${startTime.toFixed(6)}:${salt}`));
 
             const seqGain = seq.gain ?? 1;
             const seqTranspose = (seq.transpose ?? 0) + trackTranspose;
@@ -420,7 +427,7 @@ export class EventScheduler {
 
         /* ------------------------------ 主循环 -------------------------------- */
         if (mixTracks.length > 0) {
-            mixTracks.forEach((track) => {
+            mixTracks.forEach((track, trackIndex) => {
                 if (!sequences.has(track.source)) {
                     throw new Error(`mix 引用了未定义的音序 "${track.source}"`);
                 }
@@ -433,7 +440,8 @@ export class EventScheduler {
                         currentStart,
                         track.gain ?? 1,
                         track.pan ?? 0,
-                        0
+                        0,
+                        `${trackIndex}:${i}`
                     );
                     // stagger 让每次循环错位叠加，可做卡农
                     currentStart += duration + stagger;
@@ -442,8 +450,9 @@ export class EventScheduler {
         } else {
             // 未写 mix 时按定义顺序首尾相接，而不是全部从 0 叠加
             let cursor = 0;
+            let seqIndex = 0;
             sequences.forEach((seq) => {
-                cursor += scheduleSequence(seq.name, cursor, 1, 0, 0);
+                cursor += scheduleSequence(seq.name, cursor, 1, 0, 0, `solo:${seqIndex++}`);
             });
         }
 

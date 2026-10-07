@@ -17,9 +17,9 @@ import {
     SlidersHorizontal,
     X,
 } from 'lucide-react';
-import { SORT_OPTIONS, useMagnetSearch } from '../../hooks';
-import type { SearchHit, SearchSiteStatus, TorrentTaskSnapshot } from '../../meta';
-import { formatBytes } from '../../services/SearchService';
+import { SORT_OPTIONS, useMagnetSearch } from '../hooks';
+import type { SearchHit, SearchSiteStatus, TorrentTaskSnapshot } from '../meta';
+import { formatBytes } from '../services/SearchService';
 
 /**
  * ============================================================================

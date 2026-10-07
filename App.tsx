@@ -15,7 +15,7 @@ const PlayerLayout: React.FC = () => {
 
   // Agent 与篡改引擎共用同一条 webview 生命周期：
   // 都靠 interactions 的 dom-ready 广播拿到页面，不各自持有 webview 引用。
-  // 同时把 tamper 整个传进去 —— Agent 的三组新工具（tamper_rules / storage /
+  // 同时把 tamper 整个传进去 —— Agent 的三组新工具（tamper / storage /
   // tokens）做的正是篡改面板里那些事，规则真值由 useTamper 持有，这里不复制。
   //
   // kb 同理：preload 暴露的取数桥原样注入，Agent 不自己碰 window。

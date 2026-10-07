@@ -12,7 +12,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.join(__dirname, '..', '..');
+const ROOT = path.join(__dirname, '..');
 // 浏览器面板合并成一个文件后，草稿判据与它的调用点都在 components/BrowsePanel.tsx 里
 const BROWSE_PANEL = path.join(ROOT, 'components', 'BrowsePanel.tsx');
 const SRC = fs.readFileSync(BROWSE_PANEL, 'utf8');

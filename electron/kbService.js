@@ -7,7 +7,7 @@
  * services/KbService（纯 TS，可单测）。边界这么划的理由：
  *
  *  - 主进程目录只能写 .js（见 electron-main-constraints），而
- *    scripts/test/tsconfig.json 不 include electron/，纯逻辑放这儿就没法单测；
+ *    test/tsconfig.json 不 include electron/，纯逻辑放这儿就没法单测；
  *  - 反过来，读盘必须在这里 —— 渲染层 nodeIntegration 关着，没有 fs。
  *
  * 之所以**不把 KB 打包进 bundle** 而是运行时读盘：KB 是外部仓库、会持续更新

@@ -1,0 +1,9 @@
+{
+    "name": "the-play-test",
+    "private": true,
+    "version": "1.0.0",
+    "description": "回归测试套件。入口 index.js 会先用 tsc 把被测 TS 编译到 build/，再依次跑各子套件。",
+    "scripts": {
+        "test": "node index.js"
+    }
+}

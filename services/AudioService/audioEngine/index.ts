@@ -29,6 +29,12 @@ export class BrowserAudioEngine {
   private scheduledEvents: ScheduledEvent[] = [];
   private totalDuration: number = 0;
   private activeSources: Set<AudioScheduledSourceNode> = new Set();
+  /**
+   * 上一次 compile 是否成功。只有成功编译的数据才能播放/导出：
+   * 失败后 lastParseResult 里还留着旧解析结果（警告需要它），
+   * 但播放/导出必须拒绝，否则用户拿到的是与当前代码无关的旧音频。
+   */
+  private lastCompileOk: boolean = false;
 
   constructor() {
     this.parser = new SPGParser();
@@ -134,6 +140,7 @@ export class BrowserAudioEngine {
 
   public compile(code: string): ParserError | null {
     if (!code || code.trim().length === 0) {
+      this.lastCompileOk = false;
       return { message: '代码为空', line: 1 };
     }
     try {
@@ -150,16 +157,30 @@ export class BrowserAudioEngine {
       this.lastParseResult = parsed;
 
       if (events.length === 0) {
+        // 没有事件就不能留着上一次的数据：否则用户点播放/导出，
+        // 听到/拿到的是上一次编译的旧音频 —— 与当前代码完全无关。
+        this.scheduledEvents = [];
+        this.totalDuration = 0;
+        this.lastCompileOk = false;
         return { message: '代码编译通过，但没有产生任何音符事件', line: 0 };
       }
 
       this.scheduledEvents = events;
-      // 效果链会拖出尾音，导出时需要留出余量
-      this.totalDuration = totalDuration + (parsed.effects.length > 0 ? EFFECT_TAIL : 0.5);
+      // 效果链会拖出尾音，导出时需要留出余量；混响 decay 可达十几秒，
+      // 固定 3 秒会把长尾硬生生切掉，这里按实际 decay 动态留（上限 12 秒）。
+      const longestReverb = parsed.effects.reduce(
+        (m, e) => (e.type === 'reverb' ? Math.max(m, e.decay) : m), 0
+      );
+      const tailRoom = parsed.effects.length > 0
+        ? Math.min(Math.max(EFFECT_TAIL, longestReverb), 12)
+        : 0.5;
+      this.totalDuration = totalDuration + tailRoom;
 
       this.masterGain.gain.value = clamp(parsed.masterVolumeConfig, 0, 2, 0.6);
+      this.lastCompileOk = true;
       return null;
     } catch (e: unknown) {
+      this.lastCompileOk = false;
       return this.toParserError(e);
     }
   }
@@ -176,7 +197,13 @@ export class BrowserAudioEngine {
   }
 
   public async playRealtime() {
-    if (!this.lastParseResult) throw new Error('没有可播放的已编译代码');
+    if (!this.lastParseResult || !this.lastCompileOk) {
+      throw new Error(
+        this.lastParseResult
+          ? '上次编译失败，请修复错误后重新编译再播放'
+          : '没有可播放的已编译代码'
+      );
+    }
     // StrictMode 卸载会关闭上下文，这里按需重建后再播放
     this.ensureAlive();
 
@@ -188,14 +215,18 @@ export class BrowserAudioEngine {
     const now = this.mainCtx.currentTime;
     // 留一点调度余量，避免首个音符因调度延迟被截断
     const buffer = 0.08;
-    const playEvents = this.scheduledEvents.map((e) => ({ ...e, time: e.time + now + buffer }));
+    const startAt = now + buffer;
+    const playEvents = this.scheduledEvents.map((e) => ({ ...e, time: e.time + startAt }));
 
     this.synthesizer.scheduleEvents(
       this.mainCtx,
       this.masterGain,
       playEvents,
       this.lastParseResult.effects,
-      this.registerSource.bind(this)
+      this.registerSource.bind(this),
+      // 效果器内的时间自动化（filter 扫频）必须跟事件走同样的偏移，
+      // 否则扫频落在过去而完全听不见
+      startAt
     );
   }
 
@@ -226,9 +257,11 @@ export class BrowserAudioEngine {
     //    无需逐节点追踪（节点会随引用消失被回收）。
     try { this.masterGain.disconnect(); } catch { /* ignore */ }
     this.masterGain = this.mainCtx.createGain();
+    // 缺省音量必须与 buildGraph 一致（0.6）：stop 后不重新 compile 直接播放，
+    // 否则音量会莫名其妙掉一档。
     this.masterGain.gain.value = this.lastParseResult
       ? clamp(this.lastParseResult.masterVolumeConfig, 0, 2, 0.6)
-      : 0.5;
+      : 0.6;
     this.masterGain.connect(this.compressor);
   }
 
@@ -243,7 +276,13 @@ export class BrowserAudioEngine {
   }
 
   public async renderOffline(): Promise<Blob> {
-    if (!this.lastParseResult) throw new Error('没有可导出的已编译代码');
+    if (!this.lastParseResult || !this.lastCompileOk) {
+      throw new Error(
+        this.lastParseResult
+          ? '上次编译失败，请修复错误后重新编译再导出'
+          : '没有可导出的已编译代码'
+      );
+    }
 
     const sampleRate = RENDER_SAMPLE_RATE;
     const length = Math.max(1, Math.ceil((this.totalDuration || 1) * sampleRate));
