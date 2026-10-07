@@ -360,7 +360,7 @@ function run() {
      *
      * 主进程不能 import const（TS），所以嗅探后缀表是**派生副本**。
      * 副本一旦漂移，同一个地址会被两条路径判成不同类型 ——
-     * 实测事故：`ts` 在主进程属 videoExts、在 const 属 stream，
+     * 实测事故：`ts` 在主进程属 videoExts、在 const.ts 属 stream，
      * 于是 .ts 地址被标成"视频"，筛选栏归错类，
      * 且下载判定 `type !== 'stream'` 让它跳过 ffmpeg 检查
      * （而 .ts 分片恰恰需要 ffmpeg 才能合成可用文件）。

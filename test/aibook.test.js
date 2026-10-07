@@ -30,9 +30,8 @@ const check = (name, fn) => {
 const run = () => {
   const aiService = require(path.join(BUILD, 'services', 'AiService.js'));
   // .aibook 格式与图片编解码在根目录 const.ts（与 .gallery 格式段并列）。
-  // 这里曾经 require 的是 build/utils.js —— 更早的根目录 utils.ts 的编译产物。
-  // 那个文件后来移进 utils/ 目录，于是这条 require 只剩一个**陈旧的 build 产物**
-  // 在撑着：clean 重建后它就没了，套件直接 MODULE_NOT_FOUND。
+  // 必须 require 编译产物里的**同一份源码**：曾经它指向一个早已不存在的
+  // 陈旧 build 产物，clean 重建后套件直接 MODULE_NOT_FOUND；
   // 更要紧的是，靠陈旧产物运行时，这 30 项断言测的不是产品代码。
   const constMod = require(path.join(BUILD, 'const.js'));
 

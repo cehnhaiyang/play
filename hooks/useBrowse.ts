@@ -119,7 +119,7 @@ const SNIFF_EXCLUDED_EXTS = new Set(['aibook']);
 /**
  * 按媒体类型归并的后缀表。
  * 唯一真值来自 const.ts 的 MEDIA_EXTENSIONS —— 播放器的类型判定与嗅探的扫描清单
- * 必须一致，各写一份必然会漂移（合并前此处、页内脚本、const.ts 共三份）。
+ * 必须一致，各写一份必然会漂移（早先此处、页内脚本、utils.ts 各写一份，共三份）。
  *
  * 页内脚本的 streamExts 也直接用这一份（含 `ts`），不再单独排除：
  * 排除是因为旧逻辑"先定类型再判分片"，`.ts` 会在分片判定前就被标成 stream；

@@ -1041,7 +1041,7 @@ export const galleryPageNumber = (fileName: string): number | null => {
  * 只声明形状，不在这里生成：徽标正文由主进程 electron/acgmhoService.js 的
  * writeGalleryOutputs 落盘（它才是写文件的那一侧）。这里曾有一个
  * buildGalleryManifest() 生成器，但从未被任何调用方使用、字段集也已与
- * 实际写出的内容漂移，故只保留类型供读取侧引用。
+ * 实际写出的内容漂移，故只保留类型。
  *
  * 注意与 meta/interface.ts 的同名接口不是一回事：那个是**下载归档**的清单
  * （含 records 列表），这个是**单文件夹画廊**的徽标。
