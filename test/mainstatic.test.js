@@ -607,7 +607,8 @@ function run() {
      * 思考强度档位：界面、AiService、主进程三处清单一致，下发前都过映射。
      *
      * low / high / max 是界面与配置的唯一口径（「不思考」等同于档位缺省，
-     * 不占白名单名额），各服务商取值不同，由 AiService.resolveReasoningEffort 映射。
+     * 不占白名单名额），各模型认的取值不同，由 AiService.resolveReasoningEffort
+     * 按模型映射（映射矩阵本身在 aiprovider.test.js 里跑真实函数验证）。
      * 清单分叉会让档位被静默改写或点不到，漏映射则是服务端一次 503。
      */
     checks += 1;

@@ -49,6 +49,7 @@ import {
     AI_PROVIDERS,
     DEFAULT_AI_CONFIG,
     EFFORT_OPTIONS,
+    findAiModelPreset,
     findAiProvider,
     getModelPresets,
     resolveReasoningEffort,
@@ -773,9 +774,11 @@ const formatEffort = (config: AiConfig): string => {
  * AI 语义：
  * - 走 OpenAI 兼容协议（POST {baseUrl}/chat/completions）；
  * - 服务商是填表模板（AiService 的 AI_PROVIDERS）：点一下填好地址、密钥与模型；
- * - 思考强度可选：不思考 / 低 / 高 / 最大，各家取值可能不同，
- *   下发前由 AiService.resolveReasoningEffort 映射，实际下发的取值显示在按钮下方；
- *   「不思考」与不需要思考的服务商（gcli2api）都不下发 reasoning_effort；
+ * - 思考强度挂在**模型**上而不是服务商上：同一个服务商里有的模型认
+ *   reasoning_effort、有的不认（agent2api 的 LongCat-2.0 就不认）。
+ *   可选档位：不思考 / 低 / 高 / 最大，各模型取值可能不同，
+ *   下发前由 AiService.resolveReasoningEffort 按模型映射，实际下发的取值显示在按钮下方；
+ *   「不思考」与不需要思考的模型（LongCat-2.0、gcli2api 的两个）都不下发 reasoning_effort；
  * - 配置落在主进程 settings.json（浏览器调试时回落 localStorage，见 AiService）。
  *
  * 保存值落在主进程 userData/settings.json：主进程启动时（渲染层还没起来）
@@ -886,11 +889,16 @@ const SettingsFloating: React.FC = () => {
         setTestResult(null);
     }, []);
 
-    // 草稿地址对应的服务商：档位映射与模型候选都看它
+    // 草稿地址对应的服务商：只是填表模板（地址、密钥、模型候选）
     const activeProvider = useMemo(() => findAiProvider(aiDraft.baseUrl), [aiDraft.baseUrl]);
     const modelPresets = useMemo(() => getModelPresets(aiDraft.baseUrl), [aiDraft.baseUrl]);
-    /** 自定义地址（不在预设表里）按需要思考处理，与 AiService 的判定一致 */
-    const supportsReasoning = activeProvider?.reasoning !== false;
+    // 思考配置挂在模型上：下发与否、下发成什么，都看当前选中的这个模型。
+    // 预设外的模型名没有映射依据，按需要思考处理（原值下发），与 AiService 的判定一致
+    const activeModel = useMemo(
+        () => findAiModelPreset(aiDraft.baseUrl, aiDraft.model),
+        [aiDraft.baseUrl, aiDraft.model]
+    );
+    const supportsReasoning = activeModel?.reasoning !== false;
 
     /** 各档位 + 实际下发的取值（显示用）；wire 为空即「不下发」 */
     const effortRows = useMemo(
@@ -898,14 +906,15 @@ const SettingsFloating: React.FC = () => {
         [aiDraft]
     );
 
-    /** 套用预设：地址、密钥、模型整份换，档位取中间一档 */
+    /** 套用预设：地址、密钥、模型整份换，档位取该模型下中间的一档 */
     const applyAiProvider = useCallback((preset: AiProviderPreset) => {
+        const firstModel = preset.models[0];
         setAiDraft((prev) => ({
             baseUrl: preset.baseUrl,
             apiKey: preset.apiKey,
-            model: preset.models[0] || prev.model,
-            // 不需要思考的服务商留空（= 不思考），否则会显示一个永远不会下发的档位
-            reasoningEffort: preset.reasoning === false ? undefined : 'high',
+            model: firstModel?.id || prev.model,
+            // 模型没有思考配置时留空（= 不思考），否则会显示一个永远不会下发的档位
+            reasoningEffort: firstModel?.reasoning === false ? undefined : 'high',
         }));
         setAiError('');
         setTestResult(null);
@@ -1114,7 +1123,7 @@ const SettingsFloating: React.FC = () => {
 
                 <div className="mt-3 space-y-2">
                     <span className="text-xs font-bold uppercase tracking-[0.2em] text-slate-500">服务商</span>
-                    <div className="grid grid-cols-2 gap-2" role="group" aria-label="服务商">
+                    <div className="grid grid-cols-3 gap-2" role="group" aria-label="服务商">
                         {AI_PROVIDERS.map((preset) => {
                             const isActive = activeProvider?.id === preset.id;
                             return (
@@ -1210,7 +1219,7 @@ const SettingsFloating: React.FC = () => {
                             type="text"
                             value={aiDraft.model}
                             onChange={(event) => patchAiDraft({ model: event.target.value })}
-                            placeholder={modelPresets[0] || 'global:deepseek-v4.1-flash'}
+                            placeholder={modelPresets[0]?.id || 'global:deepseek-v4.1-flash'}
                             spellCheck={false}
                             className={`${FIELD_CLS} focus:border-violet-500/60`}
                         />
@@ -1218,21 +1227,21 @@ const SettingsFloating: React.FC = () => {
                     {/* 候选常驻显示：datalist 按下拉里的当前值过滤，只看得到已选的那个 */}
                     {modelPresets.length > 0 && (
                         <div className="flex flex-wrap gap-2" role="group" aria-label="模型候选">
-                            {modelPresets.map((name) => {
-                                const isActive = aiDraft.model === name;
+                            {modelPresets.map((candidate) => {
+                                const isActive = aiDraft.model === candidate.id;
                                 return (
                                     <button
-                                        key={name}
+                                        key={candidate.id}
                                         type="button"
-                                        onClick={() => patchAiDraft({ model: name })}
-                                        title={name}
+                                        onClick={() => patchAiDraft({ model: candidate.id })}
+                                        title={candidate.id}
                                         aria-pressed={isActive}
                                         className={`max-w-full truncate rounded-full border px-3 py-1 font-mono text-[11px] transition ${FOCUS_RING} ${isActive
                                             ? 'border-violet-500/50 bg-violet-500/15 text-violet-200'
                                             : 'border-white/10 bg-slate-950 text-slate-400 hover:border-white/20 hover:text-slate-200'
                                             }`}
                                     >
-                                        {name}
+                                        {candidate.id}
                                     </button>
                                 );
                             })}
@@ -1273,7 +1282,8 @@ const SettingsFloating: React.FC = () => {
                     </div>
                     {!supportsReasoning && (
                         <p className="text-xs text-slate-500">
-                            该服务商不需要思考档位（档位在模型名里），请求不会下发 reasoning_effort。
+                            {aiDraft.model} 没有思考档位（档位已写进模型名，或该模型不支持），
+                            请求不会下发 reasoning_effort。
                         </p>
                     )}
                 </div>

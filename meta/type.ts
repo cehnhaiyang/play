@@ -218,8 +218,8 @@ export type MessageRole = 'user' | 'model' | 'system';
 /**
  * AI 思考（推理）强度档位：界面与配置里只有这三档
  *
- * 各服务商的 reasoning_effort 取值可能不同，下发前由
- * AiService.resolveReasoningEffort 按服务商、模型映射；映射结果为空即不下发该参数。
+ * 各模型认的 reasoning_effort 取值可能不同，下发前由
+ * AiService.resolveReasoningEffort 按**模型**映射；映射结果为空即不下发该参数。
  *
  * - `low`: 最快、最省 token
  * - `high`: 平衡档，适合常规生成
@@ -242,7 +242,8 @@ export interface AiConfig {
      * 思考强度档位。
      *
      * 可选：缺省即「不思考」，请求不下发 reasoning_effort，交给服务商默认行为。
-     * 服务商预设声明不需要思考（AiService.AI_PROVIDERS 的 reasoning 为 false）时同样不下发。
+     * 当前模型预设声明不需要思考（AiService.AI_PROVIDERS 里模型的 reasoning 为 false）
+     * 时同样不下发，档位是否真的下发要看 AiService.resolveReasoningEffort。
      */
     reasoningEffort?: ReasoningEffort;
 }

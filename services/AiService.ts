@@ -44,10 +44,31 @@ export interface AiEffortOption {
     hint: string;
 }
 
-/** 档位映射：low / high / max 换成服务商认的取值；未列出的档位原样下发 */
+/** 服务商认的取值：low / high / max 换成它认的写法；未列出的档位原样下发 */
 export type AiEffortMap = Partial<Record<ReasoningEffort, string>>;
 
-/** 服务商预设：地址、密钥、模型候选、思考能力与档位映射 */
+/**
+ * 模型预设：思考配置挂在这里，不挂服务商。
+ *
+ * 同一个服务商下不同模型对 reasoning_effort 的态度可以完全相反——实测
+ * agent2api 的 GET /v1/models 逐个模型给出 supports_reasoning 字段，
+ * LongCat-2.0 是 false，glm-5.3 / deepseek-v4 / kimi-k3 是 true。
+ * 挂在服务商上就表达不了这种差异：选一次服务商，只能对所有模型统一下发或统一不发。
+ */
+export interface AiModelPreset {
+    /** 下发给服务商的模型标识，界面也用它显示 */
+    id: string;
+    /**
+     * 该模型是否需要思考档位。
+     * `false` = 不需要：整条链路都不带 reasoning_effort（档位可能已写进模型名）。
+     * 缺省视为需要。
+     */
+    reasoning?: boolean;
+    /** 该模型的档位映射 */
+    efforts?: AiEffortMap;
+}
+
+/** 服务商预设：地址、密钥与模型候选；思考配置属于模型，服务商不持有 */
 export interface AiProviderPreset {
     id: string;
     /** 按钮文字 */
@@ -57,17 +78,7 @@ export interface AiProviderPreset {
     baseUrl: string;
     apiKey: string;
     /** 该服务商的模型候选；第一个是套用预设时的默认值 */
-    models: string[];
-    /**
-     * 该服务商是否需要思考档位。
-     * `false` = 不需要：整条链路都不带 reasoning_effort（档位可能已写进模型名）。
-     * 缺省视为需要。
-     */
-    reasoning?: boolean;
-    /** 服务商级档位映射 */
-    efforts?: AiEffortMap;
-    /** 模型级档位映射，优先于服务商级 */
-    modelEfforts?: Record<string, AiEffortMap>;
+    models: AiModelPreset[];
 }
 
 /** 界面档位：不思考 + 低 / 高 / 最大三档 */
@@ -84,10 +95,10 @@ export const AI_PROVIDERS: AiProviderPreset[] = [
         id: 'tc2api',
         label: 'tc2api',
         note: '本地 tc2api（7863），默认密钥 1',
-        baseUrl: DEFAULT_AI_CONFIG.baseUrl,
-        apiKey: DEFAULT_AI_CONFIG.apiKey,
-        models: [DEFAULT_AI_CONFIG.model, 'deepseek-v4.1-flash', 'global:glm-5.2'],
-        // reasoning_effort 就叫 low / high / max，不需要映射
+        baseUrl: 'http://127.0.0.1:7863/v1',
+        apiKey: '1',
+        // reasoning_effort 就叫 low / high / max，三个模型都认，不需要映射
+        models: [{ id: 'global:deepseek-v4.1-flash' }, { id: 'deepseek-v4-flash' }, { id: 'global:glm-5.2' }],
     },
     {
         id: 'ofm',
@@ -95,9 +106,18 @@ export const AI_PROVIDERS: AiProviderPreset[] = [
         note: '本地 gcli2api，可用默认密钥；档位写在模型名里，不下发思考参数',
         baseUrl: 'http://127.0.0.1:7861/antigravity/v1/',
         apiKey: 'pwd',
-        models: ['gemini-3.8-flash-high', 'claude-sonnet-4-6'],
-        // 不需要思考：档位已由模型名（-high）决定，再下发 reasoning_effort 只是多余参数
-        reasoning: false,
+        // 档位已由模型名（-high）决定，再下发 reasoning_effort 只是多余参数
+        models: [{ id: 'gemini-3.8-flash-high', reasoning: false }, { id: 'claude-sonnet-4-6', reasoning: false }],
+    },
+    {
+        id: 'agent2api',
+        label: 'agent2api',
+        note: '本地 agent2api（3065），自带默认密钥',
+        baseUrl: 'http://127.0.0.1:3065/v1',
+        apiKey: 'sk-a2a-f345da9360a116c54801e02675eb0c37',
+        models: [
+            { id: 'LongCat-2.0', reasoning: false, }, { id: 'deepseek-v4-flash' }
+        ],
     },
 ];
 
@@ -108,31 +128,34 @@ const normalizeBaseUrl = (url: string): string => (url || '').trim().replace(/\/
 export const findAiProvider = (baseUrl: string): AiProviderPreset | null =>
     AI_PROVIDERS.find((provider) => normalizeBaseUrl(provider.baseUrl) === normalizeBaseUrl(baseUrl)) || null;
 
+/** 该地址下的模型预设；预设表外的模型名返回 null（没有它的思考配置依据） */
+export const findAiModelPreset = (baseUrl: string, model: string): AiModelPreset | null =>
+    findAiProvider(baseUrl)?.models.find((entry) => entry.id === model) || null;
+
 /**
  * 这次请求实际下发的 reasoning_effort；返回 undefined 表示不下发该参数。
  *
- * 两种不下发的情况：
- * - 没有档位可解析：配置缺省（用户在界面上选了「不思考」），或调用方显式传空；
- * - 服务商预设声明不需要思考（如 gcli2api）：档位写在模型名里，参数是多余的。
+ * 查表以**模型**为单位：档位是不是要下发、下发成什么取值，是模型的性质，
+ * 不是服务商的性质（agent2api 下 LongCat-2.0 不认、glm-5.3 认）。
  *
- * 有档位时的查表顺序：模型级 → 服务商级 → 档位原值；
- * 地址不在预设表里则原值下发（自定义服务商仍保留档位控制权）。
+ * 三种取值：
+ * - 档位解析不出来（配置缺省 = 界面选了「不思考」，或调用方显式传空）：不下发；
+ * - 命中模型预设且它声明不需要思考（LongCat-2.0、gcli2api 的两个模型）：不下发；
+ * - 命中不了模型预设（自定义地址、或预设表里没列的模型名）：没有任何映射依据，
+ *   按档位原值下发。界面每个档位按钮下方显示的就是实际取值，一眼能看出区别。
  */
 export const resolveReasoningEffort = (config: AiConfig, requested?: ReasoningEffort): string | undefined => {
     const tier = requested || config.reasoningEffort;
     if (!tier) return undefined;
 
-    const provider = findAiProvider(config.baseUrl);
-    if (!provider) return tier;
-    if (provider.reasoning === false) return undefined;
-
-    const byModel = provider.modelEfforts?.[config.model]?.[tier];
-    const byProvider = provider.efforts?.[tier];
-    return byModel || byProvider || tier;
+    const model = findAiModelPreset(config.baseUrl, config.model);
+    if (!model) return tier;
+    if (model.reasoning === false) return undefined;
+    return model.efforts?.[tier] || tier;
 };
 
 /** 该地址对应的模型候选，界面用 */
-export const getModelPresets = (baseUrl: string): string[] =>
+export const getModelPresets = (baseUrl: string): AiModelPreset[] =>
     (findAiProvider(baseUrl) || AI_PROVIDERS[0]).models;
 
 /* -------------------------------------------------------------------------- */
@@ -215,7 +238,7 @@ export const saveAiConfig = async (config: AiConfig): Promise<{ success: boolean
 export const testAiConnection = async (config: AiConfig): Promise<AiTestResult> => {
     const normalized = normalizeConfig(config);
     // 传 null 而不是 undefined：明确告诉主进程这次不下发思考参数，
-    // 否则主进程会回落到配置里的档位，不需要思考的服务商又被塞回一个参数
+    // 否则主进程会回落到配置里的档位，不需要思考的模型（LongCat-2.0）又被塞回一个参数
     const wireEffort = resolveReasoningEffort(normalized) ?? null;
 
     const settingsApi = getElectronAPI()?.settings;
@@ -405,8 +428,8 @@ export const chat = async (options: AiChatOptions): Promise<string> => {
 
     const payload: Record<string, unknown> = { model: config.model, messages };
 
-    // 思考参数可选：配置里只有 low / high / max，服务商未必认，下发前按预设映射；
-    // 无档位或服务商不需要思考时映射结果为空，整条请求就不带 reasoning_effort
+    // 思考参数可选：配置里只有 low / high / max，当前模型未必认，
+    // 下发前按模型预设映射；无档位或模型不需要思考时映射结果为空，整条请求就不带这个参数
     const wireEffort = resolveReasoningEffort(config, options.reasoningEffort);
     if (wireEffort) payload.reasoning_effort = wireEffort;
 

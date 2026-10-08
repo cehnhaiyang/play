@@ -23,7 +23,7 @@ const engine = svc;
 const registry = svc;
 const {
     apibayProvider, acgripProvider, dmhyProvider, animetoshoProvider,
-    nyaaProvider, sukebeiProvider,
+    nyaaProvider, sukebeiProvider, tpbAdultProvider,
 } = svc;
 
 let pass = 0;
@@ -303,6 +303,98 @@ const runParsers = () => {
         assert(sukebeiProvider.descriptor.adult === true, 'sukebei 应为成人');
     });
 
+    /**
+     * TPB 里区（tpb.party）。两份快照都是 2026-10-08 的真实响应：
+     *   tpb_porn.html ← /s/?q=doujinshi&porn=on  （30 行，分类只剩 503/505/599）
+     *   tpb_all.html  ← /search/doujinshi/0/99/99（30 行，混着 403/602/699 等非成人）
+     * 二者并排放着测，是为了锁住"筛选必须在服务端做"：
+     * apibay 的 c= 参数服务端直接忽略（实测五种写法响应逐字节相同），
+     * 想拿成人结果只能换 tpb.party 的 porn=on；在解析器里事后过滤等于自欺。
+     */
+    check('tpb.party: 搜索地址带 porn=on 且关键词做了编码', () => {
+        const url = tpbAdultProvider.buildSearchUrl('充電器');
+        assert(url === `https://tpb.party/s/?q=${encodeURIComponent('充電器')}&porn=on`, `得到 ${url}`);
+    });
+    check('tpb.party: HTML 快照解析出条目且字段完整', () => {
+        const hits = parseFixture(tpbAdultProvider, 'tpb_porn.html', 'doujinshi');
+        assert(hits.length > 0, '应解析出条目');
+        const h = hits[0];
+        assert(/^\d+$/.test(h.id), `id 应是详情链接里的数字，得到 "${h.id}"`);
+        assert(h.title && !/^torrent-/.test(h.title), `标题应是真实标题，得到 "${h.title}"`);
+        assert(h.viewUrl.startsWith('https://tpb.party/torrent/'), `详情页应原样绝对，得到 ${h.viewUrl}`);
+        assert(h.magnet.startsWith('magnet:?xt=urn:btih:'), `应有磁链，得到 "${h.magnet}"`);
+        assert(/^[0-9a-f]{40}$/.test(h.infoHash), `磁链应抽出 40 位 hex，得到 "${h.infoHash}"`);
+        assert(h.sizeBytes > 0 && h.sizeText, `体积应解析出，得到 ${h.sizeBytes} / "${h.sizeText}"`);
+        assert(h.seeders !== util.UNKNOWN && h.leechers !== util.UNKNOWN,
+            `做种/吸血应解析出，得到 ${h.seeders}/${h.leechers}`);
+        assert(h.completed === util.UNKNOWN, `列表页不提供完成数，应记 UNKNOWN，得到 ${h.completed}`);
+        assert(h.category, `分类应是 "Porn > …"，得到 "${h.category}"`);
+    });
+    /**
+     * 日期列在同一站内就两种形态："10-17 2025"（往年）与 "05-01 19:50"（本年，缺年份）。
+     * 补年份要读当前时间，而 parse 必须是纯函数（否则快照离线测试会随日期漂移）。
+     * 只解析带年份的那半更糟：本年的新条目会因 UNKNOWN 在日期排序里落到末尾。
+     * 所以整站日期一律 UNKNOWN，这条用例把决定钉住，防止将来"顺手补一下"。
+     */
+    check('tpb.party: 日期缺年份，整站记 UNKNOWN 而不猜年份', () => {
+        const hits = parseFixture(tpbAdultProvider, 'tpb_porn.html', 'doujinshi');
+        assert(hits.length > 0, '应解析出条目');
+        const dated = hits.filter((h) => h.publishedAt !== util.UNKNOWN);
+        assert(dated.length === 0, `日期应全为 UNKNOWN，实际有 ${dated.length} 条带值`);
+    });
+    check('tpb.party: 列表页没有 .torrent 直链，留空也不伪造', () => {
+        const hits = parseFixture(tpbAdultProvider, 'tpb_porn.html', 'doujinshi');
+        assert(hits.every((h) => h.torrent === ''), 'TPB 列表页只给磁链，种子直链在详情页');
+    });
+    /**
+     * 上传者若是 Anonymous，那一格渲染成 <i>Anonymous</i>（没有 /user/ 链）。
+     * 早先按"末尾几个格是数字"取列，在这一行上体积整格丢掉、做种数被读成吸血数
+     * （实测 id 75355407：真值 15/2，启发式给成 2/-1）。现在按固定列序取，
+     * 这两条用例把列序锁住——列序一变（站点改版）就整体记 UNKNOWN，宁可少信息也不给错信息。
+     */
+    check('tpb.party: Anonymous 行（上传者格没有 /user/ 链）也取对体积与做种数', () => {
+        const body = fixture('tpb_porn.html');
+        assert(/<i>Anonymous<\/i>/.test(body), '快照里应有 Anonymous 行，否则这条用例形同虚设');
+        const anon = tpbAdultProvider.parse(body, { url: '', query: 'doujinshi' })
+            .find((h) => h.id === '75355407');
+        assert(anon, '应解析出 id 75355407 那一行');
+        assert(anon.seeders === 15, `做种数应是 15，得到 ${anon.seeders}`);
+        assert(anon.leechers === 2, `吸血数应是 2，得到 ${anon.leechers}`);
+        assert(anon.sizeText === '5.08 GiB' && anon.sizeBytes > 0,
+            `体积应取到，得到 ${anon.sizeBytes} / "${anon.sizeText}"`);
+    });
+    check('tpb.party: 列序正常的行都取到体积与做种/吸血', () => {
+        const hits = parseFixture(tpbAdultProvider, 'tpb_porn.html', 'doujinshi');
+        const missing = hits.filter((h) => h.sizeBytes === util.UNKNOWN
+            || h.seeders === util.UNKNOWN || h.leechers === util.UNKNOWN);
+        assert(missing.length === 0,
+            `${missing.length} 行没取到体积或做种/吸血：${missing.map((h) => h.id).join(',')}`);
+    });
+    check('tpb.party: 解析行数等于页面数据行数', () => {
+        const body = fixture('tpb_porn.html');
+        const expected = new Set([...body.matchAll(/href="(?:https?:\/\/[^"/]+)?\/torrent\/(\d+)\//gi)]
+            .map((m) => m[1])).size;
+        const hits = tpbAdultProvider.parse(body, { url: '', query: 'doujinshi' });
+        assert(expected > 0, '地面真值为 0，快照本身有问题');
+        assert(hits.length === expected, `应解析 ${expected} 行，实际 ${hits.length}`);
+        const ids = hits.map((h) => h.id);
+        assert(new Set(ids).size === ids.length, '行 id 不该重复');
+    });
+    check('tpb.party: 里站分区，且筛选后的快照全是成人分类', () => {
+        assert(tpbAdultProvider.descriptor.adult === true, '应为成人站点');
+        assert(registry.groupOf(tpbAdultProvider.descriptor) === 'nsfw', '应落进里站分区');
+        const hits = parseFixture(tpbAdultProvider, 'tpb_porn.html', 'doujinshi');
+        const notPorn = hits.filter((h) => !/^Porn\b/.test(h.category));
+        assert(notPorn.length === 0,
+            `porn=on 之后不该有非成人分类，得到 ${notPorn.map((h) => h.category).join(' / ')}`);
+    });
+    check('tpb.party 对照快照: 不带 porn=on 时同一关键词混进非成人分类', () => {
+        const hits = parseFixture(tpbAdultProvider, 'tpb_all.html', 'doujinshi');
+        assert(hits.length > 0, '对照快照也应解析出条目，否则这条用例形同虚设');
+        const mixed = hits.filter((h) => !/^Porn\b/.test(h.category));
+        assert(mixed.length > 0, '不带筛选的页面应含非成人分类');
+    });
+
     check('acg.rip: HTML 快照解析出条目', () => {
         const hits = parseFixture(acgripProvider, 'acgrip.html', 'big buck bunny');
         assert(hits.length > 0, '应解析出条目');
@@ -423,6 +515,7 @@ const makeTransport = (opts) => {
                 ['acg.rip', 'acgrip.html'],
                 ['share.dmhy.org', 'dmhy.html'],
                 ['animetosho.org', 'animetosho.html'],
+                ['tpb.party', 'tpb_porn.html'],
             ];
             for (const [host, file] of table) {
                 let hostname = '';
@@ -517,6 +610,16 @@ const runEngine = async () => {
         assert(got.join(',') === expected.join(','), `应只查询里站，得到 ${got.join(',')}`);
         assert(t5.calls.length === expected.length, `应发出 ${expected.length} 个请求，实际 ${t5.calls.length}`);
         assert(rNsfw.hits.every((h) => expected.includes(h.site)), '结果应只来自里站');
+    });
+    /**
+     * 里站分区以前只有 sukebei 一个站，扇出退化成单站请求也没人看得出来。
+     * 这条用例把"里站也是多站扇出"锁住：站点数与来源数都要 ≥2。
+     */
+    check('引擎: 里站扇出是多站点的，不只一个站在出结果', () => {
+        assert(registry.sitesFor('nsfw').length >= 2,
+            `里站分区应至少两个站点，实际 ${registry.sitesFor('nsfw').length} 个`);
+        const sites = new Set(rNsfw.hits.map((h) => h.site));
+        assert(sites.size >= 2, `里站结果应来自多个站点，实际 ${Array.from(sites).join(',') || '无结果'}`);
     });
 
     // 分区必选：没选就不搜，并给出明确原因，而不是静默回落到某个分区

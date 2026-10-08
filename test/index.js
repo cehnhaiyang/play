@@ -42,6 +42,9 @@ const main = async () => {
   console.log('\n=== AI 绘本测试 ===');
   const aibookOk = require('./aibook.test.js').run();
 
+  console.log('\n=== AI 服务商与档位映射 ===');
+  const aiproviderOk = require('./aiprovider.test.js').run();
+
   console.log('\n=== 搜索引擎测试 ===');
   const searchMod = require('./search.test.js');
   const searchSyncOk = searchMod.run();
@@ -76,7 +79,7 @@ const main = async () => {
   const edgeOk = edgeMod.run();
   const edgeAsyncOk = await edgeMod.runAsync();
 
-  if (!engineOk || !compatOk || !aibookOk || !searchSyncOk || !searchAsyncOk
+  if (!engineOk || !compatOk || !aibookOk || !aiproviderOk || !searchSyncOk || !searchAsyncOk
     || !mainStaticOk || !tamperOk || !agentToolsOk || !draftOk || !kbOk || !browserOk
     || !snifferOk || !logsOk || !edgeOk || !edgeAsyncOk) {
     process.exitCode = 1;

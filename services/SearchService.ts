@@ -707,6 +707,110 @@ export const apibayProvider: SiteProvider = defineProvider({
 });
 
 /* --------------------------------------------------------------------------
+ * tpb.party：The Pirate Bay 的里区入口（HTML 列表页）
+ * --------------------------------------------------------------------------
+ *
+ * 同一份 TPB 数据库有两个入口，能力不一样，里区只能走第二个：
+ *
+ * - **apibay.org/q.php 的 c= 参数被服务端忽略**。实测 2026-10-08：
+ *   `?q=hentai` 配 `c=507 / c=5 / c=5_ / c=501_507 / c=503` 五种写法，
+ *   响应体字节完全一致（8247B），分类仍是 101/201/207/401/501…的混合；
+ *   `?q=ubuntu&c=507` 与不带 c= 也是逐字节相同。它做不了成人筛选。
+ * - **tpb.party 的 `GET /s/?q=…&porn=on` 真在服务端筛**：
+ *   `q=doujinshi` 不带筛选时页面分类是 403/503/505/599/602/699（混着非成人），
+ *   带 porn=on 只剩 503/505/599；`q=充电宝` 不带筛选 30 行混合、
+ *   带筛选 8 行且全是 5xx。两个不同关键词给出不同结果，
+ *   确认它不是"任意查询都回同一份首页"的假 200 镜像
+ *   （torrentgalaxy.info 实测就是这样：首页与三种 get-posts 路径的响应 md5 相同）。
+ *
+ * 实测行结构（八格，没有 .torrent 直链，磁链一律 40 位 hex）：
+ *
+ *   <tr>
+ *     <td class="vertTh"><a href="…/browse/505" title="More from this category">Porn &gt; HD - Movies</a></td>
+ *     <td><a href="…/torrent/80855604/标题slug" title="Details for 标题">标题</a></td>
+ *     <td>10-17&nbsp;2025</td>            ← 早于本年给"月-日 年份"，本年只给"月-日 时:分"
+ *     <td><nobr><a href="magnet:?xt=urn:btih:8FCD…">…</a></nobr></td>
+ *     <td align="right">5.09&nbsp;GiB</td>
+ *     <td align="right">23</td>            ← seeders
+ *     <td align="right">1</td>             ← leechers
+ *     <td><a href="/user/Cristie65/" title="Browse Cristie65">Cristie65</a></td>
+ *   </tr>
+ *
+ * 日期一律记 UNKNOWN，而且不做"能认一年是一年"：同一列里混着
+ * "10-17 2025"（旧条目）与 "05-01 19:50"（本年条目），后者缺年份，
+ * 补成哪一年都得读当前时间，而 parse 是纯函数（不读全局状态，才能拿快照离线测）。
+ * 只解析带年份的那半更糟——本年的新条目会因 UNKNOWN 在日期排序里落到末尾，
+ * 比整站没有日期更容易误导。TPB 列表页不提供完成数，同样记 UNKNOWN。
+ */
+
+const TPB_BASE = 'https://tpb.party';
+
+const TPB_ROW_RE = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+/** 详情锚：绝对或相对地址都接受，第二段是数字 id，第三段是锚内标题 */
+const TPB_TITLE_RE = /<a[^>]*href="((?:https?:\/\/[^"/]+)?\/torrent\/(\d+)\/[^"]*)"[^>]*>([\s\S]*?)<\/a>/i;
+const TPB_MAGNET_RE = /href="(magnet:\?[^"]+)"/i;
+/** 分类锚文字（"Porn > HD - Movies"），带分类号备用 */
+const TPB_CATEGORY_RE = /<a[^>]*href="(?:https?:\/\/[^"/]+)?\/browse\/(\d+)"[^>]*>([\s\S]*?)<\/a>/i;
+
+/*
+ * 列序按 TPB 列表页的固定表结构取值，不用"末尾几个是数字"这类启发式：
+ * 实测上传者若是 Anonymous，那一格渲染成 <i>Anonymous</i>（没有 /user/ 链），
+ * 启发式会把它当成正常数据格，于是体积整格丢掉、做种数读成吸血数
+ * （快照里 id 75355407 那一行就是这样）。列序取值 + 列数校验更诚实：
+ * 站点改版列数一变就整体记 UNKNOWN，不猜。
+ */
+const TPB_COLUMNS = 8;
+/** 下载列（第 4 格）的行内判据：TPB 每行都渲染磁链图标 */
+const TPB_DOWNLOAD_CELL = 3;
+
+export const tpbAdultProvider: SiteProvider = defineProvider({
+    id: 'tpb-adult',
+    label: 'TPB 里区',
+    homepage: TPB_BASE,
+    adult: true,
+    kinds: ['成人', '影视', '图包', '游戏'],
+    buildSearchUrl: (query) => `${TPB_BASE}/s/?q=${encodeURIComponent(query)}&porn=on`,
+    parse: (body) => {
+        if (!body) return [];
+        const hits: ProviderHit[] = [];
+
+        for (const row of iterMatches(TPB_ROW_RE, body)) {
+            const rowHtml = row[1];
+
+            const title = rowHtml.match(TPB_TITLE_RE);
+            if (!title) continue; // 表头与导航行没有详情锚，不是数据行
+
+            const cells = cellsOf(rowHtml);
+            const shaped = cells.length === TPB_COLUMNS && /magnet:/.test(cells[TPB_DOWNLOAD_CELL] || '');
+
+            const sizeText = shaped ? stripTags(cells[4]) : '';
+            const sizeBytes = sizeText ? parseSizeBytes(sizeText) : UNKNOWN;
+            const seedText = shaped ? stripTags(cells[5]) : '';
+            const leechText = shaped ? stripTags(cells[6]) : '';
+
+            const categoryMatch = rowHtml.match(TPB_CATEGORY_RE);
+            const magnetMatch = rowHtml.match(TPB_MAGNET_RE);
+
+            hits.push(makeHit({
+                id: title[2],
+                title: stripTags(title[3]),
+                magnet: magnetMatch ? stripTags(magnetMatch[1]) : '',
+                // 列表页只有磁链，.torrent 直链在详情页——不伪造，留空
+                torrent: '',
+                viewUrl: absolutize(title[1], TPB_BASE),
+                sizeBytes,
+                sizeText,
+                seeders: /^\d+$/.test(seedText) ? Number(seedText) : UNKNOWN,
+                leechers: /^\d+$/.test(leechText) ? Number(leechText) : UNKNOWN,
+                category: categoryMatch ? stripTags(categoryMatch[2]) : '',
+            }));
+        }
+
+        return hits;
+    },
+});
+
+/* --------------------------------------------------------------------------
  * animetosho：英文动漫资源聚合
  * --------------------------------------------------------------------------
  *
@@ -1025,6 +1129,7 @@ const PROVIDERS: SiteProvider[] = [
     acgripProvider,
     dmhyProvider,
     sukebeiProvider,
+    tpbAdultProvider,
 ];
 
 /** id → provider */
