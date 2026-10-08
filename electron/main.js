@@ -135,7 +135,7 @@ const ffmpegStatic = require('ffmpeg-static');
 // 因此以"端口真的能连上"为准：连得上才建隧道，连不上就回落直连并上报 probeFailed，
 // 由调用方在界面上提示用户去检查端口，而不是让所有请求静默失败。
 //
-// 协议：本地代理端口有两种常见形态，且默认端口彼此相邻、极易填错——
+// 协议：代理端口有两种常见形态，且默认端口彼此相邻、极易填错——
 // v2rayN 默认 SOCKS5 在 10808、HTTP 在 10809；Clash 默认 HTTP 在 7890、SOCKS5 在 7891。
 // 只实现 HTTP CONNECT 时，把 SOCKS 端口填进来会得到一句毫无线索的 "socket hang up"：
 // CONNECT 的首字节 0x43('C') 不是 SOCKS5 的版本号 0x05，代理按协议错误直接关连接，
@@ -2227,7 +2227,7 @@ function ensureMagnetTrackers(magnet) {
  * 从 magnet 或裸 btih 提取 info hash（小写）。提取不到返回空串。
  *
  * 只做十六进制归一：base32 形态的 btih（dmhy / animetosho 会给）在
- * services/SearchService/util.ts 里已有 base32ToHex 负责，这里不重复实现——
+ * services/SearchService.ts 里已有 base32ToHex 负责，这里不重复实现——
  * 重复实现就会有两套编码转换规则，迟早对不上。
  */
 function magnetInfoHash(magnet) {
@@ -3309,7 +3309,6 @@ function createWindow() {
 const TORRENT_FILE_HOSTS = new Set([
     'nyaa.si',
     'sukebei.nyaa.si',
-    'sukebei.nyaa.site',
     'acg.rip',
     'animetosho.org',
     'apibay.org',

@@ -1084,7 +1084,7 @@ const SettingsFloating: React.FC = () => {
                 <div className={`mt-4 space-y-2 rounded-2xl p-4 text-xs leading-6 text-slate-400 ${SURFACE_SUNKEN}`}>
                     <p>
                         1. <strong className="text-slate-300">留空即直连</strong>：应用不会读取系统代理，也不做端口探测。使用
-                        Proton VPN 等 TUN 模式 VPN 时选这项——流量在网卡层已被接管，无需本地代理端口。
+                        Proton VPN 等 TUN 模式 VPN 时选这项——流量在网卡层已被接管，无需代理端口。
                     </p>
                     <p>
                         2. <strong className="text-slate-300">填入端口</strong>
@@ -1398,7 +1398,7 @@ const LogsFloating: React.FC<{ active: boolean }> = ({ active }) => {
     // 订阅包装一层门控：面板 keep-alive 常驻，tab 切走即断开订阅，
     // 版本号冻结在离开时的值，重进才继续跟 —— 否则每条 console 都重渲染隐藏面板
     const subscribe = useCallback((listener: () => void) => {
-        if (!activeRef.current) return () => {};
+        if (!activeRef.current) return () => { };
         return subscribeLogs(listener);
     }, []);
 

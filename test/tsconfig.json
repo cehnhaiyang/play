@@ -23,7 +23,7 @@
     "../services/BrowserService/**/*.ts",
     "../services/KbService/**/*.ts",
     "../services/LogService.ts",
-    "../services/SearchService/**/*.ts",
+    "../services/SearchService.ts",
     "../const.ts",
     "../meta/**/*.ts"
   ]

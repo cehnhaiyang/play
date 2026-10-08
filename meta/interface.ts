@@ -1269,6 +1269,20 @@ export interface SearchHit {
 }
 
 /**
+ * 搜索分区。表站 = 全年龄站点，里站 = 成人站点。
+ *
+ * 这是**必选项**，不是"要不要带上成人站"的开关：一次搜索只打一个分区，
+ * 里站结果永远不会混进表站列表（反之亦然）。UI 上必须先选定分区才能搜。
+ */
+export type SiteGroup = 'sfw' | 'nsfw';
+
+/** 分区显示名（UI 与引擎共用一套措辞，避免两处各叫各的） */
+export const SITE_GROUP_LABELS: Record<SiteGroup, string> = {
+    sfw: '表站',
+    nsfw: '里站',
+};
+
+/**
  * 站点插口描述。引擎与 UI 都只通过它认识站点，不感知任何站点细节。
  */
 export interface SiteDescriptor {
@@ -1278,7 +1292,7 @@ export interface SiteDescriptor {
     label: string;
     /** 站点主页（作 referer 与「详情」兜底） */
     homepage: string;
-    /** 是否成人内容：UI 可据此默认收起，避免默认把里区结果混进表区 */
+    /** 是否成人内容：决定站点落在哪个分区（true = 里站），见 SiteGroup */
     adult: boolean;
     /** 站点擅长的内容类型，仅用于 UI 提示 */
     kinds: string[];
@@ -1300,16 +1314,17 @@ export interface SearchSiteStatus {
 export interface SearchQuery {
     /** 关键词 */
     q: string;
-    /** 限定站点 id 列表；留空/不传 = 搜索全部已注册站点 */
-    sites?: string[];
+    /**
+     * 搜索分区：表站或里站。**必选**，缺失时引擎直接报"请先选择表站或里站"，
+     * 不静默回落到某个分区——一次搜索打哪几个站必须是明确的。
+     */
+    group: SiteGroup;
     /** 单站结果上限 */
     limitPerSite?: number;
     /** 汇总排序方式 */
     sort?: SearchSort;
     /** 过滤掉做种数低于该值的条目（0 = 不过滤） */
     minSeeders?: number;
-    /** 是否包含成人站点结果 */
-    includeAdult?: boolean;
 }
 
 export type SearchSort = 'seeders' | 'size' | 'date' | 'site';

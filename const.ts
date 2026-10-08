@@ -1,11 +1,6 @@
 /**
  * const.ts — 全局常量、类型与纯工具函数的唯一入口。
- *
- * 由原 utils/ 目录的四个文件合并而来（utils / persist / galleryPack / agentExport）：
- * 它们之间本就有依赖（galleryPack 用 galleryPageNumber、agentExport 用 downloadBlob），
- * 拆成四个文件只产生跨文件 import，没有真实的边界。合并后按用途分节，
- * 节内一律「常量 → 类型 → 函数」。
- *
+ * 
  * 两条约定：
  *  - 只放**无副作用、不依赖 React** 的东西，因此能被 Node 回归测试直接 require
  *    （test/tsconfig.json 把本文件编译到 test/build/const.js）；

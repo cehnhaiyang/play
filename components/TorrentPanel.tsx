@@ -18,6 +18,7 @@ import {
     X,
 } from 'lucide-react';
 import { SORT_OPTIONS, useMagnetSearch } from '../hooks';
+import { SITE_GROUP_LABELS } from '../meta';
 import type { SearchHit, SearchSiteStatus, TorrentTaskSnapshot } from '../meta';
 import { formatBytes } from '../services/SearchService';
 
@@ -282,14 +283,13 @@ export interface TorrentPanelProps {
 
 export const TorrentPanel: React.FC<TorrentPanelProps> = ({ onBack }) => {
     const { state, actions } = useMagnetSearch();
-    const { query, isSearching, hits, siteStatus, elapsedMs, tasks, error, notice, sites } = state;
+    const { query, isSearching, hits, siteStatus, elapsedMs, tasks, error, notice, sites, groupCounts } = state;
 
     const [tab, setTab] = useState<'search' | 'tasks'>('search');
     const [showSites, setShowSites] = useState(false);
-    const [showStatus, setShowStatus] = useState(false);
 
     // 逐个取出：actions 对象每轮都是新引用，直接依赖它会让下面所有 memo 失效
-    const { setQuery, search, downloadHit, saveTorrentFile, setNotice, setError, cancelTask } = actions;
+    const { setQuery, setGroup, search, downloadHit, saveTorrentFile, setNotice, setError, cancelTask } = actions;
 
     const set = useCallback(
         (patch: Partial<typeof query>) => setQuery({ ...query, ...patch }),
@@ -340,7 +340,6 @@ export const TorrentPanel: React.FC<TorrentPanelProps> = ({ onBack }) => {
         [cancelTask]
     );
 
-    const selectedSites = query.sites.length ? query.sites : sites.map((s) => s.id);
     const okSites = siteStatus.filter((s) => s.ok).length;
     const failedSites = siteStatus.filter((s) => !s.ok);
 
@@ -361,7 +360,7 @@ export const TorrentPanel: React.FC<TorrentPanelProps> = ({ onBack }) => {
                 </div>
                 <div className="min-w-0">
                     <div className="text-sm font-bold text-white">磁力下载</div>
-                    <div className="truncate text-[11px] text-slate-500">扇出搜索全部已注册站点，内置引擎直下正片</div>
+                    <div className="truncate text-[11px] text-slate-500">先选定表站或里站，一次扇出本区全部站点，内置引擎直下正片</div>
                 </div>
                 <div className="flex-1" />
                 {tasks.length > 0 && (
@@ -376,13 +375,39 @@ export const TorrentPanel: React.FC<TorrentPanelProps> = ({ onBack }) => {
                 {/* ============ 搜索栏 ============ */}
                 <div className="flex shrink-0 flex-col gap-2">
                     <div className="flex flex-wrap items-center gap-2">
+                        {/* 分区二选一。里站结果永不混进表站列表，切分区即清空结果 */}
+                        <div
+                            className={`flex shrink-0 items-center gap-0.5 rounded-lg p-0.5 ${SURFACE_SUNKEN}`}
+                            role="group"
+                            aria-label="搜索分区"
+                        >
+                            {(['sfw', 'nsfw'] as const).map((g) => {
+                                const on = query.group === g;
+                                return (
+                                    <button
+                                        key={g}
+                                        onClick={() => setGroup(g)}
+                                        aria-pressed={on}
+                                        className={`rounded-md px-2.5 py-1 text-xs font-semibold transition ${FOCUS_RING} ${
+                                            on
+                                                ? g === 'nsfw'
+                                                    ? 'bg-rose-500/20 text-rose-200'
+                                                    : 'bg-cyan-500/20 text-cyan-200'
+                                                : 'text-slate-400 hover:text-slate-200'
+                                        }`}
+                                    >
+                                        {SITE_GROUP_LABELS[g]} {groupCounts[g]}
+                                    </button>
+                                );
+                            })}
+                        </div>
                         <input
                             value={query.q}
                             onChange={(e) => set({ q: e.target.value })}
                             onKeyDown={(e) => {
                                 if (e.key === 'Enter') onSearch();
                             }}
-                            placeholder="输入关键词，一次搜索全部站点"
+                            placeholder={`输入关键词，同时搜索${SITE_GROUP_LABELS[query.group]}的 ${sites.length} 个站点`}
                             aria-label="搜索关键词"
                             className={SEARCH_INPUT}
                         />
@@ -399,14 +424,26 @@ export const TorrentPanel: React.FC<TorrentPanelProps> = ({ onBack }) => {
                                 </option>
                             ))}
                         </select>
+                        <select
+                            value={String(query.minSeeders)}
+                            onChange={(e) => set({ minSeeders: Number(e.target.value) })}
+                            className={SEARCH_SELECT}
+                            title="过滤做种数过低的条目（做种数未知的站点不受影响）"
+                            aria-label="做种数过滤"
+                        >
+                            <option value="0">不限做种</option>
+                            <option value="1">≥ 1</option>
+                            <option value="5">≥ 5</option>
+                            <option value="20">≥ 20</option>
+                        </select>
                         <button
                             onClick={() => setShowSites((v) => !v)}
                             className={`${BTN_GHOST} ${showSites ? 'border-cyan-400/40 text-cyan-300' : ''}`}
-                            title="选择要搜索的站点"
+                            title="查看本区站点与逐站结果"
                             aria-expanded={showSites}
                         >
                             <SlidersHorizontal className="h-3 w-3" />
-                            {query.sites.length ? `${query.sites.length}/${sites.length} 站` : `全部 ${sites.length} 站`}
+                            {SITE_GROUP_LABELS[query.group]} {sites.length} 站
                         </button>
                         <button onClick={onSearch} disabled={isSearching} className={SEARCH_PRIMARY}>
                             {isSearching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
@@ -414,52 +451,36 @@ export const TorrentPanel: React.FC<TorrentPanelProps> = ({ onBack }) => {
                         </button>
                     </div>
 
-                    {/* 站点多选：由引擎注册表驱动，注册表里加站点后这里自动出现，无需改 UI */}
+                    {/* 分区内的子站点：只读清单。挑单个站点这件事已经不存在了——
+                        一次搜索打的是整个分区，所以这里只回答"这个分区有哪些站、这一轮逐站结果如何" */}
                     {showSites && (
-                        <div className={`flex flex-wrap items-center gap-1.5 rounded-xl p-2 ${SURFACE_SUNKEN}`}>
-                            <span className="px-1 text-[11px] text-slate-500">搜索范围</span>
-                            <button
-                                onClick={() => set({ sites: [] })}
-                                className={`${BTN_GHOST} ${query.sites.length === 0 ? 'border-cyan-400/40 text-cyan-300' : ''}`}
-                            >
-                                全部
-                            </button>
+                        <div className={`flex flex-col gap-1.5 rounded-xl p-2 ${SURFACE_SUNKEN}`}>
+                            <div className="text-[11px] text-slate-500">
+                                {SITE_GROUP_LABELS[query.group]} 共 {sites.length} 个站点，全部参与搜索
+                            </div>
                             {sites.map((s) => {
-                                const on = selectedSites.includes(s.id);
+                                const st = siteStatus.find((x: SearchSiteStatus) => x.site === s.id);
                                 return (
-                                    <button
-                                        key={s.id}
-                                        onClick={() => actions.toggleSite(s.id)}
-                                        className={`${BTN_GHOST} ${on ? 'border-cyan-400/40 bg-cyan-400/10 text-cyan-200' : 'opacity-60'}`}
-                                        title={`${s.homepage}${s.kinds.length ? ` · ${s.kinds.join(' / ')}` : ''}`}
-                                    >
-                                        {s.label}
-                                        {s.adult && <span className="text-rose-400/80">18+</span>}
-                                    </button>
+                                    <div key={s.id} className="flex items-center gap-2 text-[11px]">
+                                        <span
+                                            className={`w-3 shrink-0 ${
+                                                st ? (st.ok ? 'text-emerald-400' : 'text-rose-400') : 'text-slate-600'
+                                            }`}
+                                        >
+                                            {st ? (st.ok ? '●' : '×') : '·'}
+                                        </span>
+                                        <span className="w-28 shrink-0 truncate text-slate-200" title={s.homepage}>
+                                            {s.label}
+                                        </span>
+                                        {s.kinds.length > 0 && (
+                                            <span className="shrink-0 text-slate-500">{s.kinds.join(' / ')}</span>
+                                        )}
+                                        <span className="min-w-0 flex-1 truncate text-slate-500" title={st && !st.ok ? st.error : undefined}>
+                                            {st ? (st.ok ? `${st.count} 条 · ${st.elapsedMs}ms` : st.error || '失败') : '未搜'}
+                                        </span>
+                                    </div>
                                 );
                             })}
-                            <div className="flex-1" />
-                            <label className="flex items-center gap-1.5 text-[11px] text-slate-400">
-                                <input
-                                    type="checkbox"
-                                    checked={query.includeAdult}
-                                    onChange={(e) => set({ includeAdult: e.target.checked })}
-                                    className="accent-cyan-500"
-                                />
-                                包含成人站点
-                            </label>
-                            <select
-                                value={String(query.minSeeders)}
-                                onChange={(e) => set({ minSeeders: Number(e.target.value) })}
-                                className={SEARCH_SELECT}
-                                title="过滤做种数过低的条目（做种数未知的站点不受影响）"
-                                aria-label="做种数过滤"
-                            >
-                                <option value="0">不限做种</option>
-                                <option value="1">≥ 1</option>
-                                <option value="5">≥ 5</option>
-                                <option value="20">≥ 20</option>
-                            </select>
                         </div>
                     )}
                 </div>
@@ -478,37 +499,22 @@ export const TorrentPanel: React.FC<TorrentPanelProps> = ({ onBack }) => {
                     </div>
                 )}
 
-                {/* 各站明细：扇出搜索必须让用户看到「哪几站没搜到、为什么」，
-              否则无法区分「没有这个资源」与「有个站挂了」 */}
+                {/* 逐站明细收在上面的只读清单里，这里只留一行总览：扇出搜索必须让用户
+                    不展开也知道「有几站挂了」，否则分不清「没这个资源」与「有个站没搜到」 */}
                 {siteStatus.length > 0 && (
-                    <div className="shrink-0">
-                        <button
-                            onClick={() => setShowStatus((v) => !v)}
-                            className={`flex items-center gap-2 rounded text-[11px] text-slate-400 transition-colors hover:text-slate-200 ${FOCUS_RING}`}
-                            aria-expanded={showStatus}
-                        >
-                            <CheckCircle2 className={`h-3.5 w-3.5 ${failedSites.length ? 'text-amber-400' : 'text-emerald-400'}`} />
-                            <span>
-                                {okSites}/{siteStatus.length} 站返回结果
-                                {failedSites.length > 0 && <span className="text-rose-400"> · {failedSites.length} 站失败</span>}
-                                {elapsedMs > 0 && <span className="text-slate-500"> · {elapsedMs}ms</span>}
-                            </span>
-                            <span className="text-slate-600">{showStatus ? '收起' : '明细'}</span>
-                        </button>
-                        {showStatus && (
-                            <div className={`mt-1.5 flex flex-col gap-1 rounded-lg p-2 ${SURFACE_SUNKEN}`}>
-                                {siteStatus.map((s: SearchSiteStatus) => (
-                                    <div key={s.site} className="flex items-center gap-2 text-[11px]">
-                                        <span className={s.ok ? 'text-emerald-400' : 'text-rose-400'}>{s.ok ? '●' : '×'}</span>
-                                        <span className="w-28 shrink-0 truncate text-slate-300" title={s.label}>
-                                            {s.label}
-                                        </span>
-                                        <span className="text-slate-500">{s.ok ? `${s.count} 条 · ${s.elapsedMs}ms` : s.error || '失败'}</span>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
+                    <button
+                        onClick={() => setShowSites((v) => !v)}
+                        className={`flex shrink-0 items-center gap-2 rounded text-[11px] text-slate-400 transition-colors hover:text-slate-200 ${FOCUS_RING}`}
+                        aria-expanded={showSites}
+                    >
+                        <CheckCircle2 className={`h-3.5 w-3.5 ${failedSites.length ? 'text-amber-400' : 'text-emerald-400'}`} />
+                        <span>
+                            {okSites}/{siteStatus.length} 站返回结果
+                            {failedSites.length > 0 && <span className="text-rose-400"> · {failedSites.length} 站失败</span>}
+                            {elapsedMs > 0 && <span className="text-slate-500"> · {elapsedMs}ms</span>}
+                        </span>
+                        <span className="text-slate-600">{showSites ? '收起逐站' : '展开逐站'}</span>
+                    </button>
                 )}
 
                 {/* ============ 子标签 ============ */}
@@ -547,7 +553,7 @@ export const TorrentPanel: React.FC<TorrentPanelProps> = ({ onBack }) => {
                         {hits.length === 0 && !isSearching && (
                             <EmptyHint icon={<Search className="h-6 w-6" />} title="还没有结果">
                                 <p className="max-w-md text-xs leading-5 text-slate-500">
-                                    在上方输入关键词，引擎会同时搜索全部 {sites.length} 个站点并汇总结果。
+                                    先选定表站或里站，再输入关键词，引擎会同时搜索本区 {sites.length} 个站点并汇总结果。
                                     <br />
                                     点「下载」直接用内置引擎下正片，无需迅雷 / qBittorrent。
                                 </p>

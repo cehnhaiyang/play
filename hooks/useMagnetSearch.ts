@@ -7,21 +7,23 @@ import {
     TorrentStartOptions,
     TorrentTaskSnapshot,
     SiteDescriptor,
+    SiteGroup,
     getElectronAPI,
 } from '../meta';
 import { loadJSON, saveJSON } from '../const';
-import { search as runSearch, listSites } from '../services/SearchService';
+import { search as runSearch, sitesFor } from '../services/SearchService';
 
 /**
  * ============================================================================
  * useMagnetSearch — 磁力搜索
  * ============================================================================
  *
- * 一次关键词 → 引擎扇出查询所有已注册站点 → 汇总结果。
+ * 关键词 + 分区（表站 / 里站）→ 引擎扇出查询该分区全部站点 → 汇总结果。
  *
  * 与旧 useSukebei 的区别不只是改名：旧版把「站点」当成一个下拉选项，
- * 一次只能搜一个站，且站点名写死在 hook 里。这里站点是引擎注册表里的插口，
- * 用户可以多选或全选，结果统一汇总并标注来源。
+ * 一次只能搜一个站。现在选的是**分区**而不是单个站点——分区内所有站点一起搜，
+ * 子站点在 UI 里只能查看（名称/擅长内容/本次成败），不能逐个勾选。
+ * 里站结果永远不会混进表站列表，这是分区语义的全部意义。
  *
  * 搜索走 services/SearchService，用渲染层 fetch 直接请求各站点——
  * 代理配在 Chromium 会话上，因此自动生效，不需要 IPC 中转。
@@ -33,21 +35,30 @@ import { search as runSearch, listSites } from '../services/SearchService';
 
 export interface MagnetSearchState {
     q: string;
-    /** 勾选的站点 id；空数组 = 全部站点 */
-    sites: string[];
+    /** 搜索分区：表站 or 里站。必选，UI 上是一组二选一分段控件 */
+    group: SiteGroup;
     sort: SearchSort;
     minSeeders: number;
-    /** 是否包含成人站点 */
-    includeAdult: boolean;
 }
 
 const DEFAULT_QUERY: MagnetSearchState = {
     q: '',
-    sites: [],           // 空 = 全部
+    group: 'sfw',
     sort: 'seeders',
     minSeeders: 0,
-    includeAdult: true,
 };
+
+/**
+ * 落盘条件里混着历史版本：早期存过 sites: string[]（站点多选）与 includeAdult
+ * （成人站点开关），那两个字段的语义已经没了。这里按白名单取值，
+ * 旧键不写进 state——否则 UI 拿到一个没人读的字段还以为它在生效。
+ */
+const sanitizeQuery = (saved: Partial<MagnetSearchState> | null): MagnetSearchState => ({
+    q: typeof saved?.q === 'string' ? saved.q : DEFAULT_QUERY.q,
+    group: saved?.group === 'nsfw' ? 'nsfw' : 'sfw',
+    sort: saved?.sort || DEFAULT_QUERY.sort,
+    minSeeders: Number(saved?.minSeeders) || DEFAULT_QUERY.minSeeders,
+});
 
 export const SORT_OPTIONS: { value: SearchSort; label: string }[] = [
     { value: 'seeders', label: '做种数' },
@@ -58,14 +69,17 @@ export const SORT_OPTIONS: { value: SearchSort; label: string }[] = [
 
 export const useMagnetSearch = () => {
     // 查询条件与结果落盘：重进回到上次搜的那页
-    const [query, setQuery] = useState<MagnetSearchState>(() => {
-        const saved = loadJSON<Partial<MagnetSearchState>>('search-query', {});
-        return { ...DEFAULT_QUERY, ...(saved || {}) };
-    });
+    const [query, setQuery] = useState<MagnetSearchState>(() =>
+        sanitizeQuery(loadJSON<Partial<MagnetSearchState>>('search-query', {}))
+    );
     const [isSearching, setIsSearching] = useState(false);
     const [hits, setHits] = useState<SearchHit[]>(() => {
         const saved = loadJSON<SearchHit[]>('search-hits', []);
-        return Array.isArray(saved) ? saved.filter((h) => h && h.id && h.site).slice(0, 200) : [];
+        if (!Array.isArray(saved)) return [];
+        // 结果列表只能含本区站点：旧版本落盘过"表里混排"的结果，原样恢复会让里站
+        // 条目出现在表站标题下，正是这次分区改造要消除的东西。
+        const inGroup = new Set(sitesFor(query.group).map((s) => s.id));
+        return saved.filter((h) => h && h.id && h.site && inGroup.has(h.site)).slice(0, 200);
     });
     /** 每站状态：哪几站成功、哪几站失败及原因 */
     const [siteStatus, setSiteStatus] = useState<SearchSiteStatus[]>([]);
@@ -81,8 +95,14 @@ export const useMagnetSearch = () => {
     const queryRef = useRef(query);
     queryRef.current = query;
 
-    /** 已注册站点（来自引擎注册表，UI 据此渲染站点选择） */
-    const sites: SiteDescriptor[] = useMemo(() => listSites(), []);
+    /** 当前分区内的站点（引擎注册表驱动，UI 只读展示） */
+    const group = query.group;
+    const sites: SiteDescriptor[] = useMemo(() => sitesFor(group), [group]);
+    /** 两个分区各自的站点数：分段控件要显示"表站 5 / 里站 3" */
+    const groupCounts = useMemo(
+        () => ({ sfw: sitesFor('sfw').length, nsfw: sitesFor('nsfw').length }),
+        []
+    );
 
     /* ---------------------------- BT 任务进度 ---------------------------- */
 
@@ -132,10 +152,9 @@ export const useMagnetSearch = () => {
         try {
             const payload: SearchQuery = {
                 q: keyword,
-                sites: next.sites.length ? next.sites : undefined,
+                group: next.group,
                 sort: next.sort,
                 minSeeders: next.minSeeders,
-                includeAdult: next.includeAdult,
             };
             const res = await runSearch(payload);
             setSiteStatus(res.sites || []);
@@ -264,18 +283,17 @@ export const useMagnetSearch = () => {
         await api.torrent.openFolder(target);
     }, []);
 
-    /** 切换单个站点的勾选状态 */
-    const toggleSite = useCallback((siteId: string) => {
-        setQuery((prev) => {
-            const selected = prev.sites.length ? prev.sites : listSites().map((s) => s.id);
-            const next = selected.includes(siteId)
-                ? selected.filter((id) => id !== siteId)
-                : [...selected, siteId];
-            // 全选等价于"不限定"，回到空数组以保持语义简单
-            const all = listSites().map((s) => s.id);
-            const normalized = next.length === all.length ? [] : next;
-            return { ...prev, sites: normalized };
-        });
+    /**
+     * 切分区（表站 / 里站）。切换即清空结果与各站状态：
+     * 列表里留着上一个分区的条目，等于把"里站结果混进表站列表"换了个方式发生。
+     */
+    const setGroup = useCallback((next: SiteGroup) => {
+        if (queryRef.current.group === next) return;
+        setQuery({ ...queryRef.current, group: next });
+        setHits([]);
+        setSiteStatus([]);
+        setError(null);
+        setNotice(null);
     }, []);
 
     const clearResults = useCallback(() => {
@@ -296,9 +314,11 @@ export const useMagnetSearch = () => {
             error,
             notice,
             sites,
+            groupCounts,
         },
         actions: {
             setQuery,
+            setGroup,
             search,
             downloadHit,
             saveTorrentFile,
@@ -307,7 +327,6 @@ export const useMagnetSearch = () => {
             resumeTask,
             openFolder,
             refreshTasks,
-            toggleSite,
             clearResults,
             setError,
             setNotice,

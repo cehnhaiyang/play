@@ -16,14 +16,15 @@ const path = require('path');
 const ROOT = './build';
 const FIXTURES = path.join(__dirname, 'fixtures');
 
-const util = require(`${ROOT}/services/SearchService/util`);
-const engine = require(`${ROOT}/services/SearchService/engine`);
-const registry = require(`${ROOT}/services/SearchService/registry`);
-const { apibayProvider } = require(`${ROOT}/services/SearchService/providers/apibay`);
-const { acgripProvider } = require(`${ROOT}/services/SearchService/providers/acgrip`);
-const { dmhyProvider } = require(`${ROOT}/services/SearchService/providers/dmhy`);
-const { animetoshoProvider } = require(`${ROOT}/services/SearchService/providers/animetosho`);
-const { nyaaProvider, sukebeiProvider } = require(`${ROOT}/services/SearchService/providers/nyaa`);
+// 归一化工具、引擎、注册表与全部 provider 都在同一个模块里
+const svc = require(`${ROOT}/services/SearchService`);
+const util = svc;
+const engine = svc;
+const registry = svc;
+const {
+    apibayProvider, acgripProvider, dmhyProvider, animetoshoProvider,
+    nyaaProvider, sukebeiProvider,
+} = svc;
 
 let pass = 0;
 const fails = [];
@@ -70,6 +71,17 @@ const fixture = (name) => fs.readFileSync(path.join(FIXTURES, name), 'utf8');
 /** 用真实快照跑一个 provider */
 const parseFixture = (provider, file, query) =>
     provider.parse(fixture(file), { url: provider.buildSearchUrl(query || 'x'), query: query || 'x' });
+
+/**
+ * 页面里数据行的地面真值：整页去重后的 /view/<id> 个数。
+ *
+ * 故意不复用解析器的任何判据（行切分、class、<tr> 结构都不看），
+ * 否则"解析器只认 class=\"default\"，把可信源整批丢掉"这类漏行 bug
+ * 会被同一个错误判据自证清白——当年就是靠 `assert(hits.length > 0)`
+ * 混过去的：nyaa 快照 75 行只解析出 66 行，测试全绿。
+ */
+const countPageRows = (body) =>
+    new Set([...body.matchAll(/href="(?:https?:\/\/[^"/]+)?\/view\/(\d+)"/gi)].map((m) => m[1])).size;
 
 /* ------------------------------------------------------------------ */
 /* 1. 归一化工具                                                        */
@@ -201,8 +213,82 @@ const runParsers = () => {
         assert(h.torrent.startsWith('https://sukebei.nyaa.si/download/'),
             `种子直链应指向 .si 域，得到 ${h.torrent}`);
         assert(h.viewUrl.startsWith('https://sukebei.nyaa.site/view/'),
-            `详情页应在 .site 域，得到 ${h.viewUrl}`);
+            `这份旧快照的详情链是 .site 绝对地址，应原样保留，得到 ${h.viewUrl}`);
         assert(h.magnet.startsWith('magnet:'), '应有磁链');
+    });
+
+    /**
+     * 漏行回归：数据行在站点侧按状态上色（default 普通 / success 可信上传组 /
+     * danger 另一种标记），旧行定位只认 default，于是可信源整批消失——
+     * sukebei 同人志分类页 75 行全是 success，解析出 0 行。
+     * 现在拿整页 /view/<id> 去重数当地面真值，逐份快照比对行数。
+     */
+    check('Nyaa 系: 解析行数等于页面数据行数（含 success/danger 状态行）', () => {
+        const cases = [
+            ['nyaa.html', nyaaProvider],
+            ['sukebei.html', sukebeiProvider],
+            ['sukebei_si.html', sukebeiProvider],
+        ];
+        for (const [file, provider] of cases) {
+            const body = fixture(file);
+            const expected = countPageRows(body);
+            const hits = provider.parse(body, { url: provider.buildSearchUrl('x'), query: 'x' });
+            assert(expected > 0, `${file}: 地面真值为 0，快照本身有问题`);
+            assert(hits.length === expected,
+                `${file}: 应解析 ${expected} 行（页面数据行数），实际 ${hits.length} —— 有行被丢掉`);
+            const ids = hits.map((h) => h.id);
+            assert(new Set(ids).size === ids.length, `${file}: 行 id 不该重复`);
+        }
+    });
+    check('Nyaa 系: 三份快照的行 class 构成确实不同（否则上一条用例形同虚设）', () => {
+        const classOf = (file) => {
+            const b = fixture(file);
+            const set = new Set([...b.matchAll(/<tr[^>]*class="([^"]*)"/gi)].map((m) => m[1]));
+            return Array.from(set).sort().join(',');
+        };
+        const nyaa = classOf('nyaa.html');
+        const siDoujin = classOf('sukebei_si.html');
+        assert(/default/.test(nyaa) && /success/.test(nyaa) && /danger/.test(nyaa),
+            `nyaa.html 应同时含三种状态行，得到 "${nyaa}"`);
+        assert(siDoujin === 'success',
+            `sukebei_si.html 应整页都是可信源行（这正是旧代码解析出 0 行的那类页），得到 "${siDoujin}"`);
+    });
+    /**
+     * 死种行只有 magnet、没有 /download/<id>.torrent（实测 sukebei `?q=nitroplus`
+     * 14 行里 11 行如此）。旧代码按 id 硬拼一个地址，那 11 个必然 404——
+     * 每次下载先白打一发请求才回落到 magnet。现在行内没有就留空，
+     * 由调用方按"只有 magnet"处理（hook 里 downloadHit / saveTorrentFile 各有兜底）。
+     */
+    check('Nyaa 系: 行内没有种子直链时留空，不按 id 伪造地址', () => {
+        const magnet = `magnet:?xt=urn:btih:${'a'.repeat(40)}`;
+        const row = '<tr class="success">'
+            + '<td><a href="/?c=1_2" title="Art - Doujinshi"><img class="category-icon" alt="Art - Doujinshi"></a></td>'
+            + '<td colspan="2"><a href="/view/4249429" title="只有磁链的死种">只有磁链的死种</a></td>'
+            + `<td class="text-center"><a href="${magnet}">Magnet</a></td>`
+            + '<td class="text-center">1.4 GiB</td>'
+            + '<td class="text-center" data-timestamp="1739318040">2025-02-12 00:54</td>'
+            + '<td class="text-center">3</td><td class="text-center">0</td><td class="text-center">1098</td>'
+            + '</tr>';
+        const hits = nyaaProvider.parse(`<table>${row}</table>`, { url: '', query: 'x' });
+        assert(hits.length === 1, `应解析出 1 条，得到 ${hits.length}`);
+        assert(hits[0].torrent === '', `行内没有直链就不该伪造，得到 "${hits[0].torrent}"`);
+        assert(hits[0].magnet === magnet, `magnet 应照常解析，得到 "${hits[0].magnet}"`);
+        assert(hits[0].infoHash === 'a'.repeat(40), 'info hash 应从 magnet 里取到（跨站去重要用）');
+    });
+    check('sukebei: .si 快照解析出日文同人志标题与 .si 详情链', () => {
+        const hits = parseFixture(sukebeiProvider, 'sukebei_si.html', '同人誌');
+        assert(hits.length > 0, '应解析出条目');
+        const h = hits[0];
+        assert(/[぀-ヿ一-鿿]/.test(h.title), `标题应含日文，得到 "${h.title}"`);
+        assert(h.viewUrl.startsWith('https://sukebei.nyaa.si/view/'), `详情页应在 .si 域，得到 ${h.viewUrl}`);
+        assert(h.category.includes('Doujinshi'), `分类应是同人志，得到 "${h.category}"`);
+        assert(h.seeders > 0, `做种数应解析出，得到 ${h.seeders}`);
+    });
+    check('sukebei: 搜索地址走 .si（.site 镜像对日文查询静默返回空）', () => {
+        const url = sukebeiProvider.buildSearchUrl('nitroplus');
+        assert(url === 'https://sukebei.nyaa.si/?q=nitroplus', `得到 ${url}`);
+        assert(!sukebeiProvider.descriptor.homepage.includes('.site'),
+            `站点主页应为 .si，得到 ${sukebeiProvider.descriptor.homepage}`);
     });
     check('sukebei 与 nyaa 用同一份解析逻辑（只是配置不同）', () => {
         // 两个 provider 由 createNyaaProvider 各自创建，所以不能比较函数引用；
@@ -270,6 +356,29 @@ const runParsers = () => {
         assert(withPeers[0].leechers !== util.UNKNOWN, '吸血数也该解析出');
     });
 
+    /**
+     * 漏行回归：详情页 id 在站点侧有三种形态，实测同一页搜索结果里就混着——
+     * frieren 快照 75 条 = `.n<数字>` 60 + `.k<数字>` 14 + `.<纯数字>` 1。
+     * 旧代码只认 `.n`，另外 15 条整条静默消失（`assert(hits.length > 0)` 照样绿）。
+     * 地面真值用页面里唯一的 /storage/torrent/<hash> 个数，不复用解析器的判据。
+     */
+    check('animetosho: 解析条数等于页面唯一种子文件数（三种 id 形态都要吃到）', () => {
+        const body = fixture('animetosho.html');
+        const hits = parseFixture(animetoshoProvider, 'animetosho.html', 'frieren');
+        const pageHashes = new Set(
+            [...body.matchAll(/\/storage\/torrent\/([0-9a-f]{40})/g)].map((m) => m[1])
+        );
+        assert(pageHashes.size > 0, '快照里应有一种种子文件，否则用例形同虚设');
+        assert(hits.length === pageHashes.size,
+            `页面有 ${pageHashes.size} 个唯一种子文件，只解析出 ${hits.length} 条 —— 有行被丢掉`);
+        assert(new Set(hits.map((h) => h.id)).size === hits.length, 'id 不该重复');
+        const hasN = hits.some((h) => /^n\d+$/.test(h.id));
+        const hasK = hits.some((h) => /^k\d+$/.test(h.id));
+        const hasBare = hits.some((h) => /^\d+$/.test(h.id));
+        assert(hasN && hasK && hasBare,
+            `三种 id 形态都应解析出，得到 n=${hasN} k=${hasK} 纯数字=${hasBare}`);
+    });
+
     check('所有解析器对垃圾输入都返回空数组而不抛错', () => {
         const providers = registry.allProviders();
         for (const p of providers) {
@@ -287,7 +396,7 @@ const runParsers = () => {
 };
 
 /* ------------------------------------------------------------------ */
-/* 3. 引擎：扇出 / 容错 / 去重 / 排序                                    */
+/* 3. 引擎：分区扇出 / 容错 / 去重 / 排序                                    */
 /* ------------------------------------------------------------------ */
 
 /** 假 transport：按 URL 里的域名返回对应快照，可注入失败 */
@@ -303,8 +412,12 @@ const makeTransport = (opts) => {
                     return { ok: false, status: rule.status || 0, body: '', finalUrl: req.url, error: rule.error || '注入的失败' };
                 }
             }
+            // 按主机名精确匹配，不用 includes：'sukebei.nyaa.si' 里含子串 'nyaa.si'，
+            // 用 includes 会让里站请求拿到 nyaa 的快照（此前正是这样：两站 HTML 同构，
+            // 照样解析出条目，测试全绿，但 sukebei 专属形态从没被覆盖过）。
             const table = [
                 ['nyaa.si', 'nyaa.html'],
+                ['sukebei.nyaa.si', 'sukebei_si.html'],
                 ['sukebei.nyaa.site', 'sukebei.html'],
                 ['apibay.org', 'apibay.json'],
                 ['acg.rip', 'acgrip.html'],
@@ -312,7 +425,13 @@ const makeTransport = (opts) => {
                 ['animetosho.org', 'animetosho.html'],
             ];
             for (const [host, file] of table) {
-                if (req.url.includes(host)) {
+                let hostname = '';
+                try {
+                    hostname = new URL(req.url).hostname;
+                } catch (_e) {
+                    continue;
+                }
+                if (hostname === host) {
                     return { ok: true, status: 200, body: fixture(file), finalUrl: req.url };
                 }
             }
@@ -322,13 +441,13 @@ const makeTransport = (opts) => {
 };
 
 const runEngine = async () => {
-    // 扇出：一次搜索打全部站点
+    // 扇出：一次搜索打满所选分区
     const t1 = makeTransport();
-    const r1 = await engine.search({ q: 'frieren', includeAdult: true }, t1);
-    check('引擎: 一次搜索扇出到全部已注册站点', () => {
+    const r1 = await engine.search({ q: 'frieren', group: 'sfw' }, t1);
+    check('引擎: 一次搜索扇出到本分区全部站点', () => {
         const ids = r1.sites.map((s) => s.site).sort();
-        const expected = registry.listSites().map((s) => s.id).sort();
-        assert(ids.join(',') === expected.join(','), `应查询全部站点，得到 ${ids.join(',')}`);
+        const expected = registry.sitesFor('sfw').map((s) => s.id).sort();
+        assert(ids.join(',') === expected.join(','), `应查询本分区全部站点，得到 ${ids.join(',')}`);
         assert(t1.calls.length === expected.length, `应发出 ${expected.length} 个请求，实际 ${t1.calls.length}`);
     });
     check('引擎: 汇总结果来自多个站点且带站点章', () => {
@@ -347,7 +466,7 @@ const runEngine = async () => {
 
     // 容错：一个站挂了，其余照常
     const t2 = makeTransport({ fail: [{ match: 'apibay.org', error: '连接被重置' }] });
-    const r2 = await engine.search({ q: 'frieren' }, t2);
+    const r2 = await engine.search({ q: 'frieren', group: 'sfw' }, t2);
     check('引擎: 单站失败不影响其余站点', () => {
         assert(r2.success, '整体应仍为成功');
         assert(r2.hits.length > 0, '其余站点的结果应照常返回');
@@ -361,12 +480,12 @@ const runEngine = async () => {
         assert(!r2.hits.some((h) => h.site === 'apibay'), 'apibay 失败了，不该有它的条目');
     });
     check('引擎: message 汇总成功/失败站数', () => {
-        assert(/5\/6/.test(r2.message) || /失败/.test(r2.message), `message 应说明失败情况，得到 "${r2.message}"`);
+        assert(/4\/5/.test(r2.message) || /失败/.test(r2.message), `message 应说明失败情况，得到 "${r2.message}"`);
     });
 
     // 全部失败也不能抛
     const t3 = makeTransport({ fail: [{ match: '' }] });
-    const r3 = await engine.search({ q: 'frieren' }, t3);
+    const r3 = await engine.search({ q: 'frieren', group: 'sfw' }, t3);
     check('引擎: 全部站点失败时仍返回结构化结果而不抛错', () => {
         assert(r3.success, '整体仍应返回 success');
         assert(r3.hits.length === 0, '应无结果');
@@ -374,28 +493,54 @@ const runEngine = async () => {
         assert(r3.sites.every((s) => s.error), '每站都应有失败原因');
     });
 
-    // 站点筛选
+    // 分区隔离：一次搜索只打一个分区，跨区站点一个请求都不发
     const t4 = makeTransport();
-    const r4 = await engine.search({ q: 'frieren', sites: ['apibay'] }, t4);
-    check('引擎: 指定站点时只查该站', () => {
-        assert(t4.calls.length === 1, `应只发 1 个请求，实际 ${t4.calls.length}`);
-        assert(t4.calls[0].includes('apibay.org'), `请求地址不对：${t4.calls[0]}`);
-        assert(r4.hits.every((h) => h.site === 'apibay'), '结果应只来自 apibay');
-    });
-    check('引擎: 未知站点 id 被忽略而不报错', () => {
-        const t = makeTransport();
-        return engine.search({ q: 'x', sites: ['apibay', '不存在的站'] }, t).then((r) => {
-            assert(r.success, '应正常返回');
-            assert(t.calls.length === 1, '未知 id 应被忽略');
+    const rSfw = await engine.search({ q: 'frieren', group: 'sfw' }, t4);
+    check('引擎: 表站搜索不碰里站站点', () => {
+        const sfw = registry.sitesFor('sfw').map((s) => s.id);
+        const nsfw = registry.sitesFor('nsfw').map((s) => s.id);
+        assert(nsfw.length > 0, '里站分区应有站点，否则这条用例形同虚设');
+        assert(rSfw.sites.every((s) => sfw.includes(s.site)),
+            `状态里只该有表站，得到 ${rSfw.sites.map((s) => s.site).join(',')}`);
+        assert(!rSfw.hits.some((h) => nsfw.includes(h.site)), '结果里不该混进里站条目');
+        nsfw.forEach((id) => {
+            const host = registry.getProvider(id).descriptor.homepage.replace(/^https?:\/\//, '');
+            assert(!t4.calls.some((u) => u.includes(host)), `不该向里站 ${id}（${host}）发请求`);
         });
     });
 
-    // 成人过滤
     const t5 = makeTransport();
-    const r5 = await engine.search({ q: 'frieren', includeAdult: false }, t5);
-    check('引擎: includeAdult=false 时不请求成人站点', () => {
-        assert(!t5.calls.some((u) => u.includes('sukebei')), '不该请求 sukebei');
-        assert(!r5.sites.some((s) => s.site === 'sukebei'), '状态里不该有 sukebei');
+    const rNsfw = await engine.search({ q: 'frieren', group: 'nsfw' }, t5);
+    check('引擎: 里站搜索只打里站分区', () => {
+        const expected = registry.sitesFor('nsfw').map((s) => s.id).sort();
+        const got = rNsfw.sites.map((s) => s.site).sort();
+        assert(got.join(',') === expected.join(','), `应只查询里站，得到 ${got.join(',')}`);
+        assert(t5.calls.length === expected.length, `应发出 ${expected.length} 个请求，实际 ${t5.calls.length}`);
+        assert(rNsfw.hits.every((h) => expected.includes(h.site)), '结果应只来自里站');
+    });
+
+    // 分区必选：没选就不搜，并给出明确原因，而不是静默回落到某个分区
+    const tNoGroup = makeTransport();
+    const rNoGroup = await engine.search({ q: 'frieren' }, tNoGroup);
+    check('引擎: 未选分区时直接失败且不发请求', () => {
+        assert(!rNoGroup.success, '应为失败');
+        assert(rNoGroup.message && rNoGroup.message.includes('表站'), `应提示先选分区，得到 "${rNoGroup.message}"`);
+        assert(tNoGroup.calls.length === 0, `不应发出任何请求，实际 ${tNoGroup.calls.length}`);
+        assert(rNoGroup.hits.length === 0 && rNoGroup.sites.length === 0, '应无结果与站点状态');
+    });
+
+    // 分区模型的唯一支点：adult 是唯一判据，不存在第二处可能与之矛盾的登记
+    check('注册表: 分区只由 adult 决定，两区无重叠且并集为全部站点', () => {
+        const all = registry.listSites();
+        const sfw = registry.sitesFor('sfw').map((s) => s.id);
+        const nsfw = registry.sitesFor('nsfw').map((s) => s.id);
+        assert(sfw.length + nsfw.length === all.length,
+            `两区之和应等于站点总数，${sfw.length}+${nsfw.length} vs ${all.length}`);
+        assert(!sfw.some((id) => nsfw.includes(id)), '同一站点不该同时属于两个分区');
+        all.forEach((s) => {
+            assert(registry.groupOf(s) === (s.adult ? 'nsfw' : 'sfw'), `${s.id}: 分区应只由 adult 决定`);
+        });
+        assert(nsfw.length > 0, '里站分区不应为空');
     });
 
     // 空关键词
@@ -410,7 +555,7 @@ const runEngine = async () => {
     check('引擎: 跨站去重按 info hash 合并同一资源', () => {
         // nyaa 与 animetosho 索引大量重叠，真实快照里就能观察到
         const t = makeTransport();
-        return engine.search({ q: 'frieren', sites: ['nyaa', 'animetosho'] }, t).then((r) => {
+        return engine.search({ q: 'frieren', group: 'sfw' }, t).then((r) => {
             const hashes = r.hits.filter((h) => h.infoHash).map((h) => h.infoHash);
             const unique = new Set(hashes);
             assert(hashes.length === unique.size, `去重后 info hash 应唯一，${hashes.length} vs ${unique.size}`);
@@ -420,7 +565,7 @@ const runEngine = async () => {
     // 排序
     check('引擎: 按做种数降序，未知值排在末尾', () => {
         const t = makeTransport();
-        return engine.search({ q: 'frieren', sort: 'seeders' }, t).then((r) => {
+        return engine.search({ q: 'frieren', group: 'sfw', sort: 'seeders' }, t).then((r) => {
             const known = r.hits.filter((h) => h.seeders !== util.UNKNOWN);
             for (let i = 1; i < known.length; i++) {
                 assert(known[i - 1].seeders >= known[i].seeders,
@@ -437,7 +582,7 @@ const runEngine = async () => {
     });
     check('引擎: 按体积降序', () => {
         const t = makeTransport();
-        return engine.search({ q: 'frieren', sort: 'size' }, t).then((r) => {
+        return engine.search({ q: 'frieren', group: 'sfw', sort: 'size' }, t).then((r) => {
             const known = r.hits.filter((h) => h.sizeBytes !== util.UNKNOWN);
             for (let i = 1; i < known.length; i++) {
                 assert(known[i - 1].sizeBytes >= known[i].sizeBytes, '体积应降序');
@@ -491,7 +636,7 @@ const runEngine = async () => {
     // 单站上限
     check('引擎: limitPerSite 限制单站条数', () => {
         const t = makeTransport();
-        return engine.search({ q: 'frieren', limitPerSite: 3 }, t).then((r) => {
+        return engine.search({ q: 'frieren', group: 'sfw', limitPerSite: 3 }, t).then((r) => {
             const bySite = {};
             for (const h of r.hits) bySite[h.site] = (bySite[h.site] || 0) + 1;
             for (const [site, n] of Object.entries(bySite)) {
@@ -503,7 +648,7 @@ const runEngine = async () => {
     // 做种数过滤：未知不应被当成 0 滤掉
     check('引擎: minSeeders 过滤时保留做种数未知的条目', () => {
         const t = makeTransport();
-        return engine.search({ q: 'frieren', minSeeders: 5 }, t).then((r) => {
+        return engine.search({ q: 'frieren', group: 'sfw', minSeeders: 5 }, t).then((r) => {
             const unknownKept = r.hits.some((h) => h.seeders === util.UNKNOWN);
             assert(unknownKept, '做种数未知的条目（acg.rip/dmhy）不该被 minSeeders 滤掉');
             for (const h of r.hits) {

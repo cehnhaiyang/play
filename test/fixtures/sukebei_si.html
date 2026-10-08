@@ -1,0 +1,1839 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<title>Browse :: Sukebei</title>
+
+		<meta name="viewport" content="width=480px">
+		<meta http-equiv="X-UA-Compatible" content="IE=edge">
+		<link rel="shortcut icon" type="image/png" href="/static/favicon.png">
+		<link rel="icon" type="image/png" href="/static/favicon.png">
+		<link rel="mask-icon" href="/static/pinned-tab.svg" color="#3582F7">
+		<link rel="alternate" type="application/rss+xml" href="https://sukebei.nyaa.si/?page=rss&amp;c=1_2" />
+
+		<meta property="og:site_name" content="Sukebei">
+		<meta property="og:title" content="Browse :: Sukebei">
+		<meta property="og:image" content="/static/img/avatar/default.png">
+<meta name="description" content="A BitTorrent community focused on Eastern Asian media including anime, manga, music, and more">
+<meta name="keywords" content="torrents, bittorrent, torrent, anime, manga, sukebei, download, nyaa, magnet, magnets">
+<meta property="og:description" content="Sukebei homepage">
+
+		<!-- Bootstrap core CSS -->
+		<!--
+			Note: This has been customized at http://getbootstrap.com/customize/ to
+			set the column breakpoint to tablet mode, instead of mobile. This is to
+			make the navbar not look awful on tablets.
+		-->
+		<link href="/static/css/bootstrap.min.css?t=1608007394" rel="stylesheet" id="bsThemeLink">
+		<link href="/static/css/bootstrap-xl-mod.css?t=1608007394" rel="stylesheet">
+		<!--
+			This theme changer script needs to be inline and right under the above stylesheet link to prevent FOUC (Flash Of Unstyled Content)
+			Development version is commented out in static/js/main.js at the bottom of the file
+		-->
+		<script>function toggleDarkMode(){"dark"===localStorage.getItem("theme")?setThemeLight():setThemeDark()}function setThemeDark(){bsThemeLink.href="/static/css/bootstrap-dark.min.css?t=1608007394",localStorage.setItem("theme","dark"),document.body!==null&&document.body.classList.add('dark')}function setThemeLight(){bsThemeLink.href="/static/css/bootstrap.min.css?t=1608007394",localStorage.setItem("theme","light"),document.body!==null&&document.body.classList.remove('dark')}if("undefined"!=typeof Storage){var bsThemeLink=document.getElementById("bsThemeLink");"dark"===localStorage.getItem("theme")&&setThemeDark()}</script>
+		<script>window.markdown_proxy_images=true;</script>
+		<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap-select/1.12.2/css/bootstrap-select.min.css" integrity="sha256-an4uqLnVJ2flr7w0U74xiF4PJjO2N5Df91R2CUmCLCA=" crossorigin="anonymous" />
+		<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" integrity="sha256-eZrrJcwDc/3uDhsdt61sL2oOBY362qM3lon1gyExkL0=" crossorigin="anonymous" />
+
+		<!-- Custom styles for this template -->
+		<link href="/static/css/main.css?t=1683698371" rel="stylesheet">
+
+		<!-- Core JavaScript -->
+		<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.2.1/jquery.min.js" integrity="sha256-hwg4gsxgFZhOsEEamdOYGBf13FyQuiTwlAQgxVSNgt4=" crossorigin="anonymous"></script>
+		<script src="https://cdnjs.cloudflare.com/ajax/libs/twitter-bootstrap/3.3.7/js/bootstrap.min.js" integrity="sha256-U5ZEeKfGNOja007MMD3YBI0A3OSZOQbeG6z2f2Y0hu8=" crossorigin="anonymous"></script>
+		<script src="https://cdnjs.cloudflare.com/ajax/libs/markdown-it/8.3.1/markdown-it.min.js" integrity="sha256-3WZyZQOe+ql3pLo90lrkRtALrlniGdnf//gRpW0UQks=" crossorigin="anonymous"></script>
+		<!-- Modified to not apply border-radius to selectpickers and stuff so our navbar looks cool -->
+		<script src="/static/js/bootstrap-select.min.js?t=1625086430"></script>
+		<script src="/static/js/main.min.js?t=1683698372"></script>
+
+		<!-- HTML5 shim and Respond.js for IE8 support of HTML5 elements and media queries -->
+		<!--[if lt IE 9]>
+			<script src="https://oss.maxcdn.com/html5shiv/3.7.3/html5shiv.min.js"></script>
+			<script src="https://oss.maxcdn.com/respond/1.4.2/respond.min.js"></script>
+		<![endif]-->
+
+		<link rel="search" type="application/opensearchdescription+xml" title="Sukebei (Nyaa.si)" href="/static/search-sukebei.xml">
+	</head>
+	<body>
+		<!-- Fixed navbar -->
+		<nav class="navbar navbar-default navbar-static-top navbar-inverse">
+			<div class="container">
+				<div class="navbar-header">
+					<button type="button" class="navbar-toggle collapsed" data-toggle="collapse" data-target="#navbar" aria-expanded="false" aria-controls="navbar">
+					<span class="sr-only">Toggle navigation</span>
+					<span class="icon-bar"></span>
+					<span class="icon-bar"></span>
+					<span class="icon-bar"></span>
+					</button>
+					<a class="navbar-brand" href="/">Sukebei</a>
+				</div><!--/.navbar-header -->
+				<div id="navbar" class="navbar-collapse collapse">
+					<ul class="nav navbar-nav">
+						<li ><a href="/upload">Upload</a></li>
+						<li class="dropdown">
+							<a href="#" class="dropdown-toggle" data-toggle="dropdown" role="button" aria-haspopup="true" aria-expanded="false">
+								Info
+								<span class="caret"></span>
+							</a>
+							<ul class="dropdown-menu">
+								<li ><a href="/rules">Rules</a></li>
+								<li ><a href="/help">Help</a></li>
+							</ul>
+						</li>
+						<li><a href="/?page=rss&amp;c=1_2">RSS</a></li>
+						<li><a href="https://twitter.com/NyaaV2">Twitter</a></li>
+						<li><a href="//nyaa.si">Fun</a></li>
+						<li class="hidden-md"><a href="https://theporndude.com/?ref=sukebei" referrerpolicy="origin" rel="noopener nofollow">ThePornDude</a></li>
+						<!--li><a href="https://example.com/" style="color:red;" referrerpolicy="origin" rel="noopener nofollow">Placeholder</a></li-->
+					</ul>
+
+					<ul class="nav navbar-nav navbar-right">
+						<li class="dropdown">
+							<a href="#" class="dropdown-toggle visible-lg visible-sm visible-xs" data-toggle="dropdown" role="button" aria-haspopup="true" aria-expanded="false">
+								<i class="fa fa-user fa-fw"></i>
+								Guest
+								<span class="caret"></span>
+							</a>
+							<a href="#" class="dropdown-toggle hidden-lg hidden-sm hidden-xs" data-toggle="dropdown" role="button" aria-haspopup="true" aria-expanded="false">
+								<i class="fa fa-user fa-fw"></i>
+								<span class="caret"></span>
+							</a>
+							<ul class="dropdown-menu">
+								<li>
+									<a href="/login">
+										<i class="fa fa-sign-in fa-fw"></i>
+										Login
+									</a>
+								</li>
+								<li>
+									<a href="/register">
+										<i class="fa fa-pencil fa-fw"></i>
+										Register
+									</a>
+								</li>
+							</ul>
+						</li>
+					</ul>
+
+
+
+					<div class="search-container visible-xs visible-sm">
+						<form class="navbar-form navbar-right form" action="/" method="get">
+
+							<input type="text" class="form-control" name="q" placeholder="Search..." value="">
+							<br>
+
+							<select class="form-control" title="Filter" data-width="120px" name="f">
+								<option value="0" title="No filter" selected>No filter</option>
+								<option value="1" title="No remakes" >No remakes</option>
+								<option value="2" title="Trusted only" >Trusted only</option>
+							</select>
+
+							<br>
+
+							<select class="form-control" title="Category" data-width="200px" name="c">
+								<option value="0_0" title="All categories" selected>
+									All categories
+								</option>
+								<option value="1_0" title="Art" >
+									Art
+								</option>
+								<option value="1_1" title="Art - Anime" >
+									- Anime
+								</option>
+								<option value="1_2" title="Art - Doujinshi" selected>
+									- Doujinshi
+								</option>
+								<option value="1_3" title="Art - Games" >
+									- Games
+								</option>
+								<option value="1_4" title="Art - Manga" >
+									- Manga
+								</option>
+								<option value="1_5" title="Art - Pictures" >
+									- Pictures
+								</option>
+								<option value="2_0" title="Real Life" >
+									Real Life
+								</option>
+								<option value="2_1" title="Real Life - Pictures" >
+									- Photobooks and Pictures
+								</option>
+								<option value="2_2" title="Real Life - Videos" >
+									- Videos
+								</option>
+							</select>
+
+							<br>
+
+							<button class="btn btn-primary form-control" type="submit">
+								<i class="fa fa-search fa-fw"></i> Search
+							</button>
+						</form>
+					</div><!--/.search-container -->
+
+					<form class="navbar-form navbar-right form" action="/" method="get">
+						<div class="input-group search-container hidden-xs hidden-sm">
+							<div class="input-group-btn nav-filter" id="navFilter-criteria">
+								<select class="selectpicker show-tick" title="Filter" data-width="120px" name="f">
+									<option value="0" title="No filter" selected>No filter</option>
+									<option value="1" title="No remakes" >No remakes</option>
+									<option value="2" title="Trusted only" >Trusted only</option>
+								</select>
+							</div>
+
+							<div class="input-group-btn nav-filter" id="navFilter-category">
+								<!--
+									On narrow viewports, there isn't enough room to fit the full stuff in the selectpicker, so we show a full-width one on wide viewports, but squish it on narrow ones.
+								-->
+								<select class="selectpicker show-tick" title="Category" data-width="130px" name="c">
+									<option value="0_0" title="All categories" selected>
+										All categories
+									</option>
+									<option value="1_0" title="Art" >
+										Art
+									</option>
+									<option value="1_1" title="Art - Anime" >
+										- Anime
+									</option>
+									<option value="1_2" title="Art - Doujinshi" selected>
+										- Doujinshi
+									</option>
+									<option value="1_3" title="Art - Games" >
+										- Games
+									</option>
+									<option value="1_4" title="Art - Manga" >
+										- Manga
+									</option>
+									<option value="1_5" title="Art - Pictures" >
+										- Pictures
+									</option>
+									<option value="2_0" title="Real Life" >
+										Real Life
+									</option>
+									<option value="2_1" title="Real Life - Pictures" >
+										- Photobooks and Pictures
+									</option>
+									<option value="2_2" title="Real Life - Videos" >
+										- Videos
+									</option>
+								</select>
+							</div>
+							<input type="text" class="form-control search-bar" name="q" placeholder="Search..." value="" />
+							<div class="input-group-btn search-btn">
+								<button class="btn btn-primary" type="submit">
+									<i class="fa fa-search fa-fw"></i>
+								</button>
+							</div>
+						</div>
+					</form>
+				</div><!--/.nav-collapse -->
+			</div><!--/.container -->
+		</nav>
+
+		<div class="container">
+<style type="text/css">
+	#e71bf691-4eb4-453f-8f11-6f40280c18f6 {
+		margin-left: auto;
+		margin-right: auto;
+		margin-top: -16px;
+		margin-bottom: 4px;
+	}
+
+	.ts-outstream-video video {
+		max-height: 240px !important;
+	}
+	#ec01fd54-016b-41b4-bec9-b9b93f9b3b77 {
+		margin-bottom: 1em;
+	}
+</style>
+
+<script src="//cdn.tsyndicate.com/sdk/v1/outstream.video.js"></script>
+<script src="//cdn.tsyndicate.com/sdk/v1/video.instant.message.js"></script>
+
+<div id="e71bf691-4eb4-453f-8f11-6f40280c18f6"></div>
+
+<script type="text/javascript">
+	if (window.matchMedia("(max-width: 767px)").matches) {
+		document.write('<scr' + 'ipt src="//cdn.tsyndicate.com/sdk/v1/ms.js" data-ts-spot="2kw3qyTDqutsG6b3EDO9mIIE0sdBs8JN" data-ts-container-id="e71bf691-4eb4-453f-8f11-6f40280c18f6" data-ts-native-settings=\'{"cols":1,"rows":2,"titlePosition":"none","adsByPosition":"none","type":"img-left","styles":{"container":{"width":"100%","padding-top":"5px"},"thumb":{"border-radius":"4px","background":"rgba(255,255,255,1)"},"headlineLink":{"padding-top":"10px","font-size":"12px","font-weight":"bold","max-height":"64px"},"brandnameLabel":{"position":"absolute","bottom":"10px"},"brandnameLink":{"color":"#444"},"image":{"padding-bottom":"100%"}}}\' data-ts-wrapper-styles=\'{"display":"flex","flexDirection":"column","justifyContent":"space-around","alignItems":"center"}\' async defer></scr' + 'ipt>');
+	} else {
+		document.write('<scr' + 'ipt src="//cdn.tsyndicate.com/sdk/v1/ms.js" data-ts-spot="nq5nhSQztcZiNXgCMng6vD1TqGFnd84i" data-ts-container-id="e71bf691-4eb4-453f-8f11-6f40280c18f6" data-ts-native-settings=\'{"cols":5,"rows":1,"titlePosition":"none","adsByPosition":"none","type":"label-under","styles":{"container":{"width":"100%","padding-top":"11px"},"thumb":{"border-radius":"4px"},"label":{"height":"80px","background":"rgba(255,255,255,0.65)"},"headlineLink":{"padding-top":"5px","font-size":"12px","font-weight":"bold","min-height":"45px"},"brandnameLink":{"color":"#444"}}}\' async defer></scr' + 'ipt>');
+	}
+
+	TSVideoInstantMessage({
+		spot: "29544ccbaa25446f923741cf263429f9",
+		width: "5%",
+		mobileWidth: "20%",
+		displayMode: "capped",
+		cappedAction: "click",
+		cappedValueInMinutes: 10,
+		showCTAButton: true,
+		hideOnComplete: false
+	});
+</script>
+
+
+
+
+<div class="table-responsive">
+	<table class="table table-bordered table-hover table-striped torrent-list">
+		<thead>
+			<tr>
+				<th class="hdr-category text-center" style="width:80px;">Category</th>
+				<th class="hdr-name" style="width:auto;">Name</th>
+				<th class="hdr-comments sorting text-center" title="Comments" style="width:50px;"><a href="/?c=1_2&amp;s=comments&amp;o=desc"></a><i class="fa fa-comments-o"></i></th>
+				<th class="hdr-link text-center" style="width:70px;">Link</th>
+				<th class="hdr-size sorting text-center" style="width:100px;"><a href="/?c=1_2&amp;s=size&amp;o=desc"></a>Size</th>
+				<th class="hdr-date sorting_desc text-center" title="In UTC" style="width:140px;"><a href="/?c=1_2&amp;s=id&amp;o=asc"></a>Date</th>
+
+				<th class="hdr-seeders sorting text-center" title="Seeders" style="width:50px;"><a href="/?c=1_2&amp;s=seeders&amp;o=desc"></a><i class="fa fa-arrow-up" aria-hidden="true"></i></th>
+				<th class="hdr-leechers sorting text-center" title="Leechers" style="width:50px;"><a href="/?c=1_2&amp;s=leechers&amp;o=desc"></a><i class="fa fa-arrow-down" aria-hidden="true"></i></th>
+				<th class="hdr-downloads sorting text-center" title="Completed downloads" style="width:50px;"><a href="/?c=1_2&amp;s=downloads&amp;o=desc"></a><i class="fa fa-check" aria-hidden="true"></i></th>
+			</tr>
+		</thead>
+		<tbody>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4731115" title="(C108) [あまくち少女 (うまくち醤油)] ないしょのやりべや ～親戚の美人JK・JD姉妹に僕専用のヤリ部屋借りてもらいます～ (オリジナル) [DL版]">(C108) [あまくち少女 (うまくち醤油)] ないしょのやりべや ～親戚の美人JK・JD姉妹に僕専用のヤリ部屋借りてもらいます～ (オリジナル) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4731115.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:faab288e09ba07d91204cf500ea98f8c75fec87e&amp;dn=%28C108%29%20%5B%E3%81%82%E3%81%BE%E3%81%8F%E3%81%A1%E5%B0%91%E5%A5%B3%20%28%E3%81%86%E3%81%BE%E3%81%8F%E3%81%A1%E9%86%A4%E6%B2%B9%29%5D%20%E3%81%AA%E3%81%84%E3%81%97%E3%82%87%E3%81%AE%E3%82%84%E3%82%8A%E3%81%B9%E3%82%84%20%EF%BD%9E%E8%A6%AA%E6%88%9A%E3%81%AE%E7%BE%8E%E4%BA%BAJK%E3%83%BBJD%E5%A7%89%E5%A6%B9%E3%81%AB%E5%83%95%E5%B0%82%E7%94%A8%E3%81%AE%E3%83%A4%E3%83%AA%E9%83%A8%E5%B1%8B%E5%80%9F%E3%82%8A%E3%81%A6%E3%82%82%E3%82%89%E3%81%84%E3%81%BE%E3%81%99%EF%BD%9E%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">60.8 MiB</td>
+				<td class="text-center" data-timestamp="1791390409">2026-10-07 16:26</td>
+
+				<td class="text-center">420</td>
+				<td class="text-center">43</td>
+				<td class="text-center">2881</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4731114" title="(同人誌) [no alarm (五日寝)] 曇る吐息と濡れた鼓動 (ブルーアーカイブ) [DL版]">(同人誌) [no alarm (五日寝)] 曇る吐息と濡れた鼓動 (ブルーアーカイブ) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4731114.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:108b4721c4625606c75975c7809a2c86da14b431&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5Bno%20alarm%20%28%E4%BA%94%E6%97%A5%E5%AF%9D%29%5D%20%E6%9B%87%E3%82%8B%E5%90%90%E6%81%AF%E3%81%A8%E6%BF%A1%E3%82%8C%E3%81%9F%E9%BC%93%E5%8B%95%20%28%E3%83%96%E3%83%AB%E3%83%BC%E3%82%A2%E3%83%BC%E3%82%AB%E3%82%A4%E3%83%96%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">33.8 MiB</td>
+				<td class="text-center" data-timestamp="1791390408">2026-10-07 16:26</td>
+
+				<td class="text-center">109</td>
+				<td class="text-center">17</td>
+				<td class="text-center">769</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4731113" title="(同人誌) [-三百六十度- (六羽)] 屋根伝いの女の子 (オリジナル) [DL版]">(同人誌) [-三百六十度- (六羽)] 屋根伝いの女の子 (オリジナル) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4731113.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:02e5b7084b7f3b320ff34aa4a87cdcd9e37cc2c4&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B-%E4%B8%89%E7%99%BE%E5%85%AD%E5%8D%81%E5%BA%A6-%20%28%E5%85%AD%E7%BE%BD%29%5D%20%E5%B1%8B%E6%A0%B9%E4%BC%9D%E3%81%84%E3%81%AE%E5%A5%B3%E3%81%AE%E5%AD%90%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">19.6 MiB</td>
+				<td class="text-center" data-timestamp="1791389446">2026-10-07 16:10</td>
+
+				<td class="text-center">90</td>
+				<td class="text-center">10</td>
+				<td class="text-center">678</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4731112" title="(同人誌) [ののいど] クソガキが壁にはまったら (オリジナル)">(同人誌) [ののいど] クソガキが壁にはまったら (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4731112.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:f2dbac54c77ad9b8d6db76496032e5c7e6d7d0c8&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E3%81%AE%E3%81%AE%E3%81%84%E3%81%A9%5D%20%E3%82%AF%E3%82%BD%E3%82%AC%E3%82%AD%E3%81%8C%E5%A3%81%E3%81%AB%E3%81%AF%E3%81%BE%E3%81%A3%E3%81%9F%E3%82%89%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">42.7 MiB</td>
+				<td class="text-center" data-timestamp="1791389444">2026-10-07 16:10</td>
+
+				<td class="text-center">143</td>
+				<td class="text-center">22</td>
+				<td class="text-center">942</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4731111" title="(同人誌) [魚肉棒 (たらそいそーす)] ネルが聞くからいけないんだ! (ブルーアーカイブ) [DL版]">(同人誌) [魚肉棒 (たらそいそーす)] ネルが聞くからいけないんだ! (ブルーアーカイブ) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4731111.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:093a1d796ffc0d1efb9b675fb65aa6b689f42c02&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E9%AD%9A%E8%82%89%E6%A3%92%20%28%E3%81%9F%E3%82%89%E3%81%9D%E3%81%84%E3%81%9D%E3%83%BC%E3%81%99%29%5D%20%E3%83%8D%E3%83%AB%E3%81%8C%E8%81%9E%E3%81%8F%E3%81%8B%E3%82%89%E3%81%84%E3%81%91%E3%81%AA%E3%81%84%E3%82%93%E3%81%A0%21%20%28%E3%83%96%E3%83%AB%E3%83%BC%E3%82%A2%E3%83%BC%E3%82%AB%E3%82%A4%E3%83%96%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">23.9 MiB</td>
+				<td class="text-center" data-timestamp="1791389443">2026-10-07 16:10</td>
+
+				<td class="text-center">75</td>
+				<td class="text-center">14</td>
+				<td class="text-center">478</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4731104" title="(同人誌) [あたふたふたーば] ふたなりメイドとお嬢様のドスケベ大作戦 (オリジナル)">(同人誌) [あたふたふたーば] ふたなりメイドとお嬢様のドスケベ大作戦 (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4731104.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:000ded42918f6feca045d1ffa8bec6db28a9a746&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E3%81%82%E3%81%9F%E3%81%B5%E3%81%9F%E3%81%B5%E3%81%9F%E3%83%BC%E3%81%B0%5D%20%E3%81%B5%E3%81%9F%E3%81%AA%E3%82%8A%E3%83%A1%E3%82%A4%E3%83%89%E3%81%A8%E3%81%8A%E5%AC%A2%E6%A7%98%E3%81%AE%E3%83%89%E3%82%B9%E3%82%B1%E3%83%99%E5%A4%A7%E4%BD%9C%E6%88%A6%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">306.3 MiB</td>
+				<td class="text-center" data-timestamp="1791389035">2026-10-07 16:03</td>
+
+				<td class="text-center">122</td>
+				<td class="text-center">22</td>
+				<td class="text-center">862</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4731019" title="(同人誌) [ざわちゃん工房 (オホざわ)] 生意気そうなギャルのクリボックスを手に入れた話 (オリジナル)">(同人誌) [ざわちゃん工房 (オホざわ)] 生意気そうなギャルのクリボックスを手に入れた話 (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4731019.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:3820471fa17981f3a64e7638be0509305e39fb16&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E3%81%96%E3%82%8F%E3%81%A1%E3%82%83%E3%82%93%E5%B7%A5%E6%88%BF%20%28%E3%82%AA%E3%83%9B%E3%81%96%E3%82%8F%29%5D%20%E7%94%9F%E6%84%8F%E6%B0%97%E3%81%9D%E3%81%86%E3%81%AA%E3%82%AE%E3%83%A3%E3%83%AB%E3%81%AE%E3%82%AF%E3%83%AA%E3%83%9C%E3%83%83%E3%82%AF%E3%82%B9%E3%82%92%E6%89%8B%E3%81%AB%E5%85%A5%E3%82%8C%E3%81%9F%E8%A9%B1%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">645.8 MiB</td>
+				<td class="text-center" data-timestamp="1791385542">2026-10-07 15:05</td>
+
+				<td class="text-center">124</td>
+				<td class="text-center">42</td>
+				<td class="text-center">845</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4731013" title="(C108) [陽州庵 (孫陽州)] きまじめ爆乳幼馴染と少子化対策子作り実習 (オリジナル) [DL版]">(C108) [陽州庵 (孫陽州)] きまじめ爆乳幼馴染と少子化対策子作り実習 (オリジナル) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4731013.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:26a904c7758d36727d08b40b2be6e9f3c80bfe61&amp;dn=%28C108%29%20%5B%E9%99%BD%E5%B7%9E%E5%BA%B5%20%28%E5%AD%AB%E9%99%BD%E5%B7%9E%29%5D%20%E3%81%8D%E3%81%BE%E3%81%98%E3%82%81%E7%88%86%E4%B9%B3%E5%B9%BC%E9%A6%B4%E6%9F%93%E3%81%A8%E5%B0%91%E5%AD%90%E5%8C%96%E5%AF%BE%E7%AD%96%E5%AD%90%E4%BD%9C%E3%82%8A%E5%AE%9F%E7%BF%92%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">138.1 MiB</td>
+				<td class="text-center" data-timestamp="1791384811">2026-10-07 14:53</td>
+
+				<td class="text-center">291</td>
+				<td class="text-center">39</td>
+				<td class="text-center">2190</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4731012" title="(C108) [瑠璃丸 (るりまる)] 魔法少女ユニコーンの敗北～身代わりになった魔法少女が触手怪人に穢され敗北するまで～ (オリジナル) [DL版]">(C108) [瑠璃丸 (るりまる)] 魔法少女ユニコーンの敗北～身代わりになった魔法少女が触手怪人に穢され敗北するまで～ (オリジナル) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4731012.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:4ccebf5764b6d98f706edced4d663ae3ac112169&amp;dn=%28C108%29%20%5B%E7%91%A0%E7%92%83%E4%B8%B8%20%28%E3%82%8B%E3%82%8A%E3%81%BE%E3%82%8B%29%5D%20%E9%AD%94%E6%B3%95%E5%B0%91%E5%A5%B3%E3%83%A6%E3%83%8B%E3%82%B3%E3%83%BC%E3%83%B3%E3%81%AE%E6%95%97%E5%8C%97%EF%BD%9E%E8%BA%AB%E4%BB%A3%E3%82%8F%E3%82%8A%E3%81%AB%E3%81%AA%E3%81%A3%E3%81%9F%E9%AD%94%E6%B3%95%E5%B0%91%E5%A5%B3%E3%81%8C%E8%A7%A6%E6%89%8B%E6%80%AA%E4%BA%BA%E3%81%AB%E7%A9%A2%E3%81%95%E3%82%8C%E6%95%97%E5%8C%97%E3%81%99%E3%82%8B%E3%81%BE%E3%81%A7%EF%BD%9E%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">90.4 MiB</td>
+				<td class="text-center" data-timestamp="1791384449">2026-10-07 14:47</td>
+
+				<td class="text-center">157</td>
+				<td class="text-center">30</td>
+				<td class="text-center">1175</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730960" title="(C108) [かうすしあん] 咲夜さん達は諦めちゃう (東方Project) [DL版]">(C108) [かうすしあん] 咲夜さん達は諦めちゃう (東方Project) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730960.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:4681209f512e8e33f1a4b70d0af093cc928b09df&amp;dn=%28C108%29%20%5B%E3%81%8B%E3%81%86%E3%81%99%E3%81%97%E3%81%82%E3%82%93%5D%20%E5%92%B2%E5%A4%9C%E3%81%95%E3%82%93%E9%81%94%E3%81%AF%E8%AB%A6%E3%82%81%E3%81%A1%E3%82%83%E3%81%86%20%28%E6%9D%B1%E6%96%B9Project%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">170.5 MiB</td>
+				<td class="text-center" data-timestamp="1791375495">2026-10-07 12:18</td>
+
+				<td class="text-center">117</td>
+				<td class="text-center">16</td>
+				<td class="text-center">1166</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730920" title="(C108) [ペルシカリアイーター (偉々田六勇)] Pee Pee Petit Memory (オリジナル) [DL版]">(C108) [ペルシカリアイーター (偉々田六勇)] Pee Pee Petit Memory (オリジナル) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730920.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:72056818c239e819d017a028764a8c559ad46319&amp;dn=%28C108%29%20%5B%E3%83%9A%E3%83%AB%E3%82%B7%E3%82%AB%E3%83%AA%E3%82%A2%E3%82%A4%E3%83%BC%E3%82%BF%E3%83%BC%20%28%E5%81%89%E3%80%85%E7%94%B0%E5%85%AD%E5%8B%87%29%5D%20Pee%20Pee%20Petit%20Memory%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">154.1 MiB</td>
+				<td class="text-center" data-timestamp="1791370783">2026-10-07 10:59</td>
+
+				<td class="text-center">92</td>
+				<td class="text-center">16</td>
+				<td class="text-center">1200</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730919" title="(C108) [氷倶楽部 (こおりみず)] 大和ダムを護送せよ! 後篇・上 (艦隊これくしょん -艦これ-)">(C108) [氷倶楽部 (こおりみず)] 大和ダムを護送せよ! 後篇・上 (艦隊これくしょん -艦これ-)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730919.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:73f166fac129dfa03b6b42e64415007470ae58ab&amp;dn=%28C108%29%20%5B%E6%B0%B7%E5%80%B6%E6%A5%BD%E9%83%A8%20%28%E3%81%93%E3%81%8A%E3%82%8A%E3%81%BF%E3%81%9A%29%5D%20%E5%A4%A7%E5%92%8C%E3%83%80%E3%83%A0%E3%82%92%E8%AD%B7%E9%80%81%E3%81%9B%E3%82%88%21%20%E5%BE%8C%E7%AF%87%E3%83%BB%E4%B8%8A%20%28%E8%89%A6%E9%9A%8A%E3%81%93%E3%82%8C%E3%81%8F%E3%81%97%E3%82%87%E3%82%93%20-%E8%89%A6%E3%81%93%E3%82%8C-%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">100.5 MiB</td>
+				<td class="text-center" data-timestamp="1791370768">2026-10-07 10:59</td>
+
+				<td class="text-center">84</td>
+				<td class="text-center">13</td>
+				<td class="text-center">909</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730918" title="(C108) [酷使夢創 (むそう)] ティーポット降下 3杯目 (艦隊これくしょん -艦これ-)">(C108) [酷使夢創 (むそう)] ティーポット降下 3杯目 (艦隊これくしょん -艦これ-)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730918.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:05fb65e7694f07ccae149ce29635a3a973efa0d3&amp;dn=%28C108%29%20%5B%E9%85%B7%E4%BD%BF%E5%A4%A2%E5%89%B5%20%28%E3%82%80%E3%81%9D%E3%81%86%29%5D%20%E3%83%86%E3%82%A3%E3%83%BC%E3%83%9D%E3%83%83%E3%83%88%E9%99%8D%E4%B8%8B%203%E6%9D%AF%E7%9B%AE%20%28%E8%89%A6%E9%9A%8A%E3%81%93%E3%82%8C%E3%81%8F%E3%81%97%E3%82%87%E3%82%93%20-%E8%89%A6%E3%81%93%E3%82%8C-%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">38.6 MiB</td>
+				<td class="text-center" data-timestamp="1791370759">2026-10-07 10:59</td>
+
+				<td class="text-center">71</td>
+				<td class="text-center">12</td>
+				<td class="text-center">755</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730782" title="(同人誌) [Sweet Avenue (カヅチ)] 田舎の黒ギャルJkと結婚しました総集編">(同人誌) [Sweet Avenue (カヅチ)] 田舎の黒ギャルJkと結婚しました総集編</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730782.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:027ee561a162ad22bcc5fbf2475d79e268526dbc&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5BSweet%20Avenue%20%28%E3%82%AB%E3%83%85%E3%83%81%29%5D%20%E7%94%B0%E8%88%8E%E3%81%AE%E9%BB%92%E3%82%AE%E3%83%A3%E3%83%ABJk%E3%81%A8%E7%B5%90%E5%A9%9A%E3%81%97%E3%81%BE%E3%81%97%E3%81%9F%E7%B7%8F%E9%9B%86%E7%B7%A8&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">711.8 MiB</td>
+				<td class="text-center" data-timestamp="1791362040">2026-10-07 08:34</td>
+
+				<td class="text-center">332</td>
+				<td class="text-center">62</td>
+				<td class="text-center">4256</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730769" title="(C86) [sys3.6.3. (ザンクロー)] CURTAIN CALL B (オリジナル) [DL版]">(C86) [sys3.6.3. (ザンクロー)] CURTAIN CALL B (オリジナル) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730769.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:a80c557c063b40d385f935a23354565e65d41da5&amp;dn=%28C86%29%20%5Bsys3.6.3.%20%28%E3%82%B6%E3%83%B3%E3%82%AF%E3%83%AD%E3%83%BC%29%5D%20CURTAIN%20CALL%20B%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">12.6 MiB</td>
+				<td class="text-center" data-timestamp="1791360808">2026-10-07 08:13</td>
+
+				<td class="text-center">75</td>
+				<td class="text-center">14</td>
+				<td class="text-center">964</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730768" title="(C102) [冬扇草堂 (冬扇)] 銀乳狩り (ローゼンメイデン) [DL版]">(C102) [冬扇草堂 (冬扇)] 銀乳狩り (ローゼンメイデン) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730768.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:110e5c25f164d4f29b8c4d775dea252d07b628cd&amp;dn=%28C102%29%20%5B%E5%86%AC%E6%89%87%E8%8D%89%E5%A0%82%20%28%E5%86%AC%E6%89%87%29%5D%20%E9%8A%80%E4%B9%B3%E7%8B%A9%E3%82%8A%20%28%E3%83%AD%E3%83%BC%E3%82%BC%E3%83%B3%E3%83%A1%E3%82%A4%E3%83%87%E3%83%B3%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">50.8 MiB</td>
+				<td class="text-center" data-timestamp="1791360775">2026-10-07 08:12</td>
+
+				<td class="text-center">94</td>
+				<td class="text-center">17</td>
+				<td class="text-center">1369</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730764" title="(C105) [冬扇草堂 (冬扇)] 堕落性の乳銀燈 (ローゼンメイデン) [DL版]">(C105) [冬扇草堂 (冬扇)] 堕落性の乳銀燈 (ローゼンメイデン) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730764.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:8d7e5db4e97281c73903a488813414fb0a76d774&amp;dn=%28C105%29%20%5B%E5%86%AC%E6%89%87%E8%8D%89%E5%A0%82%20%28%E5%86%AC%E6%89%87%29%5D%20%E5%A0%95%E8%90%BD%E6%80%A7%E3%81%AE%E4%B9%B3%E9%8A%80%E7%87%88%20%28%E3%83%AD%E3%83%BC%E3%82%BC%E3%83%B3%E3%83%A1%E3%82%A4%E3%83%87%E3%83%B3%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">119.3 MiB</td>
+				<td class="text-center" data-timestamp="1791359638">2026-10-07 07:53</td>
+
+				<td class="text-center">99</td>
+				<td class="text-center">18</td>
+				<td class="text-center">1436</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730649" title="(C108) [manymanyrain (雨暈郁太)] その日を、摘め。 (ブルーアーカイブ)">(C108) [manymanyrain (雨暈郁太)] その日を、摘め。 (ブルーアーカイブ)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730649.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:7be9caf8d512ff350627abb5fb3edeea6f86b491&amp;dn=%28C108%29%20%5Bmanymanyrain%20%28%E9%9B%A8%E6%9A%88%E9%83%81%E5%A4%AA%29%5D%20%E3%81%9D%E3%81%AE%E6%97%A5%E3%82%92%E3%80%81%E6%91%98%E3%82%81%E3%80%82%20%28%E3%83%96%E3%83%AB%E3%83%BC%E3%82%A2%E3%83%BC%E3%82%AB%E3%82%A4%E3%83%96%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">62.7 MiB</td>
+				<td class="text-center" data-timestamp="1791350482">2026-10-07 05:21</td>
+
+				<td class="text-center">101</td>
+				<td class="text-center">17</td>
+				<td class="text-center">1556</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730648" title="(C108) [みらくるしろっぷ (七味鈴)] イオリは【ピー】を見られたい (ブルーアーカイブ)">(C108) [みらくるしろっぷ (七味鈴)] イオリは【ピー】を見られたい (ブルーアーカイブ)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730648.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:e292b326267d3b7d6dd7f3a77ddc6b77ea729af7&amp;dn=%28C108%29%20%5B%E3%81%BF%E3%82%89%E3%81%8F%E3%82%8B%E3%81%97%E3%82%8D%E3%81%A3%E3%81%B7%20%28%E4%B8%83%E5%91%B3%E9%88%B4%29%5D%20%E3%82%A4%E3%82%AA%E3%83%AA%E3%81%AF%E3%80%90%E3%83%94%E3%83%BC%E3%80%91%E3%82%92%E8%A6%8B%E3%82%89%E3%82%8C%E3%81%9F%E3%81%84%20%28%E3%83%96%E3%83%AB%E3%83%BC%E3%82%A2%E3%83%BC%E3%82%AB%E3%82%A4%E3%83%96%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">288.1 MiB</td>
+				<td class="text-center" data-timestamp="1791350183">2026-10-07 05:16</td>
+
+				<td class="text-center">96</td>
+				<td class="text-center">14</td>
+				<td class="text-center">1377</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730647" title="(C108) [みらくるバーン (比宮じょーず)] 「ケイちゃん」にまかせればいいんです。 (ブルーアーカイブ)">(C108) [みらくるバーン (比宮じょーず)] 「ケイちゃん」にまかせればいいんです。 (ブルーアーカイブ)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730647.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:003c1e806429d7fc4d5f147b1b6e20a091b5b1cf&amp;dn=%28C108%29%20%5B%E3%81%BF%E3%82%89%E3%81%8F%E3%82%8B%E3%83%90%E3%83%BC%E3%83%B3%20%28%E6%AF%94%E5%AE%AE%E3%81%98%E3%82%87%E3%83%BC%E3%81%9A%29%5D%20%E3%80%8C%E3%82%B1%E3%82%A4%E3%81%A1%E3%82%83%E3%82%93%E3%80%8D%E3%81%AB%E3%81%BE%E3%81%8B%E3%81%9B%E3%82%8C%E3%81%B0%E3%81%84%E3%81%84%E3%82%93%E3%81%A7%E3%81%99%E3%80%82%20%28%E3%83%96%E3%83%AB%E3%83%BC%E3%82%A2%E3%83%BC%E3%82%AB%E3%82%A4%E3%83%96%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">246.2 MiB</td>
+				<td class="text-center" data-timestamp="1791350162">2026-10-07 05:16</td>
+
+				<td class="text-center">115</td>
+				<td class="text-center">20</td>
+				<td class="text-center">1567</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730645" title="(C108) [たかはしさん (一色緑)] 先生とならいいんですよ？ (ブルーアーカイブ)">(C108) [たかはしさん (一色緑)] 先生とならいいんですよ？ (ブルーアーカイブ)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730645.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:c11e7e812185ab44c0fb889a2afcdd27adda9d47&amp;dn=%28C108%29%20%5B%E3%81%9F%E3%81%8B%E3%81%AF%E3%81%97%E3%81%95%E3%82%93%20%28%E4%B8%80%E8%89%B2%E7%B7%91%29%5D%20%E5%85%88%E7%94%9F%E3%81%A8%E3%81%AA%E3%82%89%E3%81%84%E3%81%84%E3%82%93%E3%81%A7%E3%81%99%E3%82%88%EF%BC%9F%20%28%E3%83%96%E3%83%AB%E3%83%BC%E3%82%A2%E3%83%BC%E3%82%AB%E3%82%A4%E3%83%96%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">353.7 MiB</td>
+				<td class="text-center" data-timestamp="1791349612">2026-10-07 05:06</td>
+
+				<td class="text-center">91</td>
+				<td class="text-center">13</td>
+				<td class="text-center">1277</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730642" title="(C108) [LHEZI (阿賀まりの)] 囚われアスナのお仕置き本 (ブルーアーカイブ) [DL版]">(C108) [LHEZI (阿賀まりの)] 囚われアスナのお仕置き本 (ブルーアーカイブ) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730642.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:3452c60945853f70329701f7a1885dbc9bbb4e05&amp;dn=%28C108%29%20%5BLHEZI%20%28%E9%98%BF%E8%B3%80%E3%81%BE%E3%82%8A%E3%81%AE%29%5D%20%E5%9B%9A%E3%82%8F%E3%82%8C%E3%82%A2%E3%82%B9%E3%83%8A%E3%81%AE%E3%81%8A%E4%BB%95%E7%BD%AE%E3%81%8D%E6%9C%AC%20%28%E3%83%96%E3%83%AB%E3%83%BC%E3%82%A2%E3%83%BC%E3%82%AB%E3%82%A4%E3%83%96%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">254.6 MiB</td>
+				<td class="text-center" data-timestamp="1791349058">2026-10-07 04:57</td>
+
+				<td class="text-center">146</td>
+				<td class="text-center">32</td>
+				<td class="text-center">2083</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730421" title="(同人誌) [餅は餅屋 (クサカベモチ)] TSした俺が女に堕ちる90日 (オリジナル)">(同人誌) [餅は餅屋 (クサカベモチ)] TSした俺が女に堕ちる90日 (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730421.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:24fd544815dc9a0988c06c3e415f46f182667c1e&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E9%A4%85%E3%81%AF%E9%A4%85%E5%B1%8B%20%28%E3%82%AF%E3%82%B5%E3%82%AB%E3%83%99%E3%83%A2%E3%83%81%29%5D%20TS%E3%81%97%E3%81%9F%E4%BF%BA%E3%81%8C%E5%A5%B3%E3%81%AB%E5%A0%95%E3%81%A1%E3%82%8B90%E6%97%A5%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">117.5 MiB</td>
+				<td class="text-center" data-timestamp="1791328858">2026-10-06 23:20</td>
+
+				<td class="text-center">119</td>
+				<td class="text-center">15</td>
+				<td class="text-center">1793</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730404" title="(同人誌) [フグタ家] みんなが誰かと付き合えるまでの話 (オリジナル)">(同人誌) [フグタ家] みんなが誰かと付き合えるまでの話 (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730404.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:209b72995be5c253cee682596c0238c6b21daaaf&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E3%83%95%E3%82%B0%E3%82%BF%E5%AE%B6%5D%20%E3%81%BF%E3%82%93%E3%81%AA%E3%81%8C%E8%AA%B0%E3%81%8B%E3%81%A8%E4%BB%98%E3%81%8D%E5%90%88%E3%81%88%E3%82%8B%E3%81%BE%E3%81%A7%E3%81%AE%E8%A9%B1%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">565.3 MiB</td>
+				<td class="text-center" data-timestamp="1791320763">2026-10-06 21:06</td>
+
+				<td class="text-center">416</td>
+				<td class="text-center">39</td>
+				<td class="text-center">7088</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730402" title="(C56) [ぽよぱちょ (よろず)] ] POYOPACHO 999 (よろず)">(C56) [ぽよぱちょ (よろず)] ] POYOPACHO 999 (よろず)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730402.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:bac9cf58b4f225dc65955b9f493d41d20f18bb5b&amp;dn=%28C56%29%20%5B%E3%81%BD%E3%82%88%E3%81%B1%E3%81%A1%E3%82%87%20%28%E3%82%88%E3%82%8D%E3%81%9A%29%5D%20%5D%20POYOPACHO%20999%20%28%E3%82%88%E3%82%8D%E3%81%9A%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">148.7 MiB</td>
+				<td class="text-center" data-timestamp="1791319416">2026-10-06 20:43</td>
+
+				<td class="text-center">35</td>
+				<td class="text-center">17</td>
+				<td class="text-center">629</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730362" title="(C108) [なみもり定食Aセット (並盛りごはん)] 白き刃は穢れに沈む (東亰ザナドゥ)">(C108) [なみもり定食Aセット (並盛りごはん)] 白き刃は穢れに沈む (東亰ザナドゥ)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730362.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:9e4cbeffe8b5061d9185c3c3e23f980662107b8c&amp;dn=%28C108%29%20%5B%E3%81%AA%E3%81%BF%E3%82%82%E3%82%8A%E5%AE%9A%E9%A3%9FA%E3%82%BB%E3%83%83%E3%83%88%20%28%E4%B8%A6%E7%9B%9B%E3%82%8A%E3%81%94%E3%81%AF%E3%82%93%29%5D%20%E7%99%BD%E3%81%8D%E5%88%83%E3%81%AF%E7%A9%A2%E3%82%8C%E3%81%AB%E6%B2%88%E3%82%80%20%28%E6%9D%B1%E4%BA%B0%E3%82%B6%E3%83%8A%E3%83%89%E3%82%A5%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">320.1 MiB</td>
+				<td class="text-center" data-timestamp="1791300034">2026-10-06 15:20</td>
+
+				<td class="text-center">76</td>
+				<td class="text-center">11</td>
+				<td class="text-center">1486</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730361" title="(C108) [DRAGON PANDA (御奈瀬)] やめて!壁尻した妾に乱暴する気じゃろ!エロ同人のように! (崩壊：スターレイル)">(C108) [DRAGON PANDA (御奈瀬)] やめて!壁尻した妾に乱暴する気じゃろ!エロ同人のように! (崩壊：スターレイル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730361.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:5e7ea3d11d8a59d3c3e7668846909c15083c4f8e&amp;dn=%28C108%29%20%5BDRAGON%20PANDA%20%28%E5%BE%A1%E5%A5%88%E7%80%AC%29%5D%20%E3%82%84%E3%82%81%E3%81%A6%21%E5%A3%81%E5%B0%BB%E3%81%97%E3%81%9F%E5%A6%BE%E3%81%AB%E4%B9%B1%E6%9A%B4%E3%81%99%E3%82%8B%E6%B0%97%E3%81%98%E3%82%83%E3%82%8D%21%E3%82%A8%E3%83%AD%E5%90%8C%E4%BA%BA%E3%81%AE%E3%82%88%E3%81%86%E3%81%AB%21%20%28%E5%B4%A9%E5%A3%8A%EF%BC%9A%E3%82%B9%E3%82%BF%E3%83%BC%E3%83%AC%E3%82%A4%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">12.2 MiB</td>
+				<td class="text-center" data-timestamp="1791298970">2026-10-06 15:02</td>
+
+				<td class="text-center">90</td>
+				<td class="text-center">8</td>
+				<td class="text-center">1704</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730354" title="(強欲で謙虚なイベントTURN17) [流水体 (水点下)] くノ一ちゃんに悪い噂を! (遊☆戯☆王 OCG) [DL版]">(強欲で謙虚なイベントTURN17) [流水体 (水点下)] くノ一ちゃんに悪い噂を! (遊☆戯☆王 OCG) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730354.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:91d55698523c5e1544de47cf56d6405db9ad20e4&amp;dn=%28%E5%BC%B7%E6%AC%B2%E3%81%A7%E8%AC%99%E8%99%9A%E3%81%AA%E3%82%A4%E3%83%99%E3%83%B3%E3%83%88TURN17%29%20%5B%E6%B5%81%E6%B0%B4%E4%BD%93%20%28%E6%B0%B4%E7%82%B9%E4%B8%8B%29%5D%20%E3%81%8F%E3%83%8E%E4%B8%80%E3%81%A1%E3%82%83%E3%82%93%E3%81%AB%E6%82%AA%E3%81%84%E5%99%82%E3%82%92%21%20%28%E9%81%8A%E2%98%86%E6%88%AF%E2%98%86%E7%8E%8B%20OCG%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">63.6 MiB</td>
+				<td class="text-center" data-timestamp="1791298284">2026-10-06 14:51</td>
+
+				<td class="text-center">58</td>
+				<td class="text-center">17</td>
+				<td class="text-center">1197</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730341#comments" class="comments" title="1 comment">
+						<i class="fa fa-comments-o"></i>1</a>
+					<a href="/view/4730341" title="(C106) [鳩小屋 (鳩春)] 契薬交唇 (ブルーアーカイブ) [DL版]">(C106) [鳩小屋 (鳩春)] 契薬交唇 (ブルーアーカイブ) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730341.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:f2dad7835343d66f6b62c19841b3776afeab03fd&amp;dn=%28C106%29%20%5B%E9%B3%A9%E5%B0%8F%E5%B1%8B%20%28%E9%B3%A9%E6%98%A5%29%5D%20%E5%A5%91%E8%96%AC%E4%BA%A4%E5%94%87%20%28%E3%83%96%E3%83%AB%E3%83%BC%E3%82%A2%E3%83%BC%E3%82%AB%E3%82%A4%E3%83%96%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">46.0 MiB</td>
+				<td class="text-center" data-timestamp="1791295178">2026-10-06 13:59</td>
+
+				<td class="text-center">70</td>
+				<td class="text-center">12</td>
+				<td class="text-center">1367</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730329" title="(同人誌) [SEPIA (OgataAz)] 妹の香りも味わいたい (オリジナル) [DL版]">(同人誌) [SEPIA (OgataAz)] 妹の香りも味わいたい (オリジナル) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730329.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:fd2463bdb5af7eb1a225991761e814de94cbe228&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5BSEPIA%20%28OgataAz%29%5D%20%E5%A6%B9%E3%81%AE%E9%A6%99%E3%82%8A%E3%82%82%E5%91%B3%E3%82%8F%E3%81%84%E3%81%9F%E3%81%84%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">63.1 MiB</td>
+				<td class="text-center" data-timestamp="1791293998">2026-10-06 13:39</td>
+
+				<td class="text-center">110</td>
+				<td class="text-center">17</td>
+				<td class="text-center">2551</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730328" title="(同人誌) [めろぅ・いえろぉ] はじめてどうし (オリジナル)">(同人誌) [めろぅ・いえろぉ] はじめてどうし (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730328.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:4a85ecff0bf34936eb066d20a0c08a049b4368d4&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E3%82%81%E3%82%8D%E3%81%85%E3%83%BB%E3%81%84%E3%81%88%E3%82%8D%E3%81%89%5D%20%E3%81%AF%E3%81%98%E3%82%81%E3%81%A6%E3%81%A9%E3%81%86%E3%81%97%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">23.2 MiB</td>
+				<td class="text-center" data-timestamp="1791293991">2026-10-06 13:39</td>
+
+				<td class="text-center">103</td>
+				<td class="text-center">13</td>
+				<td class="text-center">2110</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730327" title="(同人誌) [pan工場 (れもんpan)] クラスメイトは悪い子 (オリジナル)">(同人誌) [pan工場 (れもんpan)] クラスメイトは悪い子 (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730327.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:9e6d2b16ef9262865d2289a675cd2fbc8b33cc72&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5Bpan%E5%B7%A5%E5%A0%B4%20%28%E3%82%8C%E3%82%82%E3%82%93pan%29%5D%20%E3%82%AF%E3%83%A9%E3%82%B9%E3%83%A1%E3%82%A4%E3%83%88%E3%81%AF%E6%82%AA%E3%81%84%E5%AD%90%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">69.0 MiB</td>
+				<td class="text-center" data-timestamp="1791293972">2026-10-06 13:39</td>
+
+				<td class="text-center">95</td>
+				<td class="text-center">9</td>
+				<td class="text-center">2064</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730326" title="(同人誌) [Autumn Trip (カエデックス)] 小さい子がもっとえっちになっている本 (オリジナル) [DL版]">(同人誌) [Autumn Trip (カエデックス)] 小さい子がもっとえっちになっている本 (オリジナル) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730326.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:31263bc7a303d6b7c7c671a0a0e62a916887987d&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5BAutumn%20Trip%20%28%E3%82%AB%E3%82%A8%E3%83%87%E3%83%83%E3%82%AF%E3%82%B9%29%5D%20%E5%B0%8F%E3%81%95%E3%81%84%E5%AD%90%E3%81%8C%E3%82%82%E3%81%A3%E3%81%A8%E3%81%88%E3%81%A3%E3%81%A1%E3%81%AB%E3%81%AA%E3%81%A3%E3%81%A6%E3%81%84%E3%82%8B%E6%9C%AC%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">73.5 MiB</td>
+				<td class="text-center" data-timestamp="1791293970">2026-10-06 13:39</td>
+
+				<td class="text-center">106</td>
+				<td class="text-center">13</td>
+				<td class="text-center">2202</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730325" title="(同人誌) [大呂亭 (よろず)] しなやかでむだ肉ひとつない乙女 (アイドルマスター シンデレラガールズ) [DL版]">(同人誌) [大呂亭 (よろず)] しなやかでむだ肉ひとつない乙女 (アイドルマスター シンデレラガールズ) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730325.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:6c0e7dfbe3a143ce47e991b7f1529611820ba93c&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E5%A4%A7%E5%91%82%E4%BA%AD%20%28%E3%82%88%E3%82%8D%E3%81%9A%29%5D%20%E3%81%97%E3%81%AA%E3%82%84%E3%81%8B%E3%81%A7%E3%82%80%E3%81%A0%E8%82%89%E3%81%B2%E3%81%A8%E3%81%A4%E3%81%AA%E3%81%84%E4%B9%99%E5%A5%B3%20%28%E3%82%A2%E3%82%A4%E3%83%89%E3%83%AB%E3%83%9E%E3%82%B9%E3%82%BF%E3%83%BC%20%E3%82%B7%E3%83%B3%E3%83%87%E3%83%AC%E3%83%A9%E3%82%AC%E3%83%BC%E3%83%AB%E3%82%BA%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">107.1 MiB</td>
+				<td class="text-center" data-timestamp="1791293969">2026-10-06 13:39</td>
+
+				<td class="text-center">69</td>
+				<td class="text-center">13</td>
+				<td class="text-center">1575</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730324" title="(同人誌) [大呂亭 (よろず)] いちごの蕾とミントの苗床 (アイドルマスター シンデレラガールズ) [DL版]">(同人誌) [大呂亭 (よろず)] いちごの蕾とミントの苗床 (アイドルマスター シンデレラガールズ) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730324.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:6069384ec2609a819d61bd5ac496c69ebf49a6cd&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E5%A4%A7%E5%91%82%E4%BA%AD%20%28%E3%82%88%E3%82%8D%E3%81%9A%29%5D%20%E3%81%84%E3%81%A1%E3%81%94%E3%81%AE%E8%95%BE%E3%81%A8%E3%83%9F%E3%83%B3%E3%83%88%E3%81%AE%E8%8B%97%E5%BA%8A%20%28%E3%82%A2%E3%82%A4%E3%83%89%E3%83%AB%E3%83%9E%E3%82%B9%E3%82%BF%E3%83%BC%20%E3%82%B7%E3%83%B3%E3%83%87%E3%83%AC%E3%83%A9%E3%82%AC%E3%83%BC%E3%83%AB%E3%82%BA%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">118.0 MiB</td>
+				<td class="text-center" data-timestamp="1791293946">2026-10-06 13:39</td>
+
+				<td class="text-center">74</td>
+				<td class="text-center">8</td>
+				<td class="text-center">1510</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730323" title="(同人誌) [白門屋] 幼馴染は魔法少女！？ (オリジナル)">(同人誌) [白門屋] 幼馴染は魔法少女！？ (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730323.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:4f6b65787c3b40a22c152c5464a4063bf51afbbd&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E7%99%BD%E9%96%80%E5%B1%8B%5D%20%E5%B9%BC%E9%A6%B4%E6%9F%93%E3%81%AF%E9%AD%94%E6%B3%95%E5%B0%91%E5%A5%B3%EF%BC%81%EF%BC%9F%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">65.6 MiB</td>
+				<td class="text-center" data-timestamp="1791293940">2026-10-06 13:39</td>
+
+				<td class="text-center">81</td>
+				<td class="text-center">17</td>
+				<td class="text-center">1722</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730322" title="(同人誌) [SEPIA (OgataAz)] 妹が風呂に入る前に大人のおもちゃを置いてきた (オリジナル) [DL版]">(同人誌) [SEPIA (OgataAz)] 妹が風呂に入る前に大人のおもちゃを置いてきた (オリジナル) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730322.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:ce656feef20dfb5b459ae64a06b0e6cb1c9ba989&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5BSEPIA%20%28OgataAz%29%5D%20%E5%A6%B9%E3%81%8C%E9%A2%A8%E5%91%82%E3%81%AB%E5%85%A5%E3%82%8B%E5%89%8D%E3%81%AB%E5%A4%A7%E4%BA%BA%E3%81%AE%E3%81%8A%E3%82%82%E3%81%A1%E3%82%83%E3%82%92%E7%BD%AE%E3%81%84%E3%81%A6%E3%81%8D%E3%81%9F%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">37.0 MiB</td>
+				<td class="text-center" data-timestamp="1791293938">2026-10-06 13:38</td>
+
+				<td class="text-center">108</td>
+				<td class="text-center">12</td>
+				<td class="text-center">2525</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730311" title="(同人誌) [Autumn Trip (カエデックス)] 小さい子がえっちになっていく本 (オリジナル) [DL版]">(同人誌) [Autumn Trip (カエデックス)] 小さい子がえっちになっていく本 (オリジナル) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730311.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:48d9c2fd2c7e800106469965084e723533018ca5&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5BAutumn%20Trip%20%28%E3%82%AB%E3%82%A8%E3%83%87%E3%83%83%E3%82%AF%E3%82%B9%29%5D%20%E5%B0%8F%E3%81%95%E3%81%84%E5%AD%90%E3%81%8C%E3%81%88%E3%81%A3%E3%81%A1%E3%81%AB%E3%81%AA%E3%81%A3%E3%81%A6%E3%81%84%E3%81%8F%E6%9C%AC%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">97.7 MiB</td>
+				<td class="text-center" data-timestamp="1791292017">2026-10-06 13:06</td>
+
+				<td class="text-center">107</td>
+				<td class="text-center">17</td>
+				<td class="text-center">2272</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730306" title="(C108) [風間道場 (ムック)] USAギャルとおっぱいバーガーいかがですか？ (オリジナル) [DL版]">(C108) [風間道場 (ムック)] USAギャルとおっぱいバーガーいかがですか？ (オリジナル) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730306.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:b1da5097fd52174e283d7f111072ff7d97ff0088&amp;dn=%28C108%29%20%5B%E9%A2%A8%E9%96%93%E9%81%93%E5%A0%B4%20%28%E3%83%A0%E3%83%83%E3%82%AF%29%5D%20USA%E3%82%AE%E3%83%A3%E3%83%AB%E3%81%A8%E3%81%8A%E3%81%A3%E3%81%B1%E3%81%84%E3%83%90%E3%83%BC%E3%82%AC%E3%83%BC%E3%81%84%E3%81%8B%E3%81%8C%E3%81%A7%E3%81%99%E3%81%8B%EF%BC%9F%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">228.5 MiB</td>
+				<td class="text-center" data-timestamp="1791290222">2026-10-06 12:37</td>
+
+				<td class="text-center">73</td>
+				<td class="text-center">11</td>
+				<td class="text-center">1763</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730299" title="(同人誌) [ミモネル] シスターさんの欲望開放ックス♥">(同人誌) [ミモネル] シスターさんの欲望開放ックス♥</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730299.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:0738ddd92f0535c9f9d8c4d48d4aa050b351b47b&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E3%83%9F%E3%83%A2%E3%83%8D%E3%83%AB%5D%20%E3%82%B7%E3%82%B9%E3%82%BF%E3%83%BC%E3%81%95%E3%82%93%E3%81%AE%E6%AC%B2%E6%9C%9B%E9%96%8B%E6%94%BE%E3%83%83%E3%82%AF%E3%82%B9%E2%99%A5&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">10.5 MiB</td>
+				<td class="text-center" data-timestamp="1791288280">2026-10-06 12:04</td>
+
+				<td class="text-center">83</td>
+				<td class="text-center">9</td>
+				<td class="text-center">2043</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730296" title="(C108) [squeezecandyheaven (いちはや)] C108のおまけ (オリジナル)">(C108) [squeezecandyheaven (いちはや)] C108のおまけ (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730296.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:ae942460d7d59334addd6a75fe6d3d6f5d1c6e97&amp;dn=%28C108%29%20%5Bsqueezecandyheaven%20%28%E3%81%84%E3%81%A1%E3%81%AF%E3%82%84%29%5D%20C108%E3%81%AE%E3%81%8A%E3%81%BE%E3%81%91%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">24.6 MiB</td>
+				<td class="text-center" data-timestamp="1791287357">2026-10-06 11:49</td>
+
+				<td class="text-center">90</td>
+				<td class="text-center">18</td>
+				<td class="text-center">1902</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730295" title="(C108) [squeezecandyheaven (いちはや)] Squeezer lv.14 (オリジナル)">(C108) [squeezecandyheaven (いちはや)] Squeezer lv.14 (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730295.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:e0cdb1a3be4c489c9c773d8fd20b34e9c4cbcf5f&amp;dn=%28C108%29%20%5Bsqueezecandyheaven%20%28%E3%81%84%E3%81%A1%E3%81%AF%E3%82%84%29%5D%20Squeezer%20lv.14%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">20.5 MiB</td>
+				<td class="text-center" data-timestamp="1791287328">2026-10-06 11:48</td>
+
+				<td class="text-center">102</td>
+				<td class="text-center">26</td>
+				<td class="text-center">2028</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730294" title="(C108) [squeezecandyheaven (いちはや)] 神絵師の妹 (オリジナル)">(C108) [squeezecandyheaven (いちはや)] 神絵師の妹 (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730294.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:85bd3a13ce8fcb7ee16b96cfac8a8397c23b1246&amp;dn=%28C108%29%20%5Bsqueezecandyheaven%20%28%E3%81%84%E3%81%A1%E3%81%AF%E3%82%84%29%5D%20%E7%A5%9E%E7%B5%B5%E5%B8%AB%E3%81%AE%E5%A6%B9%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">105.2 MiB</td>
+				<td class="text-center" data-timestamp="1791287315">2026-10-06 11:48</td>
+
+				<td class="text-center">112</td>
+				<td class="text-center">18</td>
+				<td class="text-center">2339</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730292" title="(C108) [squeezecandyheaven (いちはや)] あの子は炎上中 (オリジナル)">(C108) [squeezecandyheaven (いちはや)] あの子は炎上中 (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730292.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:e85b15fe6726cd6896ddcdadbe124041a6187112&amp;dn=%28C108%29%20%5Bsqueezecandyheaven%20%28%E3%81%84%E3%81%A1%E3%81%AF%E3%82%84%29%5D%20%E3%81%82%E3%81%AE%E5%AD%90%E3%81%AF%E7%82%8E%E4%B8%8A%E4%B8%AD%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">101.1 MiB</td>
+				<td class="text-center" data-timestamp="1791287294">2026-10-06 11:48</td>
+
+				<td class="text-center">113</td>
+				<td class="text-center">22</td>
+				<td class="text-center">2393</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730291" title="(ぷにケット51) [ひやしてかためる (熊沢)] 事故物件シリーズ 番外編④ (オリジナル)">(ぷにケット51) [ひやしてかためる (熊沢)] 事故物件シリーズ 番外編④ (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730291.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:4d5c311b0e3049658d04eb0150ed2ac0e6aee31c&amp;dn=%28%E3%81%B7%E3%81%AB%E3%82%B1%E3%83%83%E3%83%8851%29%20%5B%E3%81%B2%E3%82%84%E3%81%97%E3%81%A6%E3%81%8B%E3%81%9F%E3%82%81%E3%82%8B%20%28%E7%86%8A%E6%B2%A2%29%5D%20%E4%BA%8B%E6%95%85%E7%89%A9%E4%BB%B6%E3%82%B7%E3%83%AA%E3%83%BC%E3%82%BA%20%E7%95%AA%E5%A4%96%E7%B7%A8%E2%91%A3%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">30.7 MiB</td>
+				<td class="text-center" data-timestamp="1791287274">2026-10-06 11:47</td>
+
+				<td class="text-center">58</td>
+				<td class="text-center">6</td>
+				<td class="text-center">1262</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730217" title="(C105) [ムクムク鳥 (はせがわひらりー)] トゥインクルプリンセスがんばえ～! (アイドルマスター ミリオンライブ!)">(C105) [ムクムク鳥 (はせがわひらりー)] トゥインクルプリンセスがんばえ～! (アイドルマスター ミリオンライブ!)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730217.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:c929c8e4a019ca8b898da38a0773a2ae41e6b986&amp;dn=%28C105%29%20%5B%E3%83%A0%E3%82%AF%E3%83%A0%E3%82%AF%E9%B3%A5%20%28%E3%81%AF%E3%81%9B%E3%81%8C%E3%82%8F%E3%81%B2%E3%82%89%E3%82%8A%E3%83%BC%29%5D%20%E3%83%88%E3%82%A5%E3%82%A4%E3%83%B3%E3%82%AF%E3%83%AB%E3%83%97%E3%83%AA%E3%83%B3%E3%82%BB%E3%82%B9%E3%81%8C%E3%82%93%E3%81%B0%E3%81%88%EF%BD%9E%21%20%28%E3%82%A2%E3%82%A4%E3%83%89%E3%83%AB%E3%83%9E%E3%82%B9%E3%82%BF%E3%83%BC%20%E3%83%9F%E3%83%AA%E3%82%AA%E3%83%B3%E3%83%A9%E3%82%A4%E3%83%96%21%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">237.5 MiB</td>
+				<td class="text-center" data-timestamp="1791276250">2026-10-06 08:44</td>
+
+				<td class="text-center">41</td>
+				<td class="text-center">27</td>
+				<td class="text-center">945</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730216" title="(C101) [ムクムク鳥 (はせがわひらりー)] まほう少女セリカとわるものギョーカイジン (アイドルマスター ミリオンライブ!)">(C101) [ムクムク鳥 (はせがわひらりー)] まほう少女セリカとわるものギョーカイジン (アイドルマスター ミリオンライブ!)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730216.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:8ee741b88dce6145802f12bcee4a9f87ebc95cab&amp;dn=%28C101%29%20%5B%E3%83%A0%E3%82%AF%E3%83%A0%E3%82%AF%E9%B3%A5%20%28%E3%81%AF%E3%81%9B%E3%81%8C%E3%82%8F%E3%81%B2%E3%82%89%E3%82%8A%E3%83%BC%29%5D%20%E3%81%BE%E3%81%BB%E3%81%86%E5%B0%91%E5%A5%B3%E3%82%BB%E3%83%AA%E3%82%AB%E3%81%A8%E3%82%8F%E3%82%8B%E3%82%82%E3%81%AE%E3%82%AE%E3%83%A7%E3%83%BC%E3%82%AB%E3%82%A4%E3%82%B8%E3%83%B3%20%28%E3%82%A2%E3%82%A4%E3%83%89%E3%83%AB%E3%83%9E%E3%82%B9%E3%82%BF%E3%83%BC%20%E3%83%9F%E3%83%AA%E3%82%AA%E3%83%B3%E3%83%A9%E3%82%A4%E3%83%96%21%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">205.5 MiB</td>
+				<td class="text-center" data-timestamp="1791275998">2026-10-06 08:39</td>
+
+				<td class="text-center">40</td>
+				<td class="text-center">10</td>
+				<td class="text-center">947</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730214" title="(C99) [ムクムク鳥 (はせがわひらりー)] トゥインクルリズムのおしごと (アイドルマスター ミリオンライブ!)">(C99) [ムクムク鳥 (はせがわひらりー)] トゥインクルリズムのおしごと (アイドルマスター ミリオンライブ!)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730214.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:29f2624510c7d3214ff581f1500baba8195cf34a&amp;dn=%28C99%29%20%5B%E3%83%A0%E3%82%AF%E3%83%A0%E3%82%AF%E9%B3%A5%20%28%E3%81%AF%E3%81%9B%E3%81%8C%E3%82%8F%E3%81%B2%E3%82%89%E3%82%8A%E3%83%BC%29%5D%20%E3%83%88%E3%82%A5%E3%82%A4%E3%83%B3%E3%82%AF%E3%83%AB%E3%83%AA%E3%82%BA%E3%83%A0%E3%81%AE%E3%81%8A%E3%81%97%E3%81%94%E3%81%A8%20%28%E3%82%A2%E3%82%A4%E3%83%89%E3%83%AB%E3%83%9E%E3%82%B9%E3%82%BF%E3%83%BC%20%E3%83%9F%E3%83%AA%E3%82%AA%E3%83%B3%E3%83%A9%E3%82%A4%E3%83%96%21%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">102.1 MiB</td>
+				<td class="text-center" data-timestamp="1791275830">2026-10-06 08:37</td>
+
+				<td class="text-center">40</td>
+				<td class="text-center">17</td>
+				<td class="text-center">891</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4730213" title="(C96) [ムクムク鳥 (はせがわひらりー)] トゥインクルリズムのおしごと! (アイドルマスター ミリオンライブ!)">(C96) [ムクムク鳥 (はせがわひらりー)] トゥインクルリズムのおしごと! (アイドルマスター ミリオンライブ!)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4730213.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:ee12600bafbabea449a58302cebfd8b466642c0e&amp;dn=%28C96%29%20%5B%E3%83%A0%E3%82%AF%E3%83%A0%E3%82%AF%E9%B3%A5%20%28%E3%81%AF%E3%81%9B%E3%81%8C%E3%82%8F%E3%81%B2%E3%82%89%E3%82%8A%E3%83%BC%29%5D%20%E3%83%88%E3%82%A5%E3%82%A4%E3%83%B3%E3%82%AF%E3%83%AB%E3%83%AA%E3%82%BA%E3%83%A0%E3%81%AE%E3%81%8A%E3%81%97%E3%81%94%E3%81%A8%21%20%28%E3%82%A2%E3%82%A4%E3%83%89%E3%83%AB%E3%83%9E%E3%82%B9%E3%82%BF%E3%83%BC%20%E3%83%9F%E3%83%AA%E3%82%AA%E3%83%B3%E3%83%A9%E3%82%A4%E3%83%96%21%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">110.0 MiB</td>
+				<td class="text-center" data-timestamp="1791275825">2026-10-06 08:37</td>
+
+				<td class="text-center">44</td>
+				<td class="text-center">13</td>
+				<td class="text-center">899</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729858" title="(C108) [新生フロンティア (ジャイロウ、kozi)] 淫乱少年 VOL.6 (オリジナル) [DL版]">(C108) [新生フロンティア (ジャイロウ、kozi)] 淫乱少年 VOL.6 (オリジナル) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729858.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:64d01f6b98d6e66221a1ba5a49a48ace55538843&amp;dn=%28C108%29%20%5B%E6%96%B0%E7%94%9F%E3%83%95%E3%83%AD%E3%83%B3%E3%83%86%E3%82%A3%E3%82%A2%20%28%E3%82%B8%E3%83%A3%E3%82%A4%E3%83%AD%E3%82%A6%E3%80%81kozi%29%5D%20%E6%B7%AB%E4%B9%B1%E5%B0%91%E5%B9%B4%20VOL.6%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">126.6 MiB</td>
+				<td class="text-center" data-timestamp="1791249326">2026-10-06 01:15</td>
+
+				<td class="text-center">60</td>
+				<td class="text-center">13</td>
+				<td class="text-center">1797</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729853" title="(同人誌) [ぽりうれたん] フレネミーの負けオナニー">(同人誌) [ぽりうれたん] フレネミーの負けオナニー</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729853.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:b57616596f6c4ee4effc0e93bce5162b8b4d502d&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E3%81%BD%E3%82%8A%E3%81%86%E3%82%8C%E3%81%9F%E3%82%93%5D%20%E3%83%95%E3%83%AC%E3%83%8D%E3%83%9F%E3%83%BC%E3%81%AE%E8%B2%A0%E3%81%91%E3%82%AA%E3%83%8A%E3%83%8B%E3%83%BC&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">57.0 MiB</td>
+				<td class="text-center" data-timestamp="1791245633">2026-10-06 00:13</td>
+
+				<td class="text-center">113</td>
+				<td class="text-center">9</td>
+				<td class="text-center">3164</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729851" title="(同人誌) [ぽりうれたん] うっかりサイズ間違いの水着を持ってきた人妻">(同人誌) [ぽりうれたん] うっかりサイズ間違いの水着を持ってきた人妻</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729851.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:610470b377feed308123e1c68be53de5fabc8a71&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E3%81%BD%E3%82%8A%E3%81%86%E3%82%8C%E3%81%9F%E3%82%93%5D%20%E3%81%86%E3%81%A3%E3%81%8B%E3%82%8A%E3%82%B5%E3%82%A4%E3%82%BA%E9%96%93%E9%81%95%E3%81%84%E3%81%AE%E6%B0%B4%E7%9D%80%E3%82%92%E6%8C%81%E3%81%A3%E3%81%A6%E3%81%8D%E3%81%9F%E4%BA%BA%E5%A6%BB&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">46.8 MiB</td>
+				<td class="text-center" data-timestamp="1791245191">2026-10-06 00:06</td>
+
+				<td class="text-center">160</td>
+				<td class="text-center">12</td>
+				<td class="text-center">4190</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729849" title="(同人誌) [ぽりうれたん] バ先のおばさん">(同人誌) [ぽりうれたん] バ先のおばさん</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729849.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:14b89257e3c47afcd0d0062458710df0495d266d&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E3%81%BD%E3%82%8A%E3%81%86%E3%82%8C%E3%81%9F%E3%82%93%5D%20%E3%83%90%E5%85%88%E3%81%AE%E3%81%8A%E3%81%B0%E3%81%95%E3%82%93&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">55.2 MiB</td>
+				<td class="text-center" data-timestamp="1791245158">2026-10-06 00:05</td>
+
+				<td class="text-center">148</td>
+				<td class="text-center">13</td>
+				<td class="text-center">4201</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729848" title="(同人誌) [ぽりうれたん] 同人誌書店のフシギちゃん">(同人誌) [ぽりうれたん] 同人誌書店のフシギちゃん</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729848.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:27741c56622c94a1c52d5a7fd4193a051d80b94b&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E3%81%BD%E3%82%8A%E3%81%86%E3%82%8C%E3%81%9F%E3%82%93%5D%20%E5%90%8C%E4%BA%BA%E8%AA%8C%E6%9B%B8%E5%BA%97%E3%81%AE%E3%83%95%E3%82%B7%E3%82%AE%E3%81%A1%E3%82%83%E3%82%93&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">62.0 MiB</td>
+				<td class="text-center" data-timestamp="1791245156">2026-10-06 00:05</td>
+
+				<td class="text-center">141</td>
+				<td class="text-center">16</td>
+				<td class="text-center">3841</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729815" title="(同人誌) [夏色缶詰 (なつあめ)] お姉ちゃんの露出体験記えとせとら (オリジナル)">(同人誌) [夏色缶詰 (なつあめ)] お姉ちゃんの露出体験記えとせとら (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729815.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:114dbc53c5873db59ea633f2196b560e1427007f&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E5%A4%8F%E8%89%B2%E7%BC%B6%E8%A9%B0%20%28%E3%81%AA%E3%81%A4%E3%81%82%E3%82%81%29%5D%20%E3%81%8A%E5%A7%89%E3%81%A1%E3%82%83%E3%82%93%E3%81%AE%E9%9C%B2%E5%87%BA%E4%BD%93%E9%A8%93%E8%A8%98%E3%81%88%E3%81%A8%E3%81%9B%E3%81%A8%E3%82%89%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">39.5 MiB</td>
+				<td class="text-center" data-timestamp="1791230864">2026-10-05 20:07</td>
+
+				<td class="text-center">54</td>
+				<td class="text-center">11</td>
+				<td class="text-center">1611</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729810" title="(同人誌) [おっと] 土日に家族の目の前で強盗に犯され続けた母親 (オリジナル)">(同人誌) [おっと] 土日に家族の目の前で強盗に犯され続けた母親 (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729810.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:c7ca621545ab7b2b890069b1743d2b3d57f15794&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E3%81%8A%E3%81%A3%E3%81%A8%5D%20%E5%9C%9F%E6%97%A5%E3%81%AB%E5%AE%B6%E6%97%8F%E3%81%AE%E7%9B%AE%E3%81%AE%E5%89%8D%E3%81%A7%E5%BC%B7%E7%9B%97%E3%81%AB%E7%8A%AF%E3%81%95%E3%82%8C%E7%B6%9A%E3%81%91%E3%81%9F%E6%AF%8D%E8%A6%AA%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">792.9 MiB</td>
+				<td class="text-center" data-timestamp="1791229018">2026-10-05 19:36</td>
+
+				<td class="text-center">57</td>
+				<td class="text-center">15</td>
+				<td class="text-center">1751</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729802" title="(同人誌) [みしかるわーるど] クレイジースイマーSS Another (オリジナル)">(同人誌) [みしかるわーるど] クレイジースイマーSS Another (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729802.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:4605daf4241901cfc497f322a10f2dbd93f36eb8&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E3%81%BF%E3%81%97%E3%81%8B%E3%82%8B%E3%82%8F%E3%83%BC%E3%82%8B%E3%81%A9%5D%20%E3%82%AF%E3%83%AC%E3%82%A4%E3%82%B8%E3%83%BC%E3%82%B9%E3%82%A4%E3%83%9E%E3%83%BCSS%20Another%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">220.9 MiB</td>
+				<td class="text-center" data-timestamp="1791221422">2026-10-05 17:30</td>
+
+				<td class="text-center">102</td>
+				<td class="text-center">15</td>
+				<td class="text-center">3828</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729765" title="(C107) [Chillin Party (Raika9)] 御坂美琴写真集ZIX (とある科学の超電磁砲)">(C107) [Chillin Party (Raika9)] 御坂美琴写真集ZIX (とある科学の超電磁砲)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729765.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:31a20680cf7a2ac67dd737e5f1d9628ca2b0cbe9&amp;dn=%28C107%29%20%5BChillin%20Party%20%28Raika9%29%5D%20%E5%BE%A1%E5%9D%82%E7%BE%8E%E7%90%B4%E5%86%99%E7%9C%9F%E9%9B%86ZIX%20%28%E3%81%A8%E3%81%82%E3%82%8B%E7%A7%91%E5%AD%A6%E3%81%AE%E8%B6%85%E9%9B%BB%E7%A3%81%E7%A0%B2%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">193.1 MiB</td>
+				<td class="text-center" data-timestamp="1791216257">2026-10-05 16:04</td>
+
+				<td class="text-center">56</td>
+				<td class="text-center">11</td>
+				<td class="text-center">1856</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729743" title="(C93) [Chillin Party (Raika9)] 御坂美琴写真集6 (とある科学の超電磁砲)">(C93) [Chillin Party (Raika9)] 御坂美琴写真集6 (とある科学の超電磁砲)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729743.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:f37b84facd54e97161f9ec1d2c0220ff2a64df7e&amp;dn=%28C93%29%20%5BChillin%20Party%20%28Raika9%29%5D%20%E5%BE%A1%E5%9D%82%E7%BE%8E%E7%90%B4%E5%86%99%E7%9C%9F%E9%9B%866%20%28%E3%81%A8%E3%81%82%E3%82%8B%E7%A7%91%E5%AD%A6%E3%81%AE%E8%B6%85%E9%9B%BB%E7%A3%81%E7%A0%B2%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">122.0 MiB</td>
+				<td class="text-center" data-timestamp="1791215949">2026-10-05 15:59</td>
+
+				<td class="text-center">43</td>
+				<td class="text-center">9</td>
+				<td class="text-center">1497</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729742" title="(同人誌) [豚汁ストック完了ですわっ! (のばく)] 同じクラスの高嶺の花 (幼馴染)とヤれることになった話 (オリジナル)">(同人誌) [豚汁ストック完了ですわっ! (のばく)] 同じクラスの高嶺の花 (幼馴染)とヤれることになった話 (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729742.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:002c84d41392dedeb8ed965bd35808eaa366ea1a&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E8%B1%9A%E6%B1%81%E3%82%B9%E3%83%88%E3%83%83%E3%82%AF%E5%AE%8C%E4%BA%86%E3%81%A7%E3%81%99%E3%82%8F%E3%81%A3%21%20%28%E3%81%AE%E3%81%B0%E3%81%8F%29%5D%20%E5%90%8C%E3%81%98%E3%82%AF%E3%83%A9%E3%82%B9%E3%81%AE%E9%AB%98%E5%B6%BA%E3%81%AE%E8%8A%B1%20%28%E5%B9%BC%E9%A6%B4%E6%9F%93%29%E3%81%A8%E3%83%A4%E3%82%8C%E3%82%8B%E3%81%93%E3%81%A8%E3%81%AB%E3%81%AA%E3%81%A3%E3%81%9F%E8%A9%B1%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">236.3 MiB</td>
+				<td class="text-center" data-timestamp="1791214023">2026-10-05 15:27</td>
+
+				<td class="text-center">161</td>
+				<td class="text-center">23</td>
+				<td class="text-center">5624</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729739" title="(同人誌) [ぷらんぷまん] メイドで生ハメ練習したらお嬢様のコキ穴を攻略だ! (オリジナル)">(同人誌) [ぷらんぷまん] メイドで生ハメ練習したらお嬢様のコキ穴を攻略だ! (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729739.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:f265a2101ac86d57c3fb181c4f749949c596c473&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E3%81%B7%E3%82%89%E3%82%93%E3%81%B7%E3%81%BE%E3%82%93%5D%20%E3%83%A1%E3%82%A4%E3%83%89%E3%81%A7%E7%94%9F%E3%83%8F%E3%83%A1%E7%B7%B4%E7%BF%92%E3%81%97%E3%81%9F%E3%82%89%E3%81%8A%E5%AC%A2%E6%A7%98%E3%81%AE%E3%82%B3%E3%82%AD%E7%A9%B4%E3%82%92%E6%94%BB%E7%95%A5%E3%81%A0%21%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">198.2 MiB</td>
+				<td class="text-center" data-timestamp="1791213063">2026-10-05 15:11</td>
+
+				<td class="text-center">159</td>
+				<td class="text-center">15</td>
+				<td class="text-center">5015</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729729" title="(C105) [汁まみれ定食 (汁助)] 僕のクラスのグラドルが絶倫チ◯コに堕ちるまで (オリジナル) [DL版]">(C105) [汁まみれ定食 (汁助)] 僕のクラスのグラドルが絶倫チ◯コに堕ちるまで (オリジナル) [DL版]</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729729.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:fcb397343d5cfc5c9f723c4d20e6beeee4273a7d&amp;dn=%28C105%29%20%5B%E6%B1%81%E3%81%BE%E3%81%BF%E3%82%8C%E5%AE%9A%E9%A3%9F%20%28%E6%B1%81%E5%8A%A9%29%5D%20%E5%83%95%E3%81%AE%E3%82%AF%E3%83%A9%E3%82%B9%E3%81%AE%E3%82%B0%E3%83%A9%E3%83%89%E3%83%AB%E3%81%8C%E7%B5%B6%E5%80%AB%E3%83%81%E2%97%AF%E3%82%B3%E3%81%AB%E5%A0%95%E3%81%A1%E3%82%8B%E3%81%BE%E3%81%A7%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29%20%5BDL%E7%89%88%5D&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">1.7 GiB</td>
+				<td class="text-center" data-timestamp="1791212201">2026-10-05 14:56</td>
+
+				<td class="text-center">109</td>
+				<td class="text-center">30</td>
+				<td class="text-center">4031</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729717" title="(同人誌) [K-てん] 催眠おじさんのおんがえし 催眠おじさんはスマホを拾ってもらったお礼に男の子の憧れのお姉さんを催眠雌奴隷にしてあげましたとさ (オリジナル)">(同人誌) [K-てん] 催眠おじさんのおんがえし 催眠おじさんはスマホを拾ってもらったお礼に男の子の憧れのお姉さんを催眠雌奴隷にしてあげましたとさ (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729717.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:5876742ae1e5f133ea43866de49f2cf2fb0a21b5&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5BK-%E3%81%A6%E3%82%93%5D%20%E5%82%AC%E7%9C%A0%E3%81%8A%E3%81%98%E3%81%95%E3%82%93%E3%81%AE%E3%81%8A%E3%82%93%E3%81%8C%E3%81%88%E3%81%97%20%E5%82%AC%E7%9C%A0%E3%81%8A%E3%81%98%E3%81%95%E3%82%93%E3%81%AF%E3%82%B9%E3%83%9E%E3%83%9B%E3%82%92%E6%8B%BE%E3%81%A3%E3%81%A6%E3%82%82%E3%82%89%E3%81%A3%E3%81%9F%E3%81%8A%E7%A4%BC%E3%81%AB%E7%94%B7%E3%81%AE%E5%AD%90%E3%81%AE%E6%86%A7%E3%82%8C%E3%81%AE%E3%81%8A%E5%A7%89%E3%81%95%E3%82%93%E3%82%92%E5%82%AC%E7%9C%A0%E9%9B%8C%E5%A5%B4%E9%9A%B7%E3%81%AB%E3%81%97%E3%81%A6%E3%81%82%E3%81%92%E3%81%BE%E3%81%97%E3%81%9F%E3%81%A8%E3%81%95%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">45.8 MiB</td>
+				<td class="text-center" data-timestamp="1791209884">2026-10-05 14:18</td>
+
+				<td class="text-center">161</td>
+				<td class="text-center">12</td>
+				<td class="text-center">5208</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729709" title="(C108) [régnié (国峰ユズキ)] アスナがえっちな看病をしてくるので、性教育してあげた (ブルーアーカイブ)">(C108) [régnié (国峰ユズキ)] アスナがえっちな看病をしてくるので、性教育してあげた (ブルーアーカイブ)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729709.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:d28bf95df489eec146ead8acfad815c18c7eccd9&amp;dn=%28C108%29%20%5Br%C3%A9gni%C3%A9%20%28%E5%9B%BD%E5%B3%B0%E3%83%A6%E3%82%BA%E3%82%AD%29%5D%20%E3%82%A2%E3%82%B9%E3%83%8A%E3%81%8C%E3%81%88%E3%81%A3%E3%81%A1%E3%81%AA%E7%9C%8B%E7%97%85%E3%82%92%E3%81%97%E3%81%A6%E3%81%8F%E3%82%8B%E3%81%AE%E3%81%A7%E3%80%81%E6%80%A7%E6%95%99%E8%82%B2%E3%81%97%E3%81%A6%E3%81%82%E3%81%92%E3%81%9F%20%28%E3%83%96%E3%83%AB%E3%83%BC%E3%82%A2%E3%83%BC%E3%82%AB%E3%82%A4%E3%83%96%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">5.7 MiB</td>
+				<td class="text-center" data-timestamp="1791209256">2026-10-05 14:07</td>
+
+				<td class="text-center">73</td>
+				<td class="text-center">11</td>
+				<td class="text-center">2170</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729697" title="(同人誌) [屋上の細道 (コジコジ)] ワクワク!全裸で!いなか暮らし (オリジナル)">(同人誌) [屋上の細道 (コジコジ)] ワクワク!全裸で!いなか暮らし (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729697.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:010a56567923314ad8921eed7bcefba747f01a00&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E5%B1%8B%E4%B8%8A%E3%81%AE%E7%B4%B0%E9%81%93%20%28%E3%82%B3%E3%82%B8%E3%82%B3%E3%82%B8%29%5D%20%E3%83%AF%E3%82%AF%E3%83%AF%E3%82%AF%21%E5%85%A8%E8%A3%B8%E3%81%A7%21%E3%81%84%E3%81%AA%E3%81%8B%E6%9A%AE%E3%82%89%E3%81%97%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">56.4 MiB</td>
+				<td class="text-center" data-timestamp="1791205726">2026-10-05 13:08</td>
+
+				<td class="text-center">70</td>
+				<td class="text-center">6</td>
+				<td class="text-center">2175</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729696" title="(同人誌) [冬眠だいこん (甘guri)] 赤ちゃんプレイをしよう (オリジナル)">(同人誌) [冬眠だいこん (甘guri)] 赤ちゃんプレイをしよう (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729696.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:d49361e918a5f423cc856cef22b68a4962c99dd7&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E5%86%AC%E7%9C%A0%E3%81%A0%E3%81%84%E3%81%93%E3%82%93%20%28%E7%94%98guri%29%5D%20%E8%B5%A4%E3%81%A1%E3%82%83%E3%82%93%E3%83%97%E3%83%AC%E3%82%A4%E3%82%92%E3%81%97%E3%82%88%E3%81%86%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">56.2 MiB</td>
+				<td class="text-center" data-timestamp="1791205709">2026-10-05 13:08</td>
+
+				<td class="text-center">43</td>
+				<td class="text-center">7</td>
+				<td class="text-center">1587</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729676" title="(同人誌) [ユエ] 瀬那ちゃんと兄貴に内緒で温泉旅行編">(同人誌) [ユエ] 瀬那ちゃんと兄貴に内緒で温泉旅行編</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729676.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:6f85e75b0bc6838fe1cc3a40ec8acb80754f1a3c&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E3%83%A6%E3%82%A8%5D%20%E7%80%AC%E9%82%A3%E3%81%A1%E3%82%83%E3%82%93%E3%81%A8%E5%85%84%E8%B2%B4%E3%81%AB%E5%86%85%E7%B7%92%E3%81%A7%E6%B8%A9%E6%B3%89%E6%97%85%E8%A1%8C%E7%B7%A8&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">59.6 MiB</td>
+				<td class="text-center" data-timestamp="1791203519">2026-10-05 12:31</td>
+
+				<td class="text-center">69</td>
+				<td class="text-center">7</td>
+				<td class="text-center">3087</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729666" title="(同人誌) [JUMBOMAX (石原そうか)] 爆乳JKコスプレイヤどスケベマリアさん3 (レコラヴ)">(同人誌) [JUMBOMAX (石原そうか)] 爆乳JKコスプレイヤどスケベマリアさん3 (レコラヴ)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729666.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:e7a2066f7c3ae702319ffd0f6a6edd0e3ff7b6e0&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5BJUMBOMAX%20%28%E7%9F%B3%E5%8E%9F%E3%81%9D%E3%81%86%E3%81%8B%29%5D%20%E7%88%86%E4%B9%B3JK%E3%82%B3%E3%82%B9%E3%83%97%E3%83%AC%E3%82%A4%E3%83%A4%E3%81%A9%E3%82%B9%E3%82%B1%E3%83%99%E3%83%9E%E3%83%AA%E3%82%A2%E3%81%95%E3%82%933%20%28%E3%83%AC%E3%82%B3%E3%83%A9%E3%83%B4%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">57.3 MiB</td>
+				<td class="text-center" data-timestamp="1791202151">2026-10-05 12:09</td>
+
+				<td class="text-center">57</td>
+				<td class="text-center">5</td>
+				<td class="text-center">2182</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729646" title="(同人誌) [ぽりうれたん] フレネミーの負けオナニー (オリジナル)">(同人誌) [ぽりうれたん] フレネミーの負けオナニー (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729646.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:fa6f86bd2afb2f9056dcf75e05b3bec6093350a9&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E3%81%BD%E3%82%8A%E3%81%86%E3%82%8C%E3%81%9F%E3%82%93%5D%20%E3%83%95%E3%83%AC%E3%83%8D%E3%83%9F%E3%83%BC%E3%81%AE%E8%B2%A0%E3%81%91%E3%82%AA%E3%83%8A%E3%83%8B%E3%83%BC%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">56.2 MiB</td>
+				<td class="text-center" data-timestamp="1791198562">2026-10-05 11:09</td>
+
+				<td class="text-center">62</td>
+				<td class="text-center">3</td>
+				<td class="text-center">2889</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729644" title="(同人誌) [ぽりうれたん] おちんちんが生えた日 (オリジナル)">(同人誌) [ぽりうれたん] おちんちんが生えた日 (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729644.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:a48ac643576585c9c97982f131557a5a2c287a92&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E3%81%BD%E3%82%8A%E3%81%86%E3%82%8C%E3%81%9F%E3%82%93%5D%20%E3%81%8A%E3%81%A1%E3%82%93%E3%81%A1%E3%82%93%E3%81%8C%E7%94%9F%E3%81%88%E3%81%9F%E6%97%A5%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">71.4 MiB</td>
+				<td class="text-center" data-timestamp="1791197795">2026-10-05 10:56</td>
+
+				<td class="text-center">77</td>
+				<td class="text-center">8</td>
+				<td class="text-center">3221</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729552" title="(同人誌) [GN (Girl&#39;s Number)] 田舎の兄妹ととなりの女の子 (オリジナル)">(同人誌) [GN (Girl&#39;s Number)] 田舎の兄妹ととなりの女の子 (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729552.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:ee49f796eddb513b1279930dad57658e99285029&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5BGN%20%28Girl%27s%20Number%29%5D%20%E7%94%B0%E8%88%8E%E3%81%AE%E5%85%84%E5%A6%B9%E3%81%A8%E3%81%A8%E3%81%AA%E3%82%8A%E3%81%AE%E5%A5%B3%E3%81%AE%E5%AD%90%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">168.8 MiB</td>
+				<td class="text-center" data-timestamp="1791188246">2026-10-05 08:17</td>
+
+				<td class="text-center">95</td>
+				<td class="text-center">20</td>
+				<td class="text-center">3912</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729551" title="(同人誌) [あまあまつばめ観測所 (あまあまつばめ)] 暑さのせいにして。 (オリジナル)">(同人誌) [あまあまつばめ観測所 (あまあまつばめ)] 暑さのせいにして。 (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729551.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:d10951da070bbd9776eb6a6e50917eddad96b36c&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E3%81%82%E3%81%BE%E3%81%82%E3%81%BE%E3%81%A4%E3%81%B0%E3%82%81%E8%A6%B3%E6%B8%AC%E6%89%80%20%28%E3%81%82%E3%81%BE%E3%81%82%E3%81%BE%E3%81%A4%E3%81%B0%E3%82%81%29%5D%20%E6%9A%91%E3%81%95%E3%81%AE%E3%81%9B%E3%81%84%E3%81%AB%E3%81%97%E3%81%A6%E3%80%82%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">70.4 MiB</td>
+				<td class="text-center" data-timestamp="1791188206">2026-10-05 08:16</td>
+
+				<td class="text-center">64</td>
+				<td class="text-center">9</td>
+				<td class="text-center">2715</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729550" title="(同人誌) [咲凛玖] 全裸登校3番外 (オリジナル)">(同人誌) [咲凛玖] 全裸登校3番外 (オリジナル)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729550.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:ca46a1df87c4b791b556689a0d8322ea4c4b1f2c&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5B%E5%92%B2%E5%87%9B%E7%8E%96%5D%20%E5%85%A8%E8%A3%B8%E7%99%BB%E6%A0%A13%E7%95%AA%E5%A4%96%20%28%E3%82%AA%E3%83%AA%E3%82%B8%E3%83%8A%E3%83%AB%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">19.4 MiB</td>
+				<td class="text-center" data-timestamp="1791188178">2026-10-05 08:16</td>
+
+				<td class="text-center">56</td>
+				<td class="text-center">8</td>
+				<td class="text-center">2525</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729549" title="(C108) [サルパッチョ (わいら)] 一ヶ月間怠惰に暮らさないと出られないグラナート (Fate Grand Order)">(C108) [サルパッチョ (わいら)] 一ヶ月間怠惰に暮らさないと出られないグラナート (Fate Grand Order)</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729549.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:57a17f2de6c094ce14d16e23f9f275eaa27bd6a0&amp;dn=%28C108%29%20%5B%E3%82%B5%E3%83%AB%E3%83%91%E3%83%83%E3%83%81%E3%83%A7%20%28%E3%82%8F%E3%81%84%E3%82%89%29%5D%20%E4%B8%80%E3%83%B6%E6%9C%88%E9%96%93%E6%80%A0%E6%83%B0%E3%81%AB%E6%9A%AE%E3%82%89%E3%81%95%E3%81%AA%E3%81%84%E3%81%A8%E5%87%BA%E3%82%89%E3%82%8C%E3%81%AA%E3%81%84%E3%82%B0%E3%83%A9%E3%83%8A%E3%83%BC%E3%83%88%20%28Fate%20Grand%20Order%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">105.0 MiB</td>
+				<td class="text-center" data-timestamp="1791188155">2026-10-05 08:15</td>
+
+				<td class="text-center">55</td>
+				<td class="text-center">7</td>
+				<td class="text-center">2230</td>
+			</tr>
+			<tr class="success">
+				<td>
+					<a href="/?c=1_2" title="Art - Doujinshi">
+						<img src="/static/img/icons/sukebei/1_2.png" alt="Art - Doujinshi" class="category-icon">
+					</a>
+				</td>
+				<td colspan="2">
+					<a href="/view/4729492" title="(同人誌) [Houkago shounen] レミエール (Zenless Zone Zero))">(同人誌) [Houkago shounen] レミエール (Zenless Zone Zero))</a>
+				</td>
+				<td class="text-center">
+					<a href="/download/4729492.torrent"><i class="fa fa-fw fa-download"></i></a>
+					<a href="magnet:?xt=urn:btih:fb5c3e1beb970b368ed40a1890be92809924a66d&amp;dn=%28%E5%90%8C%E4%BA%BA%E8%AA%8C%29%20%5BHoukago%20shounen%5D%20%E3%83%AC%E3%83%9F%E3%82%A8%E3%83%BC%E3%83%AB%20%28Zenless%20Zone%20Zero%29%29&amp;tr=http%3A%2F%2Fsukebei.tracker.wf%3A8888%2Fannounce&amp;tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&amp;tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&amp;tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"><i class="fa fa-fw fa-magnet"></i></a>
+				</td>
+				<td class="text-center">97.3 MiB</td>
+				<td class="text-center" data-timestamp="1791178147">2026-10-05 05:29</td>
+
+				<td class="text-center">35</td>
+				<td class="text-center">8</td>
+				<td class="text-center">1449</td>
+			</tr>
+		</tbody>
+	</table>
+</div>
+
+<div class="center">
+	<nav>
+  <ul class="pagination">
+    <li class="disabled"><a href="#">&laquo;</a></li>
+        <li class="active"><a href="#">1 <span class="sr-only">(current)</span></a></li>
+        <li><a href="/?c=1_2&amp;p=2">2</a></li>
+        <li><a href="/?c=1_2&amp;p=3">3</a></li>
+        <li><a href="/?c=1_2&amp;p=4">4</a></li>
+        <li><a href="/?c=1_2&amp;p=5">5</a></li>
+        <li><a href="/?c=1_2&amp;p=6">6</a></li>
+
+    <li><a rel="next" href="/?c=1_2&amp;p=2">&raquo;</a></li>
+</ul>
+</nav>
+
+</div>
+<div id="ec01fd54-016b-41b4-bec9-b9b93f9b3b77"></div>
+
+<script type="text/javascript">
+	if (window.matchMedia("(max-width: 767px)").matches) {
+		TSOutstreamVideo({
+			spot: "7f441172bc05461f9d0d9005040c3bce",
+			containerId: "ec01fd54-016b-41b4-bec9-b9b93f9b3b77",
+			cookieExpires: "4",
+		});
+	} else {
+		TSOutstreamVideo({
+			spot: "afe96650c80f4056aa2d7584888ba58a",
+			containerId: "ec01fd54-016b-41b4-bec9-b9b93f9b3b77",
+			cookieExpires: "4",
+		});
+	}
+</script>		</div> <!-- /container -->
+
+		<footer style="text-align: center;">
+			<p>Dark Mode: <a href="#" id="themeToggle">Toggle</a></p>
+		</footer>
+	</body>
+</html>
