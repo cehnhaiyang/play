@@ -71,6 +71,7 @@ import type {
     AgentMessage,
     AgentScript,
     AgentUsage,
+    AiUsage,
     BookmarkNode,
     BookmarkBarVisibility,
     CookieItem,
@@ -3163,6 +3164,23 @@ const formatTokens = (value: number): string => {
 };
 
 /**
+ * 一步的 token 用量徽标。
+ *
+ * 三处都要用它（工具调用、模型回答、压缩分界线），因为**每一步都会留一份用量**：
+ * 只画其中一处时，用户把界面上能看到的数加起来永远对不上"累计" ——
+ * 而那个差额没有任何解释，看起来就像统计坏了。
+ */
+const UsageBadge: React.FC<{ usage: AiUsage; className?: string }> = ({ usage, className = '' }) => (
+    <span
+        className={`shrink-0 font-mono text-[9px] text-slate-600 ${className}`}
+        title={`输入 ${usage.promptTokens} / 输出 ${usage.completionTokens} token`
+            + `${usage.estimated ? '（本地估算）' : '（服务端实测）'}`}
+    >
+        {usage.estimated ? '~' : ''}{formatTokens(usage.totalTokens)}
+    </span>
+);
+
+/**
  * 用量条：当前上下文占用 + 会话累计。
  *
  * 三个数回答的是不同问题，必须分开显示，混成一个"总 token"会让人无法判断
@@ -3190,9 +3208,9 @@ const UsageBar: React.FC<{ usage: AgentUsage; contextFull: boolean }> = ({ usage
                 <Gauge className="h-3 w-3 shrink-0 self-center text-slate-600" />
                 <span className="text-slate-500">上下文</span>
                 <span className={`font-mono font-bold ${contextFull ? 'text-rose-300' : 'text-slate-300'}`}>
-                    {/* 空会话不写 "~0"：那个 ~ 是"这个数是估的"的标记，
-                        而没有上下文时没有可估的东西，写着反而像出了错 */}
-                    {usage.contextTokens > 0 ? `${approx}${formatTokens(usage.contextTokens)}` : '0'}
+                    {/* 恒带 ~：contextTokens 永远是估算（见 AgentUsage.contextTokens）。
+                        它不会为 0 —— 系统提示词每次请求都要发，空会话也有这个基数 */}
+                    {approx}{formatTokens(usage.contextTokens)}
                 </span>
                 <span className="text-slate-600">/ {formatTokens(CONTEXT_LIMIT_TOKENS)}</span>
                 <span className="ml-auto font-mono text-slate-600" title={`累计 ${usage.totalTokens} token（输入 ${usage.promptTokens} / 输出 ${usage.completionTokens}）`}>
@@ -3227,7 +3245,7 @@ const UsageBar: React.FC<{ usage: AgentUsage; contextFull: boolean }> = ({ usage
  * 平时它只是一条分界线（不该占掉半屏），而需要确认"模型还记得什么"时
  * 点开就能看到全文。
  */
-const CompactionDivider: React.FC<{ compaction: AgentCompaction }> = ({ compaction }) => {
+const CompactionDivider: React.FC<{ compaction: AgentCompaction; usage?: AiUsage }> = ({ compaction, usage }) => {
     const [open, setOpen] = useState(false);
     const dropped = compaction.coveredMessages - compaction.summarizedMessages;
 
@@ -3250,6 +3268,8 @@ const CompactionDivider: React.FC<{ compaction: AgentCompaction }> = ({ compacti
 
             <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[9px] text-amber-200/60">
                 <span>{compaction.beforeTokens} → {compaction.afterTokens} token</span>
+                {/* 摘要调用自身的花费也挂在这里：它进了"累计"，界面上就得有出处 */}
+                {usage && <span>摘要调用 <UsageBadge usage={usage} className="text-amber-200/60" /></span>}
                 {dropped > 0 && (
                     // 差额必须说出来：那几条**连摘要都没进**（摘要器的输入有上限），
                     // 信息是真的没了。只说"已压缩"会让用户以为压过的都还记得。
@@ -3447,7 +3467,7 @@ const MessageRow: React.FC<{
     if (message.compaction) {
         return (
             <div className="group/msg relative">
-                <CompactionDivider compaction={message.compaction} />
+                <CompactionDivider compaction={message.compaction} usage={message.usage} />
                 <span className="absolute right-1.5 top-1.5 opacity-0 transition-opacity group-hover/msg:opacity-100 focus-within:opacity-100">
                     <button
                         onClick={onRemove}
@@ -3492,6 +3512,13 @@ const MessageRow: React.FC<{
                             <CopyButton text={message.content} title="复制这条回答" />
                         </span>
                     </div>
+                    {/* 收尾这一次调用的用量。它是"累计"里占比最大的一块，
+                        不显示的话用户会把累计的差额算到工具调用头上 */}
+                    {message.usage && (
+                        <div className="flex justify-end">
+                            <UsageBadge usage={message.usage} />
+                        </div>
+                    )}
                 </div>
                 <MessageActions disabled={!canEdit} onRewind={onRewind} onRemove={onRemove} />
             </div>
@@ -3511,14 +3538,7 @@ const MessageRow: React.FC<{
                     <span className="min-w-0 flex-1 truncate text-[10px] font-bold text-slate-300">{message.content}</span>
                     {/* 这一步花了多少。折叠态就显示：一步步累积起来才是成本的大头，
                         藏在展开区里等于没人会去看 */}
-                    {message.usage && (
-                        <span
-                            className="shrink-0 font-mono text-[9px] text-slate-600"
-                            title={`输入 ${message.usage.promptTokens} / 输出 ${message.usage.completionTokens} token${message.usage.estimated ? '（本地估算）' : '（服务端实测）'}`}
-                        >
-                            {message.usage.estimated ? '~' : ''}{formatTokens(message.usage.totalTokens)}
-                        </span>
-                    )}
+                    {message.usage && <UsageBadge usage={message.usage} />}
                     <span className="shrink-0 rounded bg-white/8 px-1 py-0.5 font-mono text-[9px] text-slate-400">{message.tool}</span>
                     <ChevronRight className={`h-3 w-3 shrink-0 text-slate-600 transition-transform ${expanded ? 'rotate-90' : ''}`} />
                 </button>
@@ -3869,6 +3889,11 @@ const SIDEBAR_STORE_KEY = 'theplay.browse.agent';
 const AGENT_TAB_STORE_KEY = 'theplay.browse.agent.tab';
 /** 输入框草稿：刷新/重启不丢。发送成功后清空（submit 里 setInput('') 会连带落盘） */
 const AGENT_DRAFT_STORE_KEY = 'theplay.browse.agent.draft';
+/**
+ * 距底部多少像素内算"贴底"：贴底时新输出自动跟随，用户上翻看历史就暂停跟随。
+ * 与运行日志面板同一个量级（那里是 24）—— 两者都是"手滑一点不算上翻"的容差。
+ */
+const AGENT_STICK_PX = 24;
 
 interface SidebarPrefs { open: boolean; width: number; fullscreen: boolean }
 
@@ -4012,6 +4037,13 @@ const AgentSidebar: React.FC<{
 
     const draft = useTamperDraft(tamper);
     const scrollRef = useRef<HTMLDivElement | null>(null);
+    /**
+     * 对话流是否处于"贴底"状态 —— 只有贴底时才自动跟随新输出。
+     *
+     * 与运行日志面板同一套判据（见 Floating 的 stickRef）：用户上翻看历史时
+     * 绝不能动他的滚动位置。想恢复跟随就滚回底部，不需要额外按钮。
+     */
+    const stickRef = useRef(true);
     const asideRef = useRef<HTMLElement | null>(null);
     const inputRef = useRef<HTMLTextAreaElement | null>(null);
     const resizeCleanupRef = useRef<(() => void) | null>(null);
@@ -4113,11 +4145,28 @@ const AgentSidebar: React.FC<{
         return () => window.removeEventListener('keydown', onKeyDown);
     }, [prefs.fullscreen, prefs.open]);
 
-    // 新消息进来滚到底：对话流不自动跟随的话，模型跑到第十步用户还在看第一步
+    /**
+     * 新消息进来时**只在贴底的情况下**跟随到底。
+     *
+     * 原先这里是无条件 `scrollTop = scrollHeight`，而依赖数组里带着
+     * `streaming.content` —— 流式期间每 60ms 刷一次，用户往上翻看"上一步
+     * 到底干了什么"，下一帧就被拽回底部。表现就是**根本没法滚动**：
+     * 拖上去、弹回来，看起来像滚动条坏了。
+     *
+     * 判据与运行日志面板同一套（贴底才跟随，上翻即暂停）：自动跟随在"用户
+     * 正在看最新输出"时是有用的，一旦他自己滚走了，跟随就从帮助变成抢夺。
+     * 想恢复跟随不需要任何按钮 —— 滚回底部即重新贴底。
+     */
     useEffect(() => {
         const el = scrollRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
+        if (el && stickRef.current) el.scrollTop = el.scrollHeight;
     }, [messages.length, status, streaming?.content, streaming?.reasoning, activeTab]);
+
+    const handleScroll = useCallback(() => {
+        const el = scrollRef.current;
+        if (!el) return;
+        stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= AGENT_STICK_PX;
+    }, []);
 
     // 成功提示是"一次性确认"，2 秒后收回；
     // **失败提示不能自动消失** —— 它的后果是持久的（规则没写进本地存储，
@@ -4617,7 +4666,11 @@ const AgentSidebar: React.FC<{
                     {/* 内容区 */}
                     {activeTab === 'chat' ? (
                         <div className="flex min-h-0 flex-1 flex-col px-3 pb-3">
-                            <div ref={scrollRef} className="custom-scrollbar min-h-0 flex-1 space-y-2.5 overflow-y-auto py-2.5 pr-1">
+                            <div
+                                ref={scrollRef}
+                                onScroll={handleScroll}
+                                className="custom-scrollbar min-h-0 flex-1 space-y-2.5 overflow-y-auto py-2.5 pr-1"
+                            >
                                 {messages.length === 0 ? (
                                     <EmptyHint onPick={(text) => setInput((prev) => (prev.trim() ? prev : text))} />
                                 ) : (

@@ -289,9 +289,10 @@ const sumUsage = (messages: AgentMessage[], contextTokens: number): AgentUsage =
     let estimatedCalls = 0;
 
     for (const message of messages) {
-        // 摘要调用自身的成本也要算：它花的是真钱，漏掉会让"这个会话花了多少"
-        // 在压缩过的会话里系统性偏低
-        const usage = message.usage || message.compaction?.usage;
+        // 每一次模型调用都在它**自己那条消息**上留一份用量，累计只是把它加总。
+        // 不再兼看 compaction.usage：那让同一个事实有两个存放处，而界面只画得出
+        // message.usage 那一个 —— 用户看到的"各步之和"永远对不上"累计"。
+        const usage = message.usage;
         if (!usage) continue;
         promptTokens += usage.promptTokens;
         completionTokens += usage.completionTokens;
@@ -428,6 +429,20 @@ const SYSTEM_PROMPT = `
    - 提取数据：必须给出实际采样值与总量，而非“可以读取”。
    - 验证绕过/逻辑：必须给出篡改前后系统行为的对比判定。
    - 遇到阻碍：清晰说明已尝试的路径、卡点证据与所需的前置条件。`;
+
+/**
+ * 一次请求的输入 token：**系统提示词 + 待发消息**。
+ *
+ * 这是 `AiUsage.promptTokens` 的定义口径（见 meta/type.ts），服务端实测与
+ * AiService 的估算回落（reportUsage）都按它算。本地估算必须用同一个口径 ——
+ * 少算系统提示词会让"上下文"比"这一步的输入"小一大截，而用户唯一能做的
+ * 自查就是拿这些数相加，对不上时他只会以为统计坏了。
+ */
+const requestTokensOf = (messages: AiChatMessage[]): number =>
+    estimatePromptTokens([{ role: 'system', content: SYSTEM_PROMPT }, ...messages]);
+
+/** 上下文占用：按现存对话重建后的**下一次请求**输入量（硬门槛与界面显示共用） */
+const contextTokensOf = (messages: AgentMessage[]): number => requestTokensOf(buildTranscript(messages));
 
 /**
  * 摘要器的系统提示词。
@@ -1174,7 +1189,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                 return null;
             }
 
-            const beforeTokens = estimatePromptTokens(buildTranscript(list));
+            const beforeTokens = contextTokensOf(list);
             const upTo = covered[covered.length - 1].id;
             const next: AgentCompaction = {
                 summary,
@@ -1186,7 +1201,6 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                 beforeTokens,
                 afterTokens: 0,
                 overBudget: false,
-                ...(usage ? { usage } : {}),
             };
 
             // afterTokens 要按**压缩真正生效后**的消息序列算：那一刻新消息
@@ -1198,10 +1212,15 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                 role: 'assistant',
                 content: summary,
                 compaction: next,
+                // 摘要调用自身的用量挂在**这条消息**上，与其它每一步同一个位置。
+                // 原先它挂在 compaction.usage 里，于是同一件事有了两个存放处：
+                // 累计值两处都读，界面只读得到 message.usage —— 结果是"累计"
+                // 永远比界面上能看到的各步之和多一截，而用户无从知道多在哪。
+                ...(usage ? { usage } : {}),
                 at: next.at,
             };
             const after = insertAfterId(list, upTo, marker);
-            next.afterTokens = estimatePromptTokens(buildTranscript(after));
+            next.afterTokens = contextTokensOf(after);
             next.overBudget = next.afterTokens >= CONTEXT_LIMIT_TOKENS;
 
             // 落盘前再确认一次锚点还在：压缩是异步的，这期间历史可能被改过
@@ -1917,7 +1936,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
          * 读 messagesRef 而不是闭包里的 messages：本函数被 useCallback 记忆，闭包捕获
          * 的是它创建那一刻的快照；messagesRef 由 effect 持续同步，永远是当前值。
          */
-        if (estimatePromptTokens(buildTranscript(messagesRef.current)) >= CONTEXT_LIMIT_TOKENS) {
+        if (contextTokensOf(messagesRef.current) >= CONTEXT_LIMIT_TOKENS) {
             setError(
                 `上下文已达 ${CONTEXT_LIMIT_TOKENS.toLocaleString()} token 上限，`
                 + '必须先压缩或清空对话才能继续。'
@@ -1953,7 +1972,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                 // 轮内门槛：transcript 在本轮内单调增长，入口处那道闸门管不住它。
                 // 超限后继续调模型只会拿到 context_length_exceeded，
                 // 整轮的已完成步骤全部作废 —— 不如提前停下来让用户压缩后继续。
-                if (estimatePromptTokens(transcript) >= CONTEXT_LIMIT_TOKENS) {
+                if (requestTokensOf(transcript) >= CONTEXT_LIMIT_TOKENS) {
                     appendMessage({
                         id: generateId(),
                         role: 'assistant',
@@ -2376,7 +2395,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
      * 代价，用 useMemo 把重算限制在 messages 变化时。
      */
     const derived = useMemo(() => {
-        const contextTokens = estimatePromptTokens(buildTranscript(messages));
+        const contextTokens = contextTokensOf(messages);
         return {
             usage: sumUsage(messages, contextTokens),
             // 硬门槛：>= 即拦住，只有**严格小于**才放行。界面、send() 的闸门、压缩后的

@@ -2523,6 +2523,38 @@ const run = async () => {
     });
 
     /**
+     * **累计必须等于界面上能看到的各步之和。**
+     *
+     * 这是用户报的原始症状：累计数比每一步加起来多，而差额没有任何出处 ——
+     * 看起来就像统计坏了。根因是同一个事实有两个存放处：摘要调用的用量原先挂在
+     * `compaction.usage` 上，累计值两处都读，而界面只画得出 `message.usage`。
+     *
+     * 所以这条断言认的是**界面的口径**，不是内部实现：凡是进了累计的用量，
+     * 都必须能在某条消息的 usage 上找到。摘要调用也走压缩分界线那条消息，
+     * 它同样是界面上画得出来的一个数。
+     */
+    await check('累计等于各步用量之和（含摘要调用，界面口径一致）', async () => {
+        const h = buildAgentHarness({ toolCall: true });
+        for (let i = 0; i < 6; i += 1) await h.send(`第${i}轮`);
+        // 压一次：摘要调用本身也要计费，而它必须落在**消息**上
+        const record = await h.state().actions.compact();
+        assert(record, '构造前提：应能压出摘要');
+
+        const st = h.state();
+        const sum = (pick) => st.messages.reduce((s, m) => s + (m.usage ? pick(m.usage) : 0), 0);
+
+        assert(st.usage.totalTokens === sum((u) => u.totalTokens),
+            `累计总量必须等于各条消息之和，实际 ${st.usage.totalTokens} vs ${sum((u) => u.totalTokens)}`);
+        assert(st.usage.promptTokens === sum((u) => u.promptTokens), '累计输入应为各条之和');
+        assert(st.usage.completionTokens === sum((u) => u.completionTokens), '累计输出应为各条之和');
+
+        // 摘要调用确实进了账，且挂在压缩分界线那条消息上（界面据此画得出来）
+        const marker = st.messages.find((m) => m.compaction);
+        assert(marker.usage, '摘要调用的用量必须挂在分界线消息上，否则累计里那一份在界面上没有出处');
+        assert(marker.usage.promptTokens > 0, '摘要调用的用量应是真实数字');
+    });
+
+    /**
      * 服务端不回 usage 时必须有估算兜底 —— 否则本地代理一多，
      * 整个统计功能就是空的，而用户看不出是"没有数据"还是"没有花费"。
      */
@@ -2540,21 +2572,29 @@ const run = async () => {
     /**
      * contextTokens 回答的是"下一次请求要发多少"，与累计是两个问题。
      * 它必须随历史增长 —— 那是"该不该压缩"的唯一依据。
+     *
+     * 清空后**不是 0 而是一个固定基数**：系统提示词每次请求都要发，
+     * 它属于"下一次请求的输入量"。这个基数与每一步的 promptTokens 同口径
+     * （见 requestTokensOf）—— 少了它，"上下文"会比"这一步的输入"小一大截，
+     * 而用户唯一的自查手段就是拿这些数相加，对不上时他只会以为统计坏了。
      */
     await check('上下文占用随历史增长，且由现存消息决定', async () => {
         const h = buildAgentHarness();
+        const empty = h.state().usage.contextTokens;
+        assert(empty > 0, '空会话也应计入系统提示词（它就是下一次请求要发的一部分）');
+
         await h.send('短');
         const first = h.state().usage.contextTokens;
-        assert(first > 0, '首轮上下文应大于 0');
+        assert(first > empty, `首轮上下文应大于系统提示词基数，实际 ${empty} → ${first}`);
 
         await h.send('这是一句明显更长的话，'.repeat(20));
         const second = h.state().usage.contextTokens;
         assert(second > first, `上下文占用应随历史增长，实际 ${first} → ${second}`);
 
-        // 清空之后必须归零：派生值不能残留
+        // 清空之后必须退回**基数**：派生值不能残留任何历史
         h.state().actions.clear();
-        assert(h.state().usage.contextTokens === 0,
-            `清空后上下文应归零，实际 ${h.state().usage.contextTokens}`);
+        assert(h.state().usage.contextTokens === empty,
+            `清空后上下文应退回系统提示词基数，实际 ${h.state().usage.contextTokens} vs ${empty}`);
         assert(h.state().usage.totalTokens === 0, '清空后累计也应归零');
     });
 
@@ -2802,7 +2842,10 @@ const run = async () => {
         h.state().actions.clear();
         assert(h.state().canCompact === false, '清空后不该可压缩');
         assert(h.state().contextFull === false, '清空后不该算满');
-        assert(h.state().usage.contextTokens === 0, '清空后上下文占用应归零');
+        // 退回系统提示词基数（不是 0）：那部分与历史无关，清空也还在
+        const empty = buildAgentHarness().state().usage.contextTokens;
+        assert(h.state().usage.contextTokens === empty,
+            `清空后上下文占用应退回基数，实际 ${h.state().usage.contextTokens} vs ${empty}`);
     });
     /** 摘要为空是失败，不能把一段历史换成空白还报成功 */
     await check('摘要为空视为失败，历史不动', async () => {
@@ -3032,10 +3075,55 @@ const run = async () => {
             '用量条必须接上（否则 hook 里算了没人看）');
         assert(/actions\.compact\(\)/.test(src), '压缩按钮必须接到 actions.compact');
         assert(/compactDisabled/.test(src), '压缩必须受禁用条件控制');
-        assert(/<CompactionDivider compaction=\{message\.compaction\}/.test(src),
+        assert(/<CompactionDivider compaction=\{message\.compaction\} usage=\{message\.usage\}/.test(src),
             '对话流里必须画出压缩分界线 —— 否则用户以为模型还记得被压掉的内容');
         assert(/CONTEXT_LIMIT_TOKENS/.test(src),
             '进度条分母必须与 hook 的硬门槛同源，界面不得自己写一个数');
+    });
+
+    /**
+     * 每一步的用量都要画得出来。
+     *
+     * 只画工具调用那一处是不够的：回答那条消息与压缩分界线各自也带着一次调用的
+     * 用量，它们照样进"累计"。少画一处，用户把界面上的数加起来就对不上累计，
+     * 而那个差额看起来就是统计错了（见上面那条累计口径的用例）。
+     */
+    await check('回答与压缩分界线都显示自己的用量', async () => {
+        const src = fs.readFileSync(path.join(ROOT, 'components', 'BrowsePanel.tsx'), 'utf8');
+
+        assert(/const UsageBadge/.test(src), '应有一个共用的用量徽标组件');
+        const badgeUses = (src.match(/<UsageBadge /g) || []).length;
+        assert(badgeUses >= 3,
+            `工具调用 / 模型回答 / 压缩分界线三处都要显示，实际只用了 ${badgeUses} 处`);
+
+        // 分界线那条消息的 usage 必须传进去，否则摘要调用在界面上无出处
+        assert(/<CompactionDivider compaction=\{message\.compaction\} usage=\{message\.usage\}/.test(src),
+            '压缩分界线必须收到这条消息的 usage');
+    });
+
+    /**
+     * 对话流**只在贴底时**自动跟随。
+     *
+     * 原先是无条件 `scrollTop = scrollHeight`，而依赖数组里带着 streaming.content ——
+     * 流式期间每 60ms 刷一次，用户往上翻看"上一步干了什么"会被一帧帧拽回底部，
+     * 表现为**根本滚不动**。判据与运行日志面板同一套：上翻即暂停跟随。
+     */
+    await check('对话流只在贴底时跟随，上翻不被拽回底部', async () => {
+        const src = fs.readFileSync(path.join(ROOT, 'components', 'BrowsePanel.tsx'), 'utf8');
+
+        const at = src.indexOf('新消息进来时**只在贴底的情况下**跟随到底');
+        assert(at > 0, '应能找到自动跟随那段（注释写明了只在贴底时跟随）');
+        const block = src.slice(at, src.indexOf('const handleScroll', at));
+
+        assert(/if \(el && stickRef\.current\) el\.scrollTop = el\.scrollHeight;/.test(block),
+            '跟随必须受 stickRef 门控 —— 无条件赋值就是用户报的"强制跟随、滚不动"');
+        assert(!/if \(el\) el\.scrollTop = el\.scrollHeight;/.test(src),
+            '不得残留无条件跟随的旧写法');
+
+        // 门控要真的被更新：没有 onScroll 就永远停在初始值，跟随会彻底失效
+        assert(/onScroll=\{handleScroll\}/.test(src), '滚动容器必须挂 onScroll，否则贴底判据永远不更新');
+        assert(/stickRef\.current = el\.scrollHeight - el\.scrollTop - el\.clientHeight <= AGENT_STICK_PX;/.test(src),
+            'handleScroll 必须按贴底判据更新 stickRef');
     });
 
     /**

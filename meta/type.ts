@@ -564,8 +564,6 @@ export interface AgentCompaction {
      * 而"压缩完成"的绿色提示会把用户引向错误的安心。
      */
     overBudget: boolean;
-    /** 这次摘要调用自身的用量 —— 它也是真实成本，不能不计入会话总量 */
-    usage?: AiUsage;
 }
 
 /** 会话累计 token 统计（按现存消息重算，删除 / 回退后自动收敛） */
