@@ -3440,9 +3440,14 @@ const parseMarkdown = (text: string): React.ReactNode[] => {
     while (i < lines.length) {
         const line = lines[i];
 
-        // 代码块先判：模型写的 JS 就在这里，它内部的 # - | 一个都不能当结构解析
-        const fence = /^\s*```(\w*)\s*$/.exec(line);
-        if (fence) {
+        /**
+         * 代码块先判：模型写的 JS 就在这里，它内部的 # - | 一个都不能当结构解析。
+         *
+         * 起始围栏只认 ``` 本身，后面的语言标记（js / javascript / c++）一律忽略 ——
+         * 按 `\w*` 匹配的话 ` ```c++ ` 认不出来，整段代码会掉进段落分支，
+         * 里面的 # 与 | 被当成标题和表格。
+         */
+        if (/^\s*```/.test(line)) {
             const body: string[] = [];
             i += 1;
             while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) {
