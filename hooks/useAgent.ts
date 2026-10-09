@@ -2,12 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
     AgentCompaction,
     AgentMessage,
+    AgentMessageOrigin,
     AgentRunStatus,
     AgentScript,
     AgentToolName,
     AgentUsage,
     AiChatMessage,
     AiUsage,
+    ElectronKbAPI,
     HeaderRule,
     TamperRule,
     WebviewElement,
@@ -20,7 +22,6 @@ import {
     searchKb,
     KB_SEARCH_LIMIT,
     type KbEntry,
-    type KbLoadPayload,
 } from '../services/KbService';
 import {
     buildCookieKeys,
@@ -217,44 +218,71 @@ const protocolErrorObservation = (reply: string): string =>
     + `\n\n你上一条回复的原文：\n${reply}`;
 
 /**
- * 环境事件两条消息的正文前缀。
+ * 环境事件消息的正文前缀。
  *
- * 前缀就是**来源**：重建上下文时靠它区分"页面自己触发的"与"用户手动跑的"。
- * 两处（构造与重建）必须认同一个字面量，所以提出来。
+ * **只用于拼给人看的正文与从中剥回脚本名，不用于判断来源** —— 来源是 origin 字段
+ * （见 AgentMessageOrigin）。用正文前缀判来源等于给同一个事实留第二个真值：
+ * 前缀改字时构造侧照样能拼出来，判断侧却会静默失配。
  */
 const AUTO_RUN_PREFIX = '自动执行：';
 const MANUAL_RUN_PREFIX = '手动执行：';
 
 /**
- * 环境事件的回灌文案：**只由这一个函数产出**。
+ * 环境事件里那条消息的脚本名。
  *
- * 自动执行与手动执行共用 auto 标记（都不是模型发出的调用），但对模型来说
- * "谁按的"这件事有实质区别：前者是 URL 命中的副作用，后者是用户刚亲手验证过
- * 这个脚本 —— 前者该被当成背景，后者是一条有用的信号。
- *
- * 原先这里统一写成「自动脚本」，于是用户手动点的那次在模型眼里成了页面自动行为。
- * 靠 `content.replace(/^自动执行：/, '')` 剥前缀也不行：手动那条的前缀是
- * 「手动执行：」，剥不掉，名字里会带上一整段前缀。
+ * 正文写成 `<前缀><脚本名>`（见两个 RUN_PREFIX），所以剥前缀就能取回名字。
+ * 剥不掉时原样返回：那种情况说明正文不是由本模块构造的（手改过的落盘数据），
+ * 把整段当名字至少还能看出发生过什么，而截断或猜一个空名会把事实抹掉。
  */
-const environmentEventObservation = (message: AgentMessage): string => {
-    const manual = message.content.startsWith(MANUAL_RUN_PREFIX);
-    const prefix = manual ? MANUAL_RUN_PREFIX : AUTO_RUN_PREFIX;
-    const name = message.content.startsWith(prefix)
+const scriptNameOf = (message: AgentMessage): string => {
+    const prefix = message.origin === 'manual' ? MANUAL_RUN_PREFIX : AUTO_RUN_PREFIX;
+    return message.content.startsWith(prefix)
         ? message.content.slice(prefix.length)
         : message.content;
+};
+
+/**
+ * 环境事件的回灌文案：**只由这一个函数产出**。
+ *
+ * 自动执行与手动执行共用 `origin` 标记（都不是模型发出的调用），但对模型来说
+ * "谁按的"这件事有实质区别：前者是 URL 命中的副作用，后者是用户刚亲手验证过
+ * 这个脚本 —— 前者该被当成背景，后者是一条有用的信号。
+ */
+const environmentEventObservation = (message: AgentMessage): string => {
+    const name = scriptNameOf(message);
     const result = message.result || '(无返回值)';
-    return manual
+    return message.origin === 'manual'
         ? `[用户手动执行了脚本「${name}」]\n${result}`
         : `[自动脚本「${name}」已在页面上执行]\n${result}`;
 };
 
 /**
+ * 工具观察的回灌文案：**只由这一个函数产出**。
+ *
+ * 与协议错误同一理由（见 protocolErrorObservation）：同一段历史在"本轮循环里"
+ * 与"下一轮重建时"必须逐字一致。措辞分叉时，模型对"这步成没成"的判断会随轮次
+ * 漂移 —— 当场读到的是"失败，请修正参数"，下一轮却只剩一句中性的"执行结果"。
+ *
+ * 失败与成功必须长得不一样：共用「执行结果」一个前缀时，模型只能自己去读 JSON 里的
+ * error 字段才能发现失败，实测里它经常读漏，接着按原计划往下走，同一招连错几次。
+ */
+const toolObservation = (label: string, result: string, ok: boolean): string => {
+    const body = result || '(空)';
+    return ok
+        ? `[工具 ${label} 的执行结果]\n${body}`
+        : `[工具 ${label} 执行失败]\n${body}\n\n这一步没有成功。请根据上面的错误信息修正参数或换一条路，不要原样重试。`;
+};
+
+/**
  * 一轮对话 → 发给模型的消息序列。
  *
- * 与界面那份 `AgentMessage` 的两个差别（也就是 `buildTranscript` 存在的理由）：
+ * 与界面那份 `AgentMessage` 的差别（也就是 `buildTranscript` 存在的理由）：
  * 推理与脚本源码不进（每步重发会撑爆预算），界面自己补的提示不伪装成模型发言。
  * 同一轮里连续的观察合并进**一条** user 消息：一条 user 消息带多段结果，
  * 比拆成多条更贴近真实的 ReAct 轨迹。
+ *
+ * 三种非工具调用（协议错误 / 环境事件 / 普通工具结果）各有专属文案函数，
+ * 与 send() 当场回灌的那一份**逐字共用**，不在这里各写一遍。
  */
 const roundToMessages = (round: AgentMessage[]): AiChatMessage[] => {
     const out: AiChatMessage[] = [];
@@ -291,9 +319,9 @@ const roundToMessages = (round: AgentMessage[]): AiChatMessage[] => {
         }
 
         if (message.result || message.content) {
-            // 自动执行的脚本不是模型的调用，写成「工具结果」会凭空捏造一次调用；
+            // 脚本执行不是模型的调用，写成「工具结果」会凭空捏造一次调用；
             // 但它确实改变了页面，所以作为一条**环境事件**如实告知。
-            if (message.auto) {
+            if (message.origin) {
                 observations.push(environmentEventObservation(message));
             } else if (message.label === PROTOCOL_ERROR_LABEL) {
                 // 协议错误没有"参数"可修，回灌文案必须与当场逐字一致
@@ -301,12 +329,12 @@ const roundToMessages = (round: AgentMessage[]): AiChatMessage[] => {
                 // 与当时不同的说法去改，而它根本没做错那件事。
                 observations.push(protocolErrorObservation(message.result || ''));
             } else {
-                // 措辞必须与 send() 回灌时**逐字一致**：同一段历史在"本轮循环里"与
-                // "下一轮重建时"长得不一样的话，模型对"这步成没成"的判断会随轮次漂移。
-                const label = message.label || message.tool || '未知';
-                observations.push(message.ok === false
-                    ? `[工具 ${label} 执行失败]\n${message.result || '(空)'}\n\n这一步没有成功。请根据上面的错误信息修正参数或换一条路，不要原样重试。`
-                    : `[工具 ${label} 的执行结果]\n${message.result || '(空)'}`);
+                // 措辞由 toolObservation 统一产出，与 send() 回灌时逐字一致
+                observations.push(toolObservation(
+                    message.label || message.tool || '未知',
+                    message.result || '',
+                    message.ok !== false,
+                ));
             }
         }
     }
@@ -404,10 +432,15 @@ const buildTranscript = (messages: AgentMessage[]): AiChatMessage[] => {
 };
 
 /**
- * 优化说明：
- * 1. 结构扁平紧凑：统一小写，消除大小写错误；
- * 2. 严格遵循标准 JSON：用明确操作替代 undefined；
- * 3. 契约化定义：采用类 TypeScript 紧凑语法，显著提升 LLM 遵循度。
+ * 系统提示词。
+ *
+ * 三条不可动摇的写法约束：
+ *  - **工具名与参数全小写、严格匹配**：解析侧不做归一（见 send 里对 tool 的注释），
+ *    所以提示词里必须把准确拼写摆在模型面前，而不是靠容错去兜。
+ *  - **数字一律插值**：条数上限、字节上限这些值会随实现变，手抄进提示词必然过期，
+ *    而模型会照着过期的上限规划步骤。
+ *  - **前缀逐字对齐实现**：`## 对话历史` 那节声明的四个前缀由 roundToMessages
+ *    真正写出，两处分别在文件头尾，改一处忘另一处不会有任何编译或运行时错误。
  */
 const SYSTEM_PROMPT = `
 你是运行在已登录的 Electron 浏览器环境中的专业逆向工程 Agent，目标是完成用户要求的一切网站架构理解、**漏洞利用**、CTF/crackme 分析、恶意样本行为研判、算法还原、调试验证、分析报告编写。
@@ -489,8 +522,8 @@ const SYSTEM_PROMPT = `
 1. 广度优先单步拉取：一次脚本内查清相关字段，禁止拆成多次调用只为获取少量数据；DOM 提取必须做截断（如 slice(0, 50)）。
 2. 试错熔断：相同思路/错误连续失败 2 次必须更换策略（检查选择器 -> 换用网络拦截 -> 检索知识库）。
 3. 失败只是这一步的结果，不是任务的终点：工具返回以「[工具 X 执行失败]」开头时读错误信息修正参数或换路继续，不要原样重试，更不要把它当成结论收尾；除非已穷尽可行路径，否则继续调用工具。
-3. 结论必须由证据支撑：提出任何鉴权机制、加密方式、字段逻辑的推断，必须伴随工具返回的具体物理证据（字段值/响应码/堆栈）。
-4. 交付标准：
+4. 结论必须由证据支撑：提出任何鉴权机制、加密方式、字段逻辑的推断，必须伴随工具返回的具体物理证据（字段值/响应码/堆栈）。
+5. 交付标准：
    - 提取数据：必须给出实际采样值与总量，而非“可以读取”。
    - 验证绕过/逻辑：必须给出篡改前后系统行为的对比判定。
    - 遇到阻碍：清晰说明已尝试的路径、卡点证据与所需的前置条件。`;
@@ -678,27 +711,41 @@ const unknownActionError = (got: string, valid: string[]): string => {
 };
 
 /**
+ * 解析工具返回的那个 JSON 对象；不是对象（含解析失败）就返回 null。
+ *
+ * 两个成败判据共用这一步：它们只在"什么样的 error 才算失败"上分岔，
+ * 而"结果是不是一个可解析的对象"是同一个问题。分头解析的话，一处改成
+ * 容忍数组、另一处没改，两个工具就会对同一种返回给出相反的结论。
+ */
+const parseToolResult = (result: string): Record<string, unknown> | null => {
+    if (!result.startsWith('{')) return null;
+    try {
+        const parsed = JSON.parse(result);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+            ? parsed as Record<string, unknown>
+            : null;
+    } catch {
+        return null;
+    }
+};
+
+/**
  * 工具结果是否为错误。
  *
  * 不能用 `result.startsWith('{"error"')` —— 脚本正常返回
  * `{"error": null, "data": [...]}` 是合法值，按前缀判会被标成失败。
  * 必须解析出来看：**含 error 字段且它是非空字符串**才算错。
  *
- * S·R 另有专属通道 __agentError（见 buildScriptSource）：页面业务数据里出现
+ * js 另有专属通道 __agentError（见 buildScriptSource）：页面业务数据里出现
  * `{error:"..."}` 是成功的数据，不是工具失败。js 的成败判据见
  * isJsErrorResult，这里保留对 error 的判断是给 tamper/storage/tokens/kb
  * 这些"错误只能由我们构造"的工具用的。
  */
 const isErrorResult = (result: string): boolean => {
-    if (!result.startsWith('{')) return false;
-    try {
-        const parsed = JSON.parse(result) as { error?: unknown; __agentError?: unknown } | null;
-        if (!parsed || typeof parsed !== 'object') return false;
-        if (typeof parsed.__agentError === 'string' && parsed.__agentError.length > 0) return true;
-        return typeof parsed.error === 'string' && parsed.error.length > 0;
-    } catch {
-        return false;
-    }
+    const parsed = parseToolResult(result);
+    if (!parsed) return false;
+    if (typeof parsed.__agentError === 'string' && parsed.__agentError.length > 0) return true;
+    return typeof parsed.error === 'string' && parsed.error.length > 0;
 };
 
 /**
@@ -709,21 +756,16 @@ const isErrorResult = (result: string): boolean => {
  * 页面数据里自带的 `{error:"..."}` 不是失败 —— 那是探测到的业务字段。
  */
 const isJsErrorResult = (result: string): boolean => {
-    if (!result.startsWith('{')) return false;
-    try {
-        const parsed = JSON.parse(result) as { error?: unknown; __agentError?: unknown } | null;
-        if (!parsed || typeof parsed !== 'object') return false;
-        if (typeof parsed.__agentError === 'string' && parsed.__agentError.length > 0) return true;
-        // 参数错误同样是 {error}，但它只在 code 缺失/脚本清单越界等情况下由
-        // dispatchTool 构造；页面数据里的 error 字段走到这里会被误伤 ——
-        // 区分方法是看键集合：dispatchTool 的参数错误对象**只有** error 一个键。
-        if (typeof parsed.error === 'string' && parsed.error.length > 0) {
-            return Object.keys(parsed).length === 1;
-        }
-        return false;
-    } catch {
-        return false;
+    const parsed = parseToolResult(result);
+    if (!parsed) return false;
+    if (typeof parsed.__agentError === 'string' && parsed.__agentError.length > 0) return true;
+    // 参数错误同样是 {error}，但它只在 code 缺失/脚本清单越界等情况下由
+    // dispatchTool 构造；页面数据里的 error 字段走到这里会被误伤 ——
+    // 区分方法是看键集合：dispatchTool 的参数错误对象**只有** error 一个键。
+    if (typeof parsed.error === 'string' && parsed.error.length > 0) {
+        return Object.keys(parsed).length === 1;
     }
+    return false;
 };
 
 /**
@@ -885,42 +927,15 @@ const safeParseObject = (raw: string): Record<string, unknown> => {
 };
 
 /**
- * 把模型给的 cookie 定位参数解析成**具体那一条**。
+ * cookie 定位失败时的错误文案。
  *
- *  - `key`：`storage get` / `tokens find` 返回的唯一键，精确匹配，首选；
- *  - `name`：只给名字，向后兼容。**只在没有歧义时才接受** ——
- *    同名 cookie 在不同 domain/path 下并存时（访问子域就会遇到），按名字取第一条
- *    会静默改错对象，甚至把第一条的 httpOnly / 过期时间抄到第二条上。
- *
- * @returns 命中时 `{ cookie }`；否则 `{ error }`（错误文案原样回给模型）
+ * 三处写回（storage set / storage delete / tokens rewrite）共用同一句：措辞分叉时
+ * 模型只会照着一处去改，另一处继续失败。key 必须是 storage get 或 tokens find
+ * 返回的那个原样值 —— 它由 name + path + domain 拼成，同名 cookie 在不同域下
+ * 并存时（访问子域就会遇到）只有它能唯一定位。
  */
-const resolveCookieArg = <T extends { name: string; path?: string; domain?: string }>(
-    cookies: T[],
-    key: string,
-    name: string,
-): { cookie: T | null; error?: string } => {
-    if (key) {
-        const byKey = findCookieByKey(cookies, key);
-        if (byKey) return { cookie: byKey };
-        // key 给了但没命中：可能是模型自己拼的。有 name 就退回按 name 试，
-        // 否则明确报错（不要静默当成新建）。
-        if (!name) {
-            return { cookie: null, error: `找不到 cookie：${key}。key 要用 storage get 或 tokens find 返回的那个原样传入。` };
-        }
-    }
-
-    if (!name) return { cookie: null, error: '缺少 name 或 key' };
-
-    const sameName = cookies.filter((c) => c.name === name);
-    if (sameName.length > 1) {
-        return {
-            cookie: null,
-            error: `有 ${sameName.length} 条同名 cookie「${name}」，无法确定改哪一条。`
-                + '请改用 key 指定（storage get 返回的 key 字段）。',
-        };
-    }
-    return { cookie: sameName[0] || null };
-};
+const cookieKeyError = (key: string): string =>
+    `找不到 cookie：${key}。key 要用 storage get 或 tokens find 返回的那个原样传入。`;
 
 /* -------------------------------------------------------------------------- */
 /*                                  类型                                       */
@@ -948,11 +963,13 @@ export interface AgentDeps {
     kb?: KbBridge;
 }
 
-/** 知识库桥：preload 暴露的四个方法里 Agent 只用前两个 */
-export interface KbBridge {
-    load: () => Promise<KbLoadPayload>;
-    read: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
-}
+/**
+ * 知识库桥：preload 那套 API 里 Agent 只用得上读的两个。
+ *
+ * 从 meta 的接口**派生**而不是另写一份形状 —— 另写一份迟早与真桥分叉，
+ * 而分叉的症状是 App 传进来的实参在类型上不兼容，只能靠断言压过去。
+ */
+export type KbBridge = Pick<ElectronKbAPI, 'load' | 'read'>;
 
 export interface AgentState {
     messages: AgentMessage[];
@@ -1030,8 +1047,8 @@ export interface AgentState {
          * 手动执行一条已保存脚本（脚本页的"运行"按钮）。
          *
          * 与自动执行同一套记账：lastRunAt/lastResult 更新 + 一条 tool 消息进对话。
-         * 消息标 auto:true —— 它不属于任何一次模型调用，重建上下文时按"环境事件"
-         * 写回，与自动执行的消息同一语义。
+         * 消息的 origin 标成 manual —— 它不属于任何一次模型调用，重建上下文时按
+         * "环境事件"写回，且要如实说出是用户按的而不是页面自动跑的。
          *
          * 运行中拒绝：主循环正拿着 webview 跑模型的步骤，此刻手动执行会与它的下一步
          * 交错读页面，两边看到的状态互相污染。规则与改历史一致。
@@ -1685,16 +1702,13 @@ export const useAgent = (deps: AgentDeps): AgentState => {
 
                     if (action === 'delete') {
                         const list = await tamperRef.current.actions.getCookies();
-                        const target = resolveCookieArg(list, key, '');
-                        if (target.error) return JSON.stringify({ error: target.error });
+                        const target = findCookieByKey(list, key);
                         // 没命中不能当成"删掉了"：removeCookie 按 name 删，传一个不存在的
                         // 名字 Electron 也不报错，静默返回成功。
-                        if (!target.cookie) {
-                            return JSON.stringify({ error: `找不到 cookie：${key}` });
-                        }
-                        const ok = await tamperRef.current.actions.removeCookie(target.cookie.name);
+                        if (!target) return JSON.stringify({ error: cookieKeyError(key) });
+                        const ok = await tamperRef.current.actions.removeCookie(target.name);
                         return ok
-                            ? JSON.stringify({ deleted: true, name: target.cookie.name, note: '同名不同 path 的 Cookie 会被一起删掉。' })
+                            ? JSON.stringify({ deleted: true, name: target.name, note: '同名不同 path 的 Cookie 会被一起删掉。' })
                             : JSON.stringify({ error: '删除失败：当前没有可用的页面地址' });
                     }
 
@@ -1703,10 +1717,8 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                     // expirationDate 会让会话 cookie 降级甚至掉登录态。key 找不到时
                     // 直接报错：编一个 key 等于在猜改哪一条，比报错更难查。
                     const list = await tamperRef.current.actions.getCookies();
-                    const target = resolveCookieArg(list, key, '');
-                    if (target.error) return JSON.stringify({ error: target.error });
-                    const existing = target.cookie;
-                    if (!existing) return JSON.stringify({ error: `找不到 cookie：${key}` });
+                    const existing = findCookieByKey(list, key);
+                    if (!existing) return JSON.stringify({ error: cookieKeyError(key) });
                     // 值统一成字符串：cookie 只能是字符串，而 asString 会把数字/布尔
                     // 变成空串 —— 那等于静默清空这条 cookie，比报错更难查。
                     // 对象用 JSON 而不是 String()：后者得到 "[object Object]"，
@@ -1860,11 +1872,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                     // 不能只按 name —— 同名 cookie 并存时会永远命中第一条。
                     const list = await tamperRef.current.actions.getCookies();
                     const existing = findCookieByKey(list, key);
-                    if (!existing) {
-                        return JSON.stringify({
-                            error: `找不到 cookie：${key}。key 要用 tokens find 返回的那个原样传入。`,
-                        });
-                    }
+                    if (!existing) return JSON.stringify({ error: cookieKeyError(key) });
                     const ok = await tamperRef.current.actions.setCookie({ ...existing, value: next });
                     if (!ok) return JSON.stringify({ error: '写回失败：当前没有可用的页面地址' });
                 } else if (area === 'local' || area === 'session') {
@@ -2322,16 +2330,12 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                 });
 
                 /**
-                 * 回灌给模型的观察值。措辞必须与 roundToMessages 重建历史时**逐字一致**，
-                 * 否则同一段历史在本轮循环里与下一轮重建后会长得不一样，模型对"这步到底
-                 * 成没成"的判断会随轮次漂移。
+                 * 回灌给模型的观察值。措辞由 toolObservation 统一产出，与
+                 * roundToMessages 重建历史时**逐字一致** —— 两处各写一份时，
+                 * 同一段历史在本轮循环里与下一轮重建后会长得不一样，
+                 * 模型对"这步到底成没成"的判断会随轮次漂移。
                  */
-                transcript.push({
-                    role: 'user',
-                    content: failed
-                        ? `[工具 ${label} 执行失败]\n${result}\n\n这一步没有成功。请根据上面的错误信息修正参数或换一条路，不要原样重试。`
-                        : `[工具 ${label} 的执行结果]\n${result}`,
-                });
+                transcript.push({ role: 'user', content: toolObservation(label, result, !failed) });
             }
         } finally {
             busyRef.current = false;
@@ -2401,32 +2405,53 @@ export const useAgent = (deps: AgentDeps): AgentState => {
     }, []);
 
     /**
-     * 手动执行一条已保存脚本。记账与自动执行对齐（lastRunAt / lastResult / tool
-     * 消息），界面上的"最近执行"与"返回值"对两种触发方式一致 —— 否则手动点的那次
-     * 在脚本卡片上不留痕，用户会以为没跑。
+     * 记一次脚本执行：更新卡片上的"最近执行"，并往对话流里落一条环境事件消息。
+     *
+     * **两个触发入口共用这一个记账点**（手动点运行 / urlPattern 自动执行）。
+     * 分开写两份的后果不是"重复代码"那么轻：两份里任何一份漏掉 lastResult，
+     * 用户就会看到"点了运行但卡片上没痕迹"，而另一份是好的 —— 这类只在一条
+     * 路径上出现的偏差最难发现。
+     *
+     * 正文写成 `<来源前缀><脚本名>`，前缀与 origin 同源（见两个 RUN_PREFIX）。
+     */
+    const recordScriptRun = useCallback((
+        script: AgentScript,
+        result: string,
+        origin: AgentMessageOrigin,
+    ) => {
+        setScripts((prev) => prev.map((s) => (
+            s.id === script.id ? { ...s, lastRunAt: Date.now(), lastResult: result } : s
+        )));
+        appendMessage({
+            id: generateId(),
+            role: 'tool',
+            content: `${origin === 'manual' ? MANUAL_RUN_PREFIX : AUTO_RUN_PREFIX}${script.name}`,
+            tool: 'js',
+            // label 只说"做了什么"，来源由 origin 表达：两处都写来源时，
+            // 界面的「自动」角标会和 label 里的「自动」叠成"自动·js·自动·x"
+            label: `js·${script.name}`,
+            // 环境事件：不属于任何一次模型调用，重建上下文时不能伪造成工具调用
+            origin,
+            script: script.code,
+            ok: !isJsErrorResult(result),
+            result,
+            at: Date.now(),
+        });
+    }, [appendMessage]);
+
+    /**
+     * 手动执行一条已保存脚本。记账与自动执行对齐（见 recordScriptRun），界面上的
+     * "最近执行"与"返回值"对两种触发方式一致 —— 否则手动点的那次在脚本卡片上不留痕，
+     * 用户会以为没跑。
      */
     const runScriptNow = useCallback(async (id: string): Promise<string> => {
         if (busyRef.current) return JSON.stringify({ error: 'Agent 正在运行，先停止再手动执行' });
         const script = scriptsRef.current.find((s) => s.id === id);
         if (!script) return JSON.stringify({ error: '脚本不存在（可能已被删除）' });
         const result = await execActive(script.code);
-        setScripts((prev) => prev.map((s) => (
-            s.id === id ? { ...s, lastRunAt: Date.now(), lastResult: result } : s
-        )));
-        appendMessage({
-            id: generateId(),
-            role: 'tool',
-            content: `${MANUAL_RUN_PREFIX}${script.name}`,
-            tool: 'js',
-            label: `js·手动·${script.name}`,
-            auto: true,
-            script: script.code,
-            ok: !isJsErrorResult(result),
-            result,
-            at: Date.now(),
-        });
+        recordScriptRun(script, result, 'manual');
         return result;
-    }, [execActive, appendMessage]);
+    }, [execActive, recordScriptRun]);
 
     const removeScript = useCallback((id: string) => {
         setScripts((prev) => prev.filter((s) => s.id !== id));
@@ -2454,26 +2479,10 @@ export const useAgent = (deps: AgentDeps): AgentState => {
         hits.forEach((script) => {
             void (async () => {
                 const result = await execOn(webview, script.code);
-                setScripts((prev) => prev.map((s) => (
-                    s.id === script.id ? { ...s, lastRunAt: Date.now(), lastResult: result } : s
-                )));
-                appendMessage({
-                    id: generateId(),
-                    role: 'tool',
-                    content: `${AUTO_RUN_PREFIX}${script.name}`,
-                    tool: 'js',
-                    label: `js·自动·${script.name}`,
-                    // 标记成自动：它不属于任何一次模型调用，重建上下文时要按
-                    // 「环境事件」写回，不能伪造成一次模型发出的工具调用。
-                    auto: true,
-                    script: script.code,
-                    ok: !isJsErrorResult(result),
-                    result,
-                    at: Date.now(),
-                });
+                recordScriptRun(script, result, 'auto');
             })();
         });
-    }), [deps.onPageReady, execOn, appendMessage]);
+    }), [deps.onPageReady, execOn, recordScriptRun]);
 
     const actions = useMemo(() => ({
         send, stop, clear, compact, setCompactRatio, runScriptNow, removeScript, toggleScript,

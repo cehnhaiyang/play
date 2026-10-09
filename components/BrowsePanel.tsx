@@ -3819,10 +3819,20 @@ const MessageRow: React.FC<{
                     {message.usage && <UsageBadge usage={message.usage} />}
                     {/* 显示 label 而不是 tool：script_store 的 list / save / update / delete
                         在裸工具名下长得一模一样，而用户要一眼看出这一步做的是哪件事。
-                        label 就是为这件事写进消息的（见 AgentMessage.label） */}
-                    <span className={`shrink-0 rounded px-1 py-0.5 font-mono text-[9px] ${message.auto ? 'bg-amber-500/15 text-amber-300/80' : 'bg-white/8 text-slate-400'}`}>
-                        {message.auto ? `自动·${message.label || message.tool}` : (message.label || message.tool)}
+                        label 就是为这件事写进消息的（见 AgentMessage.label）。
+                        来源单列一个角标，且只在真的是环境事件时才出现 ——
+                        模型自己调用的那几十步都挂一个「模型」角标只会变成噪声 */}
+                    <span className="shrink-0 rounded bg-white/8 px-1 py-0.5 font-mono text-[9px] text-slate-400">
+                        {message.label || message.tool}
                     </span>
+                    {message.origin && (
+                        <span
+                            className="shrink-0 rounded bg-amber-500/15 px-1 py-0.5 font-mono text-[9px] text-amber-300/80"
+                            title={message.origin === 'manual' ? '用户手动执行' : 'URL 命中后自动执行'}
+                        >
+                            {message.origin === 'manual' ? '手动' : '自动'}
+                        </span>
+                    )}
                     <ChevronRight className={`h-3 w-3 shrink-0 text-slate-600 transition-transform ${expanded ? 'rotate-90' : ''}`} />
                 </button>
 

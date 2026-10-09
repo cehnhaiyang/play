@@ -126,7 +126,10 @@ const loadBuildTranscript = () => {
         // 环境事件（自动 / 手动执行）的文案：前缀常量与产出函数
         grab('const AUTO_RUN_PREFIX = ', ';'),
         grab('const MANUAL_RUN_PREFIX = ', ';'),
+        grab('const scriptNameOf = (message: AgentMessage): string =>', '\n};'),
         grab('const environmentEventObservation = (message: AgentMessage): string =>', '\n};'),
+        // 工具观察的措辞：send 与 roundToMessages 共用它，两处必须逐字一致
+        grab('const toolObservation = (label: string, result: string, ok: boolean): string =>', '\n};'),
         grab('const roundToMessages = (', '\n};'),
         grab('const splitByCompaction = (', '\n};'),
         grab('const buildTranscript = (', '\n};'),
@@ -468,7 +471,7 @@ const buildDispatch = (tamperState, scripts = [], webviewUrl = null, kbBridge = 
         grabBlock('const unknownActionError = (got: string, valid: string[]): string =>', '\n};'),
         // cookie 定位也是产品代码里的一环，
         // 必须原样抽出来测，不能在这里重写一份。
-        grabBlock('const resolveCookieArg = <T extends', '\n};'),
+        grabBlock('const cookieKeyError = (key: string): string =>', ';'),
     ].join('\n');
 
     const dispatch = grabDispatch();
@@ -1784,8 +1787,8 @@ const run = async () => {
         const produced = buildTranscript([
             msg({ role: 'user', content: 'q' }),
             msg({ role: 'tool', label: 'js', result: 'r' }),
-            msg({ role: 'tool', content: '自动执行：x', auto: true, result: 'r' }),
-            msg({ role: 'tool', content: '手动执行：y', auto: true, result: 'r' }),
+            msg({ role: 'tool', content: '自动执行：x', origin: 'auto', result: 'r' }),
+            msg({ role: 'tool', content: '手动执行：y', origin: 'manual', result: 'r' }),
             msg({ role: 'assistant', content: '提示', notice: true }),
         ]).map((m) => m.content).join('\n');
 
@@ -1804,34 +1807,43 @@ const run = async () => {
     await check('自动执行的脚本按环境事件写回，不伪装成工具调用', async () => {
         const out = buildTranscript([
             msg({ role: 'user', content: 'q' }),
-            msg({ role: 'tool', content: '自动执行：抓价格', tool: 'js', auto: true, result: '{"p":1}' }),
+            msg({ role: 'tool', content: '自动执行：抓价格', tool: 'js', origin: 'auto', result: '{"p":1}' }),
         ]);
         const blob = JSON.stringify(out);
         assert(blob.includes('[自动脚本'), `应按自动脚本写回，实际：${blob.slice(0, 120)}`);
-        assert(!blob.includes('[工具 js·自动'), '不得伪装成模型发出的工具调用');
+        assert(!blob.includes('[工具 js'), '不得伪装成模型发出的工具调用');
         assert(blob.includes('抓价格'), '应带上脚本名，模型才知道页面上发生了什么');
     });
 
     /**
-     * 同上：两个执行入口都必须真的打上 auto 标记。
+     * 环境事件消息只由 recordScriptRun 一处构造，且 origin 必须由调用方给出。
      *
-     * 锚点取**前缀常量**而不是拼好的字面量：产品把 `自动执行：${script.name}`
-     * 提成 `${AUTO_RUN_PREFIX}${script.name}` 之后，锚在字面量上的断言会直接
-     * 找不到位置而失败 —— 那是排版变了，不是行为变了。
+     * 原先来源同时活在三个地方：`auto` 布尔、`label` 里的「自动/手动」、
+     * `content` 前缀，外加重建侧用 `startsWith('自动执行：')` 再猜一次。
+     * 四处任一处漂移都不会报错，只会让「谁按的」各说一套。
      */
-    await check('自动执行的消息写入 auto 标记', async () => {
+    await check('环境事件只有一个构造点，来源只有一个存放处', async () => {
         const src = fs.readFileSync(SRC_PATH, 'utf8');
-        const at = src.indexOf('content: `${AUTO_RUN_PREFIX}${script.name}`');
-        assert(at > 0, '应能找到自动执行的 appendMessage');
-        const block = src.slice(at, at + 500);
-        assert(/^\s*auto: true,$/m.test(block),
-            '自动执行的消息必须带 auto: true，否则重建上下文时会被伪造成一次模型调用');
+        const at = src.indexOf('const recordScriptRun = useCallback((');
+        assert(at > 0, '应能找到环境事件的构造点');
+        const block = src.slice(at, src.indexOf('}, [appendMessage]);', at));
+
+        assert(/^\s*origin,$/m.test(block), '构造点必须把 origin 原样写进消息');
+        assert(/origin === 'manual' \? MANUAL_RUN_PREFIX : AUTO_RUN_PREFIX/.test(block),
+            '正文前缀必须按 origin 选，不得由调用方各拼一份');
+
+        // 两个入口都走这一个记账点，不得再各写一份 appendMessage
+        const runs = src.match(/recordScriptRun\(script, result, '(auto|manual)'\)/g) || [];
+        assert(runs.length === 2,
+            `自动与手动两个入口都应走 recordScriptRun，实际 ${runs.length} 处`);
+        assert(!/^\s*auto: true,$/m.test(src), 'auto 布尔已由 origin 取代，不得残留');
+        assert(!/message\.auto\b/.test(src), '不得再有第二个来源判据');
     });
 
     /**
      * 手动执行与自动执行**都必须报成环境事件，但来源要分得开**。
      *
-     * 两条都带 auto（都不是模型发出的调用），可对模型来说"谁按的"有实质区别：
+     * 两条都是环境事件（都不是模型发出的调用），可对模型来说"谁按的"有实质区别：
      * 自动那条是 URL 命中的副作用，手动那条是用户刚亲手验证过这个脚本。
      * 原先重建时统一写成「自动脚本」，用户手动点的那次在模型眼里成了页面自动行为；
      * 而按 `^自动执行：` 剥前缀对手动那条无效，脚本名里会拖着一整段前缀。
@@ -1839,12 +1851,12 @@ const run = async () => {
     await check('环境事件区分自动与手动来源', async () => {
         const auto = buildTranscript([
             msg({ role: 'user', content: 'q' }),
-            msg({ role: 'tool', content: '自动执行：抓价格', tool: 'js', auto: true, result: '{"p":1}' }),
+            msg({ role: 'tool', content: '自动执行：抓价格', tool: 'js', origin: 'auto', result: '{"p":1}' }),
         ]).map((m) => m.content).join('\n');
 
         const manual = buildTranscript([
             msg({ role: 'user', content: 'q' }),
-            msg({ role: 'tool', content: '手动执行：抓价格', tool: 'js', auto: true, result: '{"p":1}' }),
+            msg({ role: 'tool', content: '手动执行：抓价格', tool: 'js', origin: 'manual', result: '{"p":1}' }),
         ]).map((m) => m.content).join('\n');
 
         assert(auto.includes('[自动脚本「抓价格」'), `自动那条应写成自动脚本，实际：${auto}`);
@@ -1859,21 +1871,21 @@ const run = async () => {
     });
 
     /**
-     * 前缀字面量只有一个来源。
+     * 前缀字面量只有一个来源，且只用来**拼正文**。
      *
      * 构造侧写 `自动执行：`、重建侧按同一个常量剥 —— 任一侧改字就静默退化
      * （前缀剥不掉，模型看到的名字里带着前缀），所以这里钉住它只声明一次。
+     * 判断来源**不许**再用前缀（那是第二个真值）：origin 字段才是判据。
      */
     await check('执行来源的前缀只有一个来源', async () => {
         const src = fs.readFileSync(SRC_PATH, 'utf8');
         assert(/const AUTO_RUN_PREFIX = '自动执行：';/.test(src), '自动前缀必须由具名常量给出');
         assert(/const MANUAL_RUN_PREFIX = '手动执行：';/.test(src), '手动前缀必须由具名常量给出');
-        assert(/content: `\$\{AUTO_RUN_PREFIX\}\$\{script\.name\}`/.test(src),
-            '自动执行的构造侧必须用常量，不得手写字面量');
-        assert(/content: `\$\{MANUAL_RUN_PREFIX\}\$\{script\.name\}`/.test(src),
-            '手动执行的构造侧必须用常量，不得手写字面量');
-        assert(/message\.content\.startsWith\(MANUAL_RUN_PREFIX\)/.test(src),
-            '重建侧必须用同一个常量判断来源');
+        // 剥前缀只发生在 scriptNameOf 里，且它按 origin 选前缀、不猜内容
+        assert(/const prefix = message\.origin === 'manual' \? MANUAL_RUN_PREFIX : AUTO_RUN_PREFIX;/.test(src),
+            '剥前缀必须按 origin 选，不能靠试哪条前缀能匹配上');
+        assert(!/message\.content\.startsWith\(MANUAL_RUN_PREFIX\)/.test(src),
+            '不得再用正文前缀判断来源 —— 那是 origin 字段的职责');
     });
 
     await check('连续多个观察合并进一条 user 消息', async () => {
@@ -1988,7 +2000,7 @@ const run = async () => {
         const out = buildTranscript([
             msg({ role: 'user', content: '第一轮' }),
             msg({ role: 'assistant', content: '答一' }),
-            msg({ role: 'tool', content: '自动执行：x', tool: 'js', auto: true, result: 'R' }),
+            msg({ role: 'tool', content: '自动执行：x', tool: 'js', origin: 'auto', result: 'R' }),
         ]);
         assert(out.length === 3, `应并进上一轮成为第 3 条，实际 ${out.length} 条`);
         assert(out[0].content === '第一轮', '首条仍是上一轮的提问');
@@ -2342,6 +2354,38 @@ const run = async () => {
     });
 
     /**
+     * 工具观察的措辞在**当场**与**下一轮重建时**必须逐字一致。
+     *
+     * 与协议错误同一形态、同一风险：send 与 roundToMessages 各写一份措辞时，
+     * 模型当场读到"失败，请修正参数"，下一轮却只剩一句中性的"执行结果" ——
+     * 它会以为自己那一步其实成功了。所以文案只能由 toolObservation 一个函数产出。
+     */
+    await check('工具观察的文案当场与重建时逐字一致', async () => {
+        // webview:false → js 稳定失败，正好覆盖带"修正参数"那段后缀的分支
+        const h = buildAgentHarness({ toolCall: true, webview: false });
+        await h.send('取一下');
+
+        const tool = h.state().messages.find((m) => m.role === 'tool');
+        const live = (h.chats[1] || []).find((m) => m.content.includes('[工具 '));
+        assert(live, '当场应回灌工具观察');
+
+        const rebuilt = buildTranscript(h.state().messages)
+            .map((m) => m.content).join('\n');
+        assert(rebuilt.includes(`[工具 ${tool.label} 执行失败]`),
+            `下一轮重建也必须认出这是一次失败，实际：${rebuilt.slice(0, 200)}`);
+        assert(rebuilt.includes(live.content),
+            '当场与重建的工具观察必须逐字一致，否则模型对"这步成没成"的判断会随轮次漂移');
+
+        // 成功那一路同理：中性前缀不得被写成失败
+        const okOut = buildTranscript([
+            msg({ role: 'user', content: 'q' }),
+            msg({ role: 'tool', label: 'js', result: '{"a":1}', ok: true }),
+        ]).map((m) => m.content).join('\n');
+        assert(okOut.includes('[工具 js 的执行结果]'), '成功应走中性前缀');
+        assert(!okOut.includes('这一步没有成功'), '成功不得带失败后缀');
+    });
+
+    /**
      * 重建时认不认得出协议错误，全靠 label 这一个字面量。
      *
      * 构造侧写 '协议错误'、重建侧比 '协议错误'，任一侧改字就静默退化
@@ -2448,7 +2492,7 @@ const run = async () => {
         assert(typeof st.scripts[0].lastRunAt === 'number', 'lastRunAt 应更新');
         const tool = st.messages.slice(before).find((m) => m.role === 'tool');
         assert(tool, '手动执行应追加一条 tool 消息');
-        assert(tool.auto === true, '手动执行的消息应标 auto（环境事件语义，与自动执行一致）');
+        assert(tool.origin === 'manual', '手动执行的消息应标 origin: manual（环境事件语义，且来源要分得开）');
         assert(tool.content.includes('手动执行'), `消息内容应标明手动，实际 ${tool.content}`);
         assert(tool.ok === false, '失败的执行 ok 应为 false');
     });
@@ -3518,13 +3562,20 @@ const run = async () => {
      *
      * script_store 的 list / save / update / delete 在裸工具名下长得一模一样，
      * 而用户要一眼看出这一步做的是哪件事 —— label 就是为这件事写进消息的。
+     *
+     * 来源另起一个角标，且只在 origin 存在时才出现：label 里不再写来源
+     * （两处都写时，前缀与 label 会叠成"自动·js·自动·x"）。
      */
-    await check('工具行角标显示 label（含动作），自动执行另行标注', async () => {
+    await check('工具行角标显示 label（含动作），环境事件另标来源', async () => {
         const src = fs.readFileSync(path.join(ROOT, 'components', 'BrowsePanel.tsx'), 'utf8');
-        assert(/\{message\.auto \? `自动·\$\{message\.label \|\| message\.tool\}` : \(message\.label \|\| message\.tool\)\}/.test(src),
-            '角标必须显示 label，且自动执行要标出来源；只写 tool 分不出 script_store 的四个动作');
-        assert(!/\{message\.tool\}<\/span>/.test(src),
-            '不得残留只显示裸工具名的旧写法');
+        assert(/\{message\.label \|\| message\.tool\}/.test(src),
+            '角标必须显示 label；只写 tool 分不出 script_store 的四个动作');
+        assert(/\{message\.origin && \(/.test(src),
+            '来源角标只在真的是环境事件时出现，模型自己调用的几十步不该挂噪声');
+        assert(/message\.origin === 'manual' \? '手动' : '自动'/.test(src),
+            '两个来源要分得开：手动是用户刚验证过的信号，自动只是副作用');
+        assert(!/自动·\$\{message\.label/.test(src),
+            'label 里已不含来源，前缀再拼一次会叠成"自动·js·自动·x"');
     });
 
     /**
