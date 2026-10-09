@@ -2,9 +2,10 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import type React from 'react';
 import { Project, Message, AppState, ParserError, SPGWarning } from '../meta';
-import { loadProjects, saveProjects, createNewProject } from '../services/AudioService/persistence';
-import { BrowserAudioEngine } from '../services/AudioService/audioEngine';
-import { exportProjectBundle, bufferToWave } from '../services/AudioService/utils';
+import {
+    loadProjects, saveProjects, createNewProject,
+    BrowserAudioEngine, exportProjectBundle, bufferToWave,
+} from '../services/AudioService';
 import { generateSyntax, fixSyntax } from '../services/AiService';
 import { downloadBlob, loadJSON, removeStored, saveJSON } from '../const';
 

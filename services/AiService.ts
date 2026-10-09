@@ -17,9 +17,7 @@ import type {
 } from '../meta';
 import { getElectronAPI } from '../meta';
 import { fileToDataUrl, loadStr, saveStr, splitDataUrl } from '../const';
-import { PRESET_NAMES } from './AudioService/audioEngine/presets';
-import { DRUM_NAMES } from './AudioService/audioEngine/drums';
-import { CHORD_QUALITY_NAMES } from './AudioService/audioEngine/chords';
+import { PRESET_NAMES, DRUM_NAMES, CHORD_QUALITY_NAMES } from './AudioService';
 
 /**
  * ============================================================================

@@ -14,7 +14,6 @@ import type {
     HeaderRule,
     KbEntry,
     TamperRule,
-    TamperState,
     WebviewElement,
 } from '../meta';
 import { chat, estimatePromptTokens } from '../services/AiService';

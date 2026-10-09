@@ -493,7 +493,7 @@ function run() {
      */
     checks += 1;
     const parserSrc = fs.readFileSync(
-        path.join(ROOT, 'services', 'AudioService', 'audioEngine', 'parser.ts'), 'utf8');
+        path.join(ROOT, 'services', 'AudioService.ts'), 'utf8');
     const aiSrc = fs.readFileSync(path.join(ROOT, 'services', 'AiService.ts'), 'utf8');
 
     const effectNamesBlock = parserSrc.match(/const EFFECT_NAMES[^=]*=\s*\[([\s\S]*?)\]/);

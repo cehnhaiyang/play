@@ -7,9 +7,7 @@
  */
 const { MockBaseContext } = require('./mockAudio');
 const ROOT = './build';
-const { SPGParser } = require(`${ROOT}/services/AudioService/audioEngine/parser`);
-const { EventScheduler } = require(`${ROOT}/services/AudioService/audioEngine/scheduler`);
-const { AudioSynthesizer } = require(`${ROOT}/services/AudioService/audioEngine/synthesizer`);
+const { SPGParser, EventScheduler, AudioSynthesizer } = require(`${ROOT}/services/AudioService`);
 
 const parser = new SPGParser();
 const scheduler = new EventScheduler();
@@ -119,7 +117,7 @@ const render = (code) => {
     parsed.sequences, parsed.instruments, parsed.mix, parsed.tempo, parsed.swing
   );
   const ctx = new MockBaseContext(44100);
-  const synth = new AudioSynthesizer(ctx);
+  const synth = new AudioSynthesizer();
   synth.scheduleEvents(ctx, ctx.createGain(), events, parsed.effects, () => {});
   return { parsed, events, ctx };
 };

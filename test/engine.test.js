@@ -11,10 +11,10 @@
 const { MockBaseContext, MockOfflineAudioContext } = require('./mockAudio');
 
 const ROOT = './build';
-const { SPGParser, SPGError } = require(`${ROOT}/services/AudioService/audioEngine/parser`);
-const { EventScheduler } = require(`${ROOT}/services/AudioService/audioEngine/scheduler`);
-const { AudioSynthesizer } = require(`${ROOT}/services/AudioService/audioEngine/synthesizer`);
-const { parseDuration, getMidi, midiToFreq } = require(`${ROOT}/services/AudioService/utils`);
+const {
+  SPGParser, SPGError, EventScheduler, AudioSynthesizer,
+  parseDuration, getMidi, midiToFreq,
+} = require(`${ROOT}/services/AudioService`);
 
 /* ------------------------------- 迷你测试框架 ------------------------------ */
 
@@ -68,7 +68,7 @@ const compile = (code, tempoOverride) => {
 const render = (code, sampleRate = 44100) => {
   const ctx = new MockBaseContext(sampleRate);
   const { parsed, events, totalDuration } = compile(code);
-  const synth = new AudioSynthesizer(ctx);
+  const synth = new AudioSynthesizer();
   const dest = ctx.createGain();
   const registered = [];
   synth.scheduleEvents(ctx, dest, events, parsed.effects, (n) => registered.push(n));
@@ -460,7 +460,7 @@ check('全部 16 种鼓组都能合成', () => {
 });
 
 check('全部内置预设都能合成', () => {
-  const { PRESET_NAMES } = require(`${ROOT}/services/AudioService/audioEngine/presets`);
+  const { PRESET_NAMES } = require(`${ROOT}/services/AudioService`);
   const seqs = PRESET_NAMES.map((p, i) =>
     `define_instrument(name="i${i}"){ preset:"${p}" }\nsequence(name="s${i}", instrument="i${i}"){ note("C4","4n") }`
   ).join('\n');
@@ -475,7 +475,7 @@ check('全部内置预设都能合成', () => {
  * 返回 null 与"未知预设"同义，调用方本来就要处理这个分支。
  */
 check('getPreset 对空值/非字符串返回 null 而不抛异常', () => {
-  const { getPreset } = require(`${ROOT}/services/AudioService/audioEngine/presets`);
+  const { getPreset } = require(`${ROOT}/services/AudioService`);
   for (const bad of [undefined, null, '', '   ', 'nope', 123, {}, []]) {
     eq(getPreset(bad), null, `getPreset(${JSON.stringify(bad)}) 应返回 null`);
   }
@@ -710,7 +710,7 @@ group('回归修复 · 和弦符号');
 
 // 本组插在第 7 节（和弦符号）的 require 之前，用独立的局部引用避免 TDZ
 const { parseChordSymbol: parseChord9, voicingToPitches: voicing9 } =
-  require(`${ROOT}/services/AudioService/audioEngine/chords`);
+  require(`${ROOT}/services/AudioService`);
 const names9 = (ps) => ps.join(',');
 
 check('7sus4 族可解析', () => {
@@ -760,7 +760,7 @@ mix { track(source="s", time=0) track(source="s", time=0) }`);
 check('filter 扫频跟随 timeOffset（实时播放可听见）', () => {
   const ctx = new MockBaseContext(44100);
   const { events } = compile(`sequence(name="s"){ note("C4","2n") }`);
-  const synth = new AudioSynthesizer(ctx);
+  const synth = new AudioSynthesizer();
   const dest = ctx.createGain();
   const fx = [{ type: 'filter', kind: 'lowpass', from: 200, to: 4000, Q: 1, duration: 2, start: 0 }];
   synth.scheduleEvents(ctx, dest, events, fx, () => {}, 100);
@@ -778,7 +778,7 @@ sequence(name="s", instrument="n"){ note("C4","4n") }`;
   const snap = (rate) => {
     const ctx = new MockBaseContext(rate);
     const { parsed, events } = compile(code);
-    const synth = new AudioSynthesizer(ctx);
+    const synth = new AudioSynthesizer();
     synth.scheduleEvents(ctx, ctx.createGain(), events, parsed.effects, () => {});
     const key = [...synth.noiseBuffers.keys()].find((k) => k.startsWith('white@'));
     assert(key === `white@${rate}`, `缓存键应带采样率，实际 ${key}`);
@@ -791,7 +791,7 @@ sequence(name="s", instrument="n"){ note("C4","4n") }`;
 check('长混响尾音计入总时长（导出不切尾）', () => {
   // 尾音余量是 BrowserAudioEngine.compile 加的（调度器只算事件时钟），必须走引擎整链
   global.window = { AudioContext: MockBaseContext, OfflineAudioContext: MockOfflineAudioContext };
-  const { BrowserAudioEngine } = require(`${ROOT}/services/AudioService/audioEngine/index`);
+  const { BrowserAudioEngine } = require(`${ROOT}/services/AudioService`);
   const engine = new BrowserAudioEngine();
   const err = engine.compile(`sequence(name="s"){ note("C4","4n") }
 effect_chain { reverb(decay=8, mix=0.5) }`);
@@ -803,7 +803,7 @@ group('回归修复 · 编译失败不残留旧数据');
 
 check('无事件编译后时长清零', () => {
   global.window = { AudioContext: MockBaseContext, OfflineAudioContext: MockOfflineAudioContext };
-  const { BrowserAudioEngine } = require(`${ROOT}/services/AudioService/audioEngine/index`);
+  const { BrowserAudioEngine } = require(`${ROOT}/services/AudioService`);
   const engine = new BrowserAudioEngine();
   eq(engine.compile(BASIC), null);
   assert(engine.getDuration() > 0, '前置条件：正常编译有时长');
@@ -825,7 +825,7 @@ group('引擎');
 
 check('compile 返回 null 表示成功', () => {
   global.window = { AudioContext: MockBaseContext, OfflineAudioContext: MockOfflineAudioContext };
-  const { BrowserAudioEngine } = require(`${ROOT}/services/AudioService/audioEngine/index`);
+  const { BrowserAudioEngine } = require(`${ROOT}/services/AudioService`);
   const engine = new BrowserAudioEngine();
   const err = engine.compile(BASIC);
   eq(err, null, '编译应成功');
@@ -833,14 +833,14 @@ check('compile 返回 null 表示成功', () => {
 });
 
 check('compile 失败返回带行号的错误', () => {
-  const { BrowserAudioEngine } = require(`${ROOT}/services/AudioService/audioEngine/index`);
+  const { BrowserAudioEngine } = require(`${ROOT}/services/AudioService`);
   const engine = new BrowserAudioEngine();
   const err = engine.compile(`sequence(name="s"){ note("H9","4n") }`);
   assert(err && err.line === 1, `行号错误: ${JSON.stringify(err)}`);
 });
 
 check('renderOffline 可产出 WAV', async () => {
-  const { BrowserAudioEngine } = require(`${ROOT}/services/AudioService/audioEngine/index`);
+  const { BrowserAudioEngine } = require(`${ROOT}/services/AudioService`);
   const engine = new BrowserAudioEngine();
   engine.compile(BASIC);
   const blob = await engine.renderOffline();
@@ -931,7 +931,7 @@ check('鼓组声部音量不应被 melody 之外的乐器压掉', () => {
 
 group('和弦符号');
 
-const { parseChordSymbol, voicingToPitches, CHORD_QUALITY_NAMES } = require(`${ROOT}/services/AudioService/audioEngine/chords`);
+const { parseChordSymbol, voicingToPitches, CHORD_QUALITY_NAMES } = require(`${ROOT}/services/AudioService`);
 const names = (ps) => ps.join(',');
 
 check('大三和弦 C = C E G', () => {
@@ -1619,7 +1619,7 @@ check('提示词里声明的和弦性质都能被解析', () => {
 });
 
 check('提示词里声明的鼓组名与引擎一致', () => {
-  const { DRUM_NAMES: engineDrums } = require(`${ROOT}/services/AudioService/audioEngine/drums`);
+  const { DRUM_NAMES: engineDrums } = require(`${ROOT}/services/AudioService`);
   // 鼓组清单由 drumList() 在运行时注入，核对拼接点与清单完整性
   assert(/\$\{drumList\(\)\}/.test(aiSource), '提示词应通过 drumList() 注入鼓组名');
   assert(engineDrums.length === 16, `鼓组数量异常: ${engineDrums.length}`);
@@ -1633,7 +1633,7 @@ check('提示词里声明的鼓组名与引擎一致', () => {
 });
 
 check('提示词里声明的预设名与引擎一致', () => {
-  const { PRESET_NAMES: enginePresets } = require(`${ROOT}/services/AudioService/audioEngine/presets`);
+  const { PRESET_NAMES: enginePresets } = require(`${ROOT}/services/AudioService`);
   // 预设清单是运行时拼进去的，只需确认拼接点存在且清单非空
   assert(enginePresets.length > 20, `预设数量异常: ${enginePresets.length}`);
   assert(/\$\{presetList\(\)\}/.test(aiSource), '提示词应通过 presetList() 注入预设名');
@@ -1748,7 +1748,7 @@ const run = async () => {
   // 离线渲染是异步 API，单独跑一遍
   try {
     global.window = { AudioContext: MockBaseContext, OfflineAudioContext: MockOfflineAudioContext };
-    const { BrowserAudioEngine } = require(`${ROOT}/services/AudioService/audioEngine/index`);
+    const { BrowserAudioEngine } = require(`${ROOT}/services/AudioService`);
     const engine = new BrowserAudioEngine();
     engine.compile(BASIC);
     const blob = await engine.renderOffline();

@@ -17,7 +17,7 @@
     "isolatedModules": false
   },
   "include": [
-    "../services/AudioService/**/*.ts",
+    "../services/AudioService.ts",
     "../services/AiService.ts",
     "../services/BookmarkService/**/*.ts",
     "../services/BrowserService/**/*.ts",
