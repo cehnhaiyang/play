@@ -1785,10 +1785,12 @@ const run = async () => {
             msg({ role: 'user', content: 'q' }),
             msg({ role: 'tool', label: 'js', result: 'r' }),
             msg({ role: 'tool', content: '自动执行：x', auto: true, result: 'r' }),
+            msg({ role: 'tool', content: '手动执行：y', auto: true, result: 'r' }),
             msg({ role: 'assistant', content: '提示', notice: true }),
         ]).map((m) => m.content).join('\n');
 
-        for (const prefix of ['[工具 ', '[自动脚本', '[系统提示]']) {
+        // 界面补的提示前缀写作 [系统提示]（带右括号），提示词里也是这么写的
+        for (const prefix of ['[工具 ', '[自动脚本', '[用户手动执行了脚本', '[系统提示]']) {
             assert(produced.includes(prefix), `实现应写出 ${prefix}（本断言已失效，需更新）`);
             assert(spec.includes(prefix), `提示词必须声明 ${prefix}，否则模型不知道那是历史`);
         }
