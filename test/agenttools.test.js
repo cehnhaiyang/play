@@ -466,6 +466,8 @@ const buildDispatch = (tamperState, scripts = [], webviewUrl = null, kbBridge = 
         grabBlock('const headerRuleToProtocol = (rule: HeaderRule): Record<string, unknown> =>', '\n});'),
         grabBlock('const safeParseObject = (raw: string)', '\n};'),
         grabBlock('const readWebviewUrl = (webview: WebviewElement): string =>', '\n};'),
+        // 异常 → 文案：dispatchTool 的每个 catch 都用它，漏注入会 ReferenceError
+        grabBlock('const errorText = (e: unknown): string =>', ';'),
         // 未知 action 的统一错误文案（含大小写提示）也是产品代码的一环，
         // 不抽出来就会 ReferenceError —— 那是脚手架的错，不是产品的错。
         grabBlock('const unknownActionError = (got: string, valid: string[]): string =>', '\n};'),
@@ -2667,8 +2669,11 @@ const run = async () => {
         const src = fs.readFileSync(SRC_PATH, 'utf8');
         assert(/\$\{KB_SEARCH_LIMIT\}/.test(src),
             'search 条数上限应插值 KB_SEARCH_LIMIT，而不是写死');
+        assert(/\$\{RESULT_LIMIT_BYTES \/ 1024\}KB/.test(src),
+            'js 返回值上限应插值 RESULT_LIMIT_BYTES —— 手抄的 32KB 在常量改动后必然过期');
         assert(!/search 回最多 \d+ 条/.test(src), '不得把条数上限手抄进提示词');
         assert(!/正文 ≤\d+KB/.test(src), '不得把正文上限手抄进提示词');
+        assert(!/上限 \d+KB/.test(src), '不得把返回值上限手抄进提示词');
         // 篇数同理：它会随 KB 升级变，写死必然过期
         assert(!/知识库（\d+ 篇/.test(src), '不得把文章篇数写死 —— KB 升级后必然对不上');
     });

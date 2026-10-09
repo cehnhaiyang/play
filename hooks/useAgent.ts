@@ -274,6 +274,7 @@ const environmentEventObservation = (message: AgentMessage): string => {
  *
  * 失败与成功必须长得不一样：共用「执行结果」一个前缀时，模型只能自己去读 JSON 里的
  * error 字段才能发现失败，实测里它经常读漏，接着按原计划往下走，同一招连错几次。
+ * 后半句"不要原样重试"是必要的 —— 只说失败了，模型最常见的反应是把同样的调用再发一遍。
  */
 const toolObservation = (label: string, result: string, ok: boolean): string => {
     const body = result || '(空)';
@@ -481,7 +482,7 @@ const SYSTEM_PROMPT = `
 
 1. js —— 执行 JavaScript（最高频工具）
    args: {"code": "string"}
-   - 必须显式 return 一个可序列化值（上限 32KB）。支持 await、主世界全局变量、带凭证 fetch。
+   - 必须显式 return 一个可序列化值（上限 ${RESULT_LIMIT_BYTES / 1024}KB）。支持 await、主世界全局变量、带凭证 fetch。
    - code 是 JSON 字符串：多行 JS 的换行必须写成 \\n、双引号必须写成 \\"，直接粘贴带真实换行的代码会破坏外层 JSON 解析，当次调用即判协议错误。
    - 禁止在此工具内修改 location.href 跳转。
 
@@ -715,6 +716,15 @@ const readWebviewUrl = (webview: WebviewElement): string => {
 };
 
 const asString = (value: unknown): string => (typeof value === 'string' ? value : '');
+
+/**
+ * 异常 → 可展示的一行文字。
+ *
+ * 不用 `String(e)` 一把梭：抛出的东西不一定是 Error（Promise 里 reject 一个字符串
+ * 很常见），而 Error 直接 String() 会得到 "Error: xxx" 这种带前缀的噪声。
+ * 抽出来是因为十来个 catch 都要这同一句话，各写一遍迟早有一处漏掉 message。
+ */
+const errorText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 /**
  * 未知 action 的错误文案。
@@ -1351,7 +1361,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
 
             return next;
         } catch (e) {
-            const reason = e instanceof Error ? e.message : String(e);
+            const reason = errorText(e);
             setError(`压缩失败：${reason}`);
             return null;
         } finally {
@@ -1382,7 +1392,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                     // 脚本抛错不是终点：把错误原样交给模型，它自己改代码重试。
                     // 走 __agentError 通道（见 buildScriptSource），不与页面数据
                     // 里合法的 {error} 字段混淆。
-                    const reason = e instanceof Error ? e.message : String(e);
+                    const reason = errorText(e);
                     return JSON.stringify({ __agentError: reason });
                 }
             })();
@@ -1597,7 +1607,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                     // 先订阅后导航：loadURL 抛错时等待必须取消，否则定时器与
                     // 广播订阅泄漏到超时，且这 15 秒里一直轮询 stoppedRef。
                     ready.cancel();
-                    return JSON.stringify({ error: `导航失败：${e instanceof Error ? e.message : String(e)}` });
+                    return JSON.stringify({ error: `导航失败：${errorText(e)}` });
                 }
                 const ok = await ready;
                 return JSON.stringify({ url, loaded: ok, currentUrl: readWebviewUrl(webview) });
@@ -1847,7 +1857,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                         const { header, payload } = decodeJwt(token);
                         return JSON.stringify({ header, payload });
                     } catch (e) {
-                        return JSON.stringify({ error: `解码失败：${e instanceof Error ? e.message : String(e)}` });
+                        return JSON.stringify({ error: `解码失败：${errorText(e)}` });
                     }
                 }
 
@@ -1865,7 +1875,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                 try {
                     next = rewriteJwtPayload(token, changes as Record<string, unknown>);
                 } catch (e) {
-                    return JSON.stringify({ error: `改写失败：${e instanceof Error ? e.message : String(e)}` });
+                    return JSON.stringify({ error: `改写失败：${errorText(e)}` });
                 }
 
                 if (area === 'cookie') {
@@ -1953,7 +1963,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                         }
                         return JSON.stringify({ ready: true, articles: entries.length, boards });
                     } catch (e) {
-                        return JSON.stringify({ error: e instanceof Error ? e.message : String(e) });
+                        return JSON.stringify({ error: errorText(e) });
                     }
                 }
 
@@ -1976,7 +1986,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                         }
                         return JSON.stringify({ query, hits });
                     } catch (e) {
-                        return JSON.stringify({ error: e instanceof Error ? e.message : String(e) });
+                        return JSON.stringify({ error: errorText(e) });
                     }
                 }
 
@@ -2008,7 +2018,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                         });
                         return JSON.stringify(result);
                     } catch (e) {
-                        return JSON.stringify({ error: e instanceof Error ? e.message : String(e) });
+                        return JSON.stringify({ error: errorText(e) });
                     }
                 }
 
@@ -2143,7 +2153,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                     // 用户点停止导致的中断：不算错误，把已流出的部分定稿即可
                     const aborted = e instanceof Error && e.name === 'AbortError';
                     if (flushTimer !== null) window.clearTimeout(flushTimer);
-                    if (!aborted) setError(e instanceof Error ? e.message : String(e));
+                    if (!aborted) setError(errorText(e));
                     /**
                      * 中断的这两条消息**不带 usage**，这不是遗漏。
                      *
@@ -2277,7 +2287,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                     result = await dispatchTool(tool, args);
                 } catch (e) {
                     result = JSON.stringify({
-                        error: `工具 ${tool} 执行时抛出异常：${e instanceof Error ? e.message : String(e)}`,
+                        error: `工具 ${tool} 执行时抛出异常：${errorText(e)}`,
                     });
                 }
                 if (stoppedRef.current) break;
@@ -2293,15 +2303,11 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                 const label = tool === 'script_store' && rawAction ? `${tool}·${rawAction}` : tool;
 
                 /**
-                 * 失败与成功必须长得不一样，界面与模型两侧都用这一个判据。
-                 *
-                 * 回灌给模型时原先是共用「[工具 X 的执行结果]」一个前缀，模型只能自己
-                 * 去读 JSON 里的 error 字段才能发现失败。实测里它经常读漏，接着按原计划
-                 * 往下走 —— 于是同一招连错好几次，把预算烧光。
-                 *
-                 * js 用专属判据：页面数据里合法的 {error} 字段不能算失败
-                 * （见 isJsErrorResult），否则一次成功的数据探测会被当成
-                 * 失败重做，预算烧在正确的结果上。
+                 * 失败判据按工具分岔，因为"什么算失败"对两者本就不同：
+                 * js 的页面数据里 `{error:"..."}` 是**探测到的业务字段**，
+                 * 只有 __agentError 与 dispatchTool 自己的参数错误才算失败
+                 * （见 isJsErrorResult）；其余工具的错误只能由我们构造，
+                 * 任何非空 error 都是失败。两者共用界面与模型两侧的同一个判据。
                  */
                 const failed = tool === 'js' ? isJsErrorResult(result) : isErrorResult(result);
 
