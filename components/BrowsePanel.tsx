@@ -3267,7 +3267,11 @@ const CompactionDivider: React.FC<{ compaction: AgentCompaction; usage?: AiUsage
             </div>
 
             <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[9px] text-amber-200/60">
-                <span>{compaction.beforeTokens} → {compaction.afterTokens} token</span>
+                {/* 用 formatTokens 而不是原始数字：用量条上写的是 12.3k，
+                    这里写 12345 会让同一件事在同一个面板里有两个精度 */}
+                <span title={`压缩前 ${compaction.beforeTokens} → 压缩后 ${compaction.afterTokens} token（估算）`}>
+                    {formatTokens(compaction.beforeTokens)} → {formatTokens(compaction.afterTokens)} token
+                </span>
                 {/* 摘要调用自身的花费也挂在这里：它进了"累计"，界面上就得有出处 */}
                 {usage && <span>摘要调用 <UsageBadge usage={usage} className="text-amber-200/60" /></span>}
                 {dropped > 0 && (
@@ -3283,15 +3287,17 @@ const CompactionDivider: React.FC<{ compaction: AgentCompaction; usage?: AiUsage
             {compaction.overBudget && (
                 <p className="mt-1 flex items-start gap-1 text-[9px] leading-relaxed text-rose-300/90">
                     <AlertTriangle className="mt-0.5 h-2.5 w-2.5 shrink-0" />
-                    压缩后仍超出上限（{compaction.afterTokens} token，门槛 {formatTokens(CONTEXT_LIMIT_TOKENS)}），
+                    压缩后仍超出上限（{formatTokens(compaction.afterTokens)} token，门槛 {formatTokens(CONTEXT_LIMIT_TOKENS)}），
                     输入框仍锁定。请再压一次，或清空对话。
                 </p>
             )}
 
             {open && (
-                <pre className="custom-scrollbar mt-1.5 max-h-64 overflow-auto whitespace-pre-wrap rounded-lg border border-amber-400/15 bg-slate-950/60 p-2 font-sans text-[10px] leading-relaxed text-amber-100/80">
-                    {compaction.summary}
-                </pre>
+                // 摘要本身是结构化 Markdown（COMPACT_SYSTEM_PROMPT 就是按 ## 小节要求的），
+                // 按纯文本铺开会把 ## 与列表符号一起摊出来
+                <div className="custom-scrollbar mt-1.5 max-h-64 overflow-auto rounded-lg border border-amber-400/15 bg-slate-950/60 p-2 text-[10px] leading-relaxed text-amber-100/80">
+                    <MarkdownBlock text={compaction.summary} />
+                </div>
             )}
         </div>
     );
@@ -3349,6 +3355,237 @@ const CopyButton: React.FC<{ text: string; title?: string }> = ({ text, title })
     );
 };
 
+/* ------------------------------ Markdown 渲染 ------------------------------ */
+
+/**
+ * 行内标记：代码 / 粗体 / 斜体 / 链接。
+ *
+ * 一次扫描切分而不是连环 replace：replace 会在自己刚产出的结果上继续匹配
+ * （粗体里包着的代码会被再处理一遍，反引号留在原地），而这里产出的是 React
+ * 节点，必须一次切准。用 matchAll 而不是 exec 循环：后者依赖 lastIndex，
+ * 一个模块级的 g 正则被两处共用时会互相污染游标。
+ */
+const MD_INLINE_RE = /(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(\*[^*\n]+\*)|(\[[^\]\n]*\]\([^)\s]+\))/g;
+
+const renderInline = (text: string, keyPrefix: string): React.ReactNode[] => {
+    const out: React.ReactNode[] = [];
+    let last = 0;
+    let seq = 0;
+
+    for (const match of text.matchAll(MD_INLINE_RE)) {
+        const at = match.index ?? 0;
+        if (at > last) out.push(text.slice(last, at));
+        const token = match[0];
+        const key = `${keyPrefix}-${seq}`;
+        seq += 1;
+
+        if (token.startsWith('`')) {
+            out.push(
+                <code key={key} className="rounded bg-black/40 px-1 py-px font-mono text-[10px] text-cyan-200">
+                    {token.slice(1, -1)}
+                </code>,
+            );
+        } else if (token.startsWith('**')) {
+            out.push(<strong key={key} className="font-bold text-white">{token.slice(2, -2)}</strong>);
+        } else if (token.startsWith('[')) {
+            const link = /^\[([^\]]*)\]\(([^)\s]+)\)$/.exec(token);
+            /**
+             * 链接**渲染成文字，不做成可点的 a**。
+             *
+             * 这段文字完全由模型生成，而模型读过页面内容 —— 把它变成一个能触发
+             * 导航的控件，等于让页面里的不可信文本决定用户点下去会发生什么。
+             * 地址仍然显示出来，用户想访问可以自己复制到地址栏。
+             */
+            out.push(link
+                ? <span key={key} className="text-indigo-300 underline decoration-indigo-400/40">{link[1] || link[2]}</span>
+                : token);
+        } else {
+            out.push(<em key={key} className="text-slate-300">{token.slice(1, -1)}</em>);
+        }
+        last = at + token.length;
+    }
+
+    if (last < text.length) out.push(text.slice(last));
+    return out;
+};
+
+/** 表格分隔行（| --- | :--: |）：只由 | - : 与空白组成，且至少一个 - */
+const isTableDivider = (line: string): boolean =>
+    line.includes('|') && /-/.test(line) && /^[\s|:-]+$/.test(line);
+
+/** 表格行 → 单元格。首尾竖线是装饰，不去掉会多出两个空列 */
+const splitTableRow = (line: string): string[] =>
+    line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim());
+
+/**
+ * 把模型输出的 Markdown 变成 React 节点。
+ *
+ * 系统提示词要求 final 交**一整篇 Markdown**（标题、列表、表格、代码块），
+ * 而按纯文本铺开会把 ## / ** / | 这些标记直接摊在用户眼前 ——
+ * 一份本该能读的报告变成一堆符号。这是它存在的唯一理由。
+ *
+ * 三条硬约束：
+ * 1. **不注入 HTML**：全程构建 React 节点，模型输出永远只是文本。
+ * 2. **不猜**：解析逐行进行，认不出来的一律当普通段落。少渲染一种结构只是
+ *    不好看，猜错结构会把正文吃掉。
+ * 3. **不抛错**：围栏不闭合、表格列数不齐都只是渲染得朴素一点，不能白屏。
+ */
+const parseMarkdown = (text: string): React.ReactNode[] => {
+    const lines = text.replace(/\r\n/g, '\n').split('\n');
+    const out: React.ReactNode[] = [];
+    let i = 0;
+    let seq = 0;
+    const nextKey = () => `md${seq++}`;
+
+    while (i < lines.length) {
+        const line = lines[i];
+
+        // 代码块先判：模型写的 JS 就在这里，它内部的 # - | 一个都不能当结构解析
+        const fence = /^\s*```(\w*)\s*$/.exec(line);
+        if (fence) {
+            const body: string[] = [];
+            i += 1;
+            while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) {
+                body.push(lines[i]);
+                i += 1;
+            }
+            i += 1; // 跳过收尾围栏；缺失时直接越界结束，不报错
+            out.push(
+                <pre key={nextKey()} className="custom-scrollbar overflow-auto rounded-lg border border-white/8 bg-black/40 p-2 font-mono text-[10px] leading-relaxed text-cyan-200">
+                    {body.join('\n')}
+                </pre>,
+            );
+            continue;
+        }
+
+        if (!line.trim()) { i += 1; continue; }
+
+        const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+        if (heading) {
+            out.push(
+                <p key={nextKey()} className={`font-bold text-white ${heading[1].length <= 2 ? 'text-[12px]' : 'text-[11px]'}`}>
+                    {renderInline(heading[2], nextKey())}
+                </p>,
+            );
+            i += 1;
+            continue;
+        }
+
+        if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
+            out.push(<hr key={nextKey()} className="border-white/10" />);
+            i += 1;
+            continue;
+        }
+
+        // 表格：本行是表头、下一行是分隔行才算。正文里孤立的一个 | 不该被当成表格
+        if (line.includes('|') && i + 1 < lines.length && isTableDivider(lines[i + 1])) {
+            const head = splitTableRow(line);
+            const rows: string[][] = [];
+            i += 2;
+            while (i < lines.length && lines[i].trim() && lines[i].includes('|')) {
+                rows.push(splitTableRow(lines[i]));
+                i += 1;
+            }
+            out.push(
+                <div key={nextKey()} className="custom-scrollbar overflow-x-auto">
+                    <table className="w-full border-collapse text-[10px]">
+                        <thead>
+                            <tr>
+                                {head.map((cell, c) => (
+                                    <th key={c} className="border border-white/10 bg-white/6 px-1.5 py-1 text-left font-bold text-slate-200">
+                                        {renderInline(cell, `h${c}`)}
+                                    </th>
+                                ))}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {rows.map((row, r) => (
+                                <tr key={r}>
+                                    {/* 按表头列数渲染：某行少写几格时补空，多写的忽略 —— 
+                                        列数不齐是模型常见的输出瑕疵，不该让整张表塌掉 */}
+                                    {head.map((_, c) => (
+                                        <td key={c} className="border border-white/10 px-1.5 py-1 align-top text-slate-300">
+                                            {renderInline(row[c] || '', `c${r}-${c}`)}
+                                        </td>
+                                    ))}
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>,
+            );
+            continue;
+        }
+
+        const bullet = /^\s*[-*+]\s+(.*)$/.exec(line);
+        if (bullet) {
+            const items: string[] = [];
+            while (i < lines.length) {
+                const m = /^\s*[-*+]\s+(.*)$/.exec(lines[i]);
+                if (!m) break;
+                items.push(m[1]);
+                i += 1;
+            }
+            out.push(
+                <ul key={nextKey()} className="ml-3.5 list-disc space-y-0.5">
+                    {items.map((item, n) => <li key={n}>{renderInline(item, `u${n}`)}</li>)}
+                </ul>,
+            );
+            continue;
+        }
+
+        if (/^\s*\d+[.)]\s+/.test(line)) {
+            const items: string[] = [];
+            while (i < lines.length) {
+                const m = /^\s*\d+[.)]\s+(.*)$/.exec(lines[i]);
+                if (!m) break;
+                items.push(m[1]);
+                i += 1;
+            }
+            out.push(
+                <ol key={nextKey()} className="ml-3.5 list-decimal space-y-0.5">
+                    {items.map((item, n) => <li key={n}>{renderInline(item, `o${n}`)}</li>)}
+                </ol>,
+            );
+            continue;
+        }
+
+        if (/^\s*>\s?/.test(line)) {
+            const quoted: string[] = [];
+            while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+                quoted.push(lines[i].replace(/^\s*>\s?/, ''));
+                i += 1;
+            }
+            out.push(
+                <blockquote key={nextKey()} className="border-l-2 border-white/15 pl-2 text-slate-400">
+                    {renderInline(quoted.join(' '), nextKey())}
+                </blockquote>,
+            );
+            continue;
+        }
+
+        // 普通段落：连续非空行并成一段（模型常把一句话硬折行，保留换行会散成好几行）
+        const para: string[] = [];
+        while (i < lines.length && lines[i].trim()
+            && !/^\s*(```|#{1,6}\s|>|[-*+]\s|\d+[.)]\s)/.test(lines[i])) {
+            para.push(lines[i]);
+            i += 1;
+        }
+        // 理论上到不了这里（上面每个分支都 continue），但手写解析器必须有这条兜底：
+        // 万一漏了某条分支，没有它就是死循环，界面直接卡死
+        if (para.length === 0) { i += 1; continue; }
+        out.push(<p key={nextKey()}>{renderInline(para.join(' '), nextKey())}</p>);
+    }
+
+    return out;
+};
+
+const MarkdownBlock: React.FC<{ text: string }> = ({ text }) => {
+    // 逐行解析是 O(行数)，但这段在流式期间每 60ms 会重渲一次 —— 缓存住解析结果
+    const nodes = useMemo(() => parseMarkdown(text), [text]);
+    return <div className="space-y-1.5">{nodes}</div>;
+};
+
 /**
  * 正在流式输出的这一轮。
  *
@@ -3356,6 +3593,10 @@ const CopyButton: React.FC<{ text: string; title?: string }> = ({ text, title })
  * 正文才是要看的，正常样式实时增长。
  * 流式在这里买到的是"它在干活"的可见性，不是更快的响应 ——
  * Agent 每一步都要等完整 JSON 才能解析，所以流式只影响观感，不影响速度。
+ *
+ * 正文**不套 Markdown 渲染**：此刻流出来的还是 JSON 信封本身
+ * （{"thought":…,"tool":…}），结构尚未成形，按 Markdown 解析只会把
+ * 反引号、星号当成标记吃掉。定稿后那份才走 MarkdownBlock。
  */
 const StreamBubble: React.FC<{ content: string; reasoning: string }> = ({ content, reasoning }) => (
     <div className="flex items-start gap-2">
@@ -3497,6 +3738,29 @@ const MessageRow: React.FC<{
     }
 
     if (message.role === 'assistant') {
+        /**
+         * 界面自己补的提示（中断 / 空回复 / 协议错误放弃 / 上下文超限）不是模型说的话。
+         *
+         * 必须与真正的回答长得不一样：一样的白底气泡里写一句"（模型本轮没有返回
+         * 内容，已停止。）"，用户会把它当成模型的结论读 —— 而它恰恰表示"这一步
+         * 什么都没产出"。用虚线边框 + 灰色斜体把它降级成旁注。
+         */
+        if (message.notice) {
+            return (
+                <div className={`${row} flex items-start gap-2`}>
+                    <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-white/8">
+                        <AlertCircle className="h-3.5 w-3.5 text-slate-500" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                        <p className="rounded-xl border border-dashed border-white/12 bg-white/[0.02] px-2.5 py-2 text-[10px] italic leading-relaxed text-slate-500">
+                            {message.content}
+                        </p>
+                    </div>
+                    <MessageActions disabled={!canEdit} onRewind={onRewind} onRemove={onRemove} />
+                </div>
+            );
+        }
+
         return (
             <div className={`${row} flex items-start gap-2`}>
                 <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500">
@@ -3506,8 +3770,10 @@ const MessageRow: React.FC<{
                     {message.reasoning && <ReasoningBlock text={message.reasoning} />}
                     {/* 复制挂在气泡上而不是行内操作里：结论经常要贴到别处用，
                         藏在 hover 菜单里等于每次都要先找到那条消息再悬停 */}
-                    <div className="group/copy relative whitespace-pre-wrap rounded-xl rounded-tl-sm bg-white/6 px-2.5 py-2 text-[11px] leading-relaxed text-slate-200">
-                        {message.content}
+                    <div className="group/copy relative rounded-xl rounded-tl-sm bg-white/6 px-2.5 py-2 text-[11px] leading-relaxed text-slate-200">
+                        {/* 结论是一整篇 Markdown（系统提示词就是这么要求的），
+                            按纯文本铺开会把 ## / ** / | 直接摊在用户眼前 */}
+                        <MarkdownBlock text={message.content} />
                         <span className="absolute right-1 top-1 opacity-0 transition-opacity group-hover/copy:opacity-100">
                             <CopyButton text={message.content} title="复制这条回答" />
                         </span>
@@ -3539,9 +3805,23 @@ const MessageRow: React.FC<{
                     {/* 这一步花了多少。折叠态就显示：一步步累积起来才是成本的大头，
                         藏在展开区里等于没人会去看 */}
                     {message.usage && <UsageBadge usage={message.usage} />}
-                    <span className="shrink-0 rounded bg-white/8 px-1 py-0.5 font-mono text-[9px] text-slate-400">{message.tool}</span>
+                    {/* 显示 label 而不是 tool：script_store 的 list / save / update / delete
+                        在裸工具名下长得一模一样，而用户要一眼看出这一步做的是哪件事。
+                        label 就是为这件事写进消息的（见 AgentMessage.label） */}
+                    <span className={`shrink-0 rounded px-1 py-0.5 font-mono text-[9px] ${message.auto ? 'bg-amber-500/15 text-amber-300/80' : 'bg-white/8 text-slate-400'}`}>
+                        {message.auto ? `自动·${message.label || message.tool}` : (message.label || message.tool)}
+                    </span>
                     <ChevronRight className={`h-3 w-3 shrink-0 text-slate-600 transition-transform ${expanded ? 'rotate-90' : ''}`} />
                 </button>
+
+                {/* 失败的一步折叠时也要看得见原因。原先只有展开才看得到错误信息，
+                    而用户扫一眼对话流时看到的只是一个个红叉 —— 他必须逐条点开
+                    才知道哪一步是"参数写错"、哪一步是"页面没这个元素" */}
+                {!expanded && message.ok === false && message.result && (
+                    <p className="mt-1 truncate border-l-2 border-rose-400/40 pl-1.5 font-mono text-[9px] text-rose-300/70">
+                        {message.result}
+                    </p>
+                )}
 
                 {expanded && (
                     <div className="mt-2 space-y-2">
@@ -3685,7 +3965,7 @@ const ScriptList: React.FC<{
  *
  * 状态与取数全在主进程（kbService），这里只展示 + 提交路径。
  */
-const KbTab: React.FC = () => {
+const KbTab: React.FC<{ onIndexReset: () => void }> = ({ onIndexReset }) => {
     const [status, setStatus] = useState<KbStatus | null>(null);
     const [query, setQuery] = useState('');
     const [hits, setHits] = useState<KbSearchHit[] | null>(null);
@@ -3746,9 +4026,12 @@ const KbTab: React.FC = () => {
         setSaveMsg(res.message || '');
         setStatus(res.status);
         indexRef.current = null;
+        // Agent 那份索引是独立缓存：只清面板自己这份的话，界面显示新库、
+        // 模型继续查旧库，两边都看不出异常（见 useAgent 的 resetKbCache）
+        onIndexReset();
         setHits(null);
         setPreview(null);
-    }, [draftRoot]);
+    }, [draftRoot, onIndexReset]);
 
     return (
         <div className="space-y-2.5">
@@ -4162,10 +4445,33 @@ const AgentSidebar: React.FC<{
         if (el && stickRef.current) el.scrollTop = el.scrollHeight;
     }, [messages.length, status, streaming?.content, streaming?.reasoning, activeTab]);
 
+    /**
+     * 贴底状态的**渲染镜像**。
+     *
+     * 真值仍只有 stickRef 一个（它是 effect 要读的同步值）；这里这份只用来决定
+     * "回到最新"那个按钮画不画 —— 它丢了可以从 stickRef 重新算出来，
+     * 所以只是运行时状态，不参与任何判据。
+     *
+     * 为什么需要它：跟随一旦变成有条件的，上翻之后就没有回到最新输出的路了。
+     * 长跑一轮（几十步工具调用）时用户翻上去看某一步，再想回到最新只能自己
+     * 一路滚到底 —— 而那可能有几千像素。
+     */
+    const [following, setFollowing] = useState(true);
+
     const handleScroll = useCallback(() => {
         const el = scrollRef.current;
         if (!el) return;
         stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= AGENT_STICK_PX;
+        setFollowing(stickRef.current);
+    }, []);
+
+    /** 回到最新一条，并恢复自动跟随 */
+    const jumpToLatest = useCallback(() => {
+        const el = scrollRef.current;
+        if (!el) return;
+        el.scrollTop = el.scrollHeight;
+        stickRef.current = true;
+        setFollowing(true);
     }, []);
 
     // 成功提示是"一次性确认"，2 秒后收回；
@@ -4663,9 +4969,10 @@ const AgentSidebar: React.FC<{
                         )}
                     </div>
 
-                    {/* 内容区 */}
+                    {/* 内容区。relative 是给"回到最新"那颗浮动按钮定位用的：
+                        它必须浮在滚动区之上，而不是把下面的消息挤走 */}
                     {activeTab === 'chat' ? (
-                        <div className="flex min-h-0 flex-1 flex-col px-3 pb-3">
+                        <div className="relative flex min-h-0 flex-1 flex-col px-3 pb-3">
                             <div
                                 ref={scrollRef}
                                 onScroll={handleScroll}
@@ -4694,6 +5001,20 @@ const AgentSidebar: React.FC<{
                                     </div>
                                 )}
                             </div>
+
+                            {/* 回到最新。只在用户上翻离开底部时出现 ——
+                                自动跟随变成有条件之后，这是唯一的回头路；
+                                贴底时它是多余的，所以不常驻。 */}
+                            {!following && (
+                                <button
+                                    onClick={jumpToLatest}
+                                    className="absolute bottom-3 right-4 z-10 flex items-center gap-1 rounded-full border border-white/12 bg-slate-900/95 px-2.5 py-1 text-[10px] font-bold text-slate-300 shadow-[0_6px_20px_rgba(0,0,0,0.6)] backdrop-blur transition hover:border-indigo-400/40 hover:text-white"
+                                    title="回到最新一条，并恢复自动跟随"
+                                >
+                                    <ChevronsRight className="h-3 w-3 rotate-90" />
+                                    回到最新
+                                </button>
+                            )}
 
                             {/* 流式气泡：正在写但还没定稿的这一轮。
                 它不进 messages，定稿时（或中断时）才转成正式消息，避免列表里出现两份 */}
@@ -4757,6 +5078,15 @@ const AgentSidebar: React.FC<{
                                         disabled={inputDisabled}
                                         onChange={(event) => setInput(event.target.value)}
                                         onKeyDown={(event) => {
+                                            /**
+                                             * 中文输入法组字期间的回车是**选字确认**，不是发送。
+                                             *
+                                             * 不挡的话，打「分析」两个字，回车选中候选词的那一刻
+                                             * 就把半句话发出去了 —— 而模型已经拿到一次调用。
+                                             * React 的 keydown 在 IME 下带 isComposing；
+                                             * keyCode 229 是部分输入法（旧版 IME）的兜底信号。
+                                             */
+                                            if (event.nativeEvent.isComposing || event.keyCode === 229) return;
                                             if (event.key === 'Enter' && !event.shiftKey) {
                                                 event.preventDefault();
                                                 submit();
@@ -4803,7 +5133,7 @@ const AgentSidebar: React.FC<{
                             {activeTab === 'scripts' && (
                                 <ScriptList scripts={scripts} onRemove={actions.removeScript} onToggle={actions.toggleScript} onRun={actions.runScriptNow} runDisabled={busy} />
                             )}
-                            {activeTab === 'kb' && <KbTab />}
+                            {activeTab === 'kb' && <KbTab onIndexReset={actions.resetKbCache} />}
                         </div>
                     )}
                 </div>

@@ -118,6 +118,15 @@ const loadBuildTranscript = () => {
         // takeRecentRoundGroups / byteLength / truncateBytes 都不再需要：
         // buildTranscript 已不裁剪，测试里也不该抽用不到的代码进来
         grab('const splitRounds = (', '\n};'),
+        // 协议错误那条记录的 label 与回灌文案：roundToMessages 靠它们认出
+        // "这是一次协议错误"并吐回与当场逐字相同的措辞。缺一个就是求值期
+        // ReferenceError —— 那说明切片清单没跟上产品代码，不是产品的问题
+        grab('const PROTOCOL_ERROR_LABEL = ', ';'),
+        grab('const protocolErrorObservation = (reply: string): string =>', ';'),
+        // 环境事件（自动 / 手动执行）的文案：前缀常量与产出函数
+        grab('const AUTO_RUN_PREFIX = ', ';'),
+        grab('const MANUAL_RUN_PREFIX = ', ';'),
+        grab('const environmentEventObservation = (message: AgentMessage): string =>', '\n};'),
         grab('const roundToMessages = (', '\n};'),
         grab('const splitByCompaction = (', '\n};'),
         grab('const buildTranscript = (', '\n};'),
@@ -408,7 +417,7 @@ const buildAgentHarness = (options = {}) => {
  * tamper 是个可观测的假引擎：applyRules / saveRules 分别记账，
  * 这样"有没有越界落盘"是可断言的。
  */
-const buildDispatch = (tamperState, scripts = [], webviewUrl = null) => {
+const buildDispatch = (tamperState, scripts = [], webviewUrl = null, kbBridge = null) => {
     const helpers = [
         grabBlock('const toRuleString = (value: unknown): string =>', "String(value));"),
         grabBlock('const STRICT_NUMBER_RE = ', '/;'),
@@ -437,6 +446,9 @@ const useCallback = (fn) => fn;
 // buildCookieKeys / findCookieByKey 是 cookie 唯一键（面板与 tokens 工具共用），
 // 漏注入会让 tokens find 直接抛 ReferenceError —— 那是测试脚手架的错，不是产品代码的。
 const { decodeJwt, pickJwtCandidates, rewriteJwtPayload, collectDroppedRules, buildCookieKeys, findCookieByKey } = __CONST__;
+// 知识库检索：kb 分支要调 buildKbIndex / searchKb / readKbArticle / normalizeRel，
+// 用**编译产物**而不是重写副本 —— 与产品同源
+const { buildKbIndex, normalizeRel, readKbArticle, searchKb, KB_SEARCH_LIMIT } = __KBSVC__;
 const asString = (v) => (typeof v === 'string' ? v : '');
 const generateId = () => 'gen-' + Math.random().toString(36).slice(2, 8);
 const SCRIPTS_STORE_MAX = 3;
@@ -481,10 +493,23 @@ const waitForPageReady = async () => true;
 const scriptsRef = { current: ${JSON.stringify(scripts)} };
 const setScripts = (fn) => { scriptsRef.current = fn(scriptsRef.current); };
 
+/**
+ * 知识库缓存与失效令牌。
+ *
+ * 缓存对象的形状按产品代码搭（切片求值拿不到 useRef），但 **resetKbCache
+ * 必须切产品代码那一份**：在这里重写一遍的话，测的是这个桩而不是产品 ——
+ * 变异验证已经证明过这一点（把产品里的 cache.inflight = null 删掉，
+ * 用桩的版本照样全绿）。
+ */
+const kbCacheRef = { current: { entries: null, inflight: null, generation: 0 } };
+const kbBridgeRef = { current: __KB__ };
+
+${strip(grabBlock('const resetKbCache = useCallback(() => {', '}, []);'))}
+
 ${strip(dispatch)}
-return { dispatchTool, calls, tamperRef, scriptsRef };
+return { dispatchTool, calls, tamperRef, scriptsRef, resetKbCache };
 `;
-    return new Function('__CONST__', body)(CONST);
+    return new Function('__CONST__', '__KB__', '__KBSVC__', body)(CONST, kbBridge || null, require('./build/services/KbService/index.js'));
 };
 
 /* -------------------------------------------------------------------------- */
@@ -1750,14 +1775,68 @@ const run = async () => {
         assert(blob.includes('抓价格'), '应带上脚本名，模型才知道页面上发生了什么');
     });
 
-    /** 同上：onPageReady 那个调用点必须真的打上 auto 标记 */
+    /**
+     * 同上：两个执行入口都必须真的打上 auto 标记。
+     *
+     * 锚点取**前缀常量**而不是拼好的字面量：产品把 `自动执行：${script.name}`
+     * 提成 `${AUTO_RUN_PREFIX}${script.name}` 之后，锚在字面量上的断言会直接
+     * 找不到位置而失败 —— 那是排版变了，不是行为变了。
+     */
     await check('自动执行的消息写入 auto 标记', async () => {
         const src = fs.readFileSync(SRC_PATH, 'utf8');
-        const at = src.indexOf("content: `自动执行：${script.name}`");
+        const at = src.indexOf('content: `${AUTO_RUN_PREFIX}${script.name}`');
         assert(at > 0, '应能找到自动执行的 appendMessage');
         const block = src.slice(at, at + 500);
         assert(/^\s*auto: true,$/m.test(block),
             '自动执行的消息必须带 auto: true，否则重建上下文时会被伪造成一次模型调用');
+    });
+
+    /**
+     * 手动执行与自动执行**都必须报成环境事件，但来源要分得开**。
+     *
+     * 两条都带 auto（都不是模型发出的调用），可对模型来说"谁按的"有实质区别：
+     * 自动那条是 URL 命中的副作用，手动那条是用户刚亲手验证过这个脚本。
+     * 原先重建时统一写成「自动脚本」，用户手动点的那次在模型眼里成了页面自动行为；
+     * 而按 `^自动执行：` 剥前缀对手动那条无效，脚本名里会拖着一整段前缀。
+     */
+    await check('环境事件区分自动与手动来源', async () => {
+        const auto = buildTranscript([
+            msg({ role: 'user', content: 'q' }),
+            msg({ role: 'tool', content: '自动执行：抓价格', tool: 'js', auto: true, result: '{"p":1}' }),
+        ]).map((m) => m.content).join('\n');
+
+        const manual = buildTranscript([
+            msg({ role: 'user', content: 'q' }),
+            msg({ role: 'tool', content: '手动执行：抓价格', tool: 'js', auto: true, result: '{"p":1}' }),
+        ]).map((m) => m.content).join('\n');
+
+        assert(auto.includes('[自动脚本「抓价格」'), `自动那条应写成自动脚本，实际：${auto}`);
+        assert(manual.includes('[用户手动执行了脚本「抓价格」'), `手动那条应写明是用户按的，实际：${manual}`);
+
+        // 两条都不得伪装成模型发出的工具调用
+        assert(!auto.includes('[工具 ') && !manual.includes('[工具 '),
+            '环境事件不得写成工具调用：那会凭空捏造一次模型从未发出的调用');
+
+        // 前缀必须剥干净：脚本名里不得残留「执行：」
+        assert(!manual.includes('执行：抓价格'), '手动那条的前缀必须剥掉，否则名字里拖着一整段前缀');
+    });
+
+    /**
+     * 前缀字面量只有一个来源。
+     *
+     * 构造侧写 `自动执行：`、重建侧按同一个常量剥 —— 任一侧改字就静默退化
+     * （前缀剥不掉，模型看到的名字里带着前缀），所以这里钉住它只声明一次。
+     */
+    await check('执行来源的前缀只有一个来源', async () => {
+        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        assert(/const AUTO_RUN_PREFIX = '自动执行：';/.test(src), '自动前缀必须由具名常量给出');
+        assert(/const MANUAL_RUN_PREFIX = '手动执行：';/.test(src), '手动前缀必须由具名常量给出');
+        assert(/content: `\$\{AUTO_RUN_PREFIX\}\$\{script\.name\}`/.test(src),
+            '自动执行的构造侧必须用常量，不得手写字面量');
+        assert(/content: `\$\{MANUAL_RUN_PREFIX\}\$\{script\.name\}`/.test(src),
+            '手动执行的构造侧必须用常量，不得手写字面量');
+        assert(/message\.content\.startsWith\(MANUAL_RUN_PREFIX\)/.test(src),
+            '重建侧必须用同一个常量判断来源');
     });
 
     await check('连续多个观察合并进一条 user 消息', async () => {
@@ -2193,6 +2272,59 @@ const run = async () => {
     });
 
     /**
+     * 协议错误的回灌文案在**当场**与**下一轮重建时**必须逐字一致。
+     *
+     * 这两条路分别由 send 与 roundToMessages 走，是"一个事实两个产出点"的
+     * 典型形态：两处各写一份措辞时，模型当场读到"你的 JSON 不合法"，
+     * 下一轮却读到"执行失败，请修正参数"——而那次调用压根没有参数可改，
+     * 它会对着一个不存在的错误反复改。所以文案只能由 protocolErrorObservation
+     * 一个函数产出，这里把这条对称性钉住。
+     */
+    await check('协议错误的回灌文案当场与重建时逐字一致', async () => {
+        const h = buildAgentHarness({ replies: '我忘了写 JSON' });
+        await h.send('看看');
+
+        // 当场的回灌：第一次协议错误之后那一轮请求里带的那条 user 消息
+        const live = h.chats[1].find((m) => m.content.includes('[协议错误]'));
+        assert(live, `当场应回灌协议错误提示，实际：${JSON.stringify(h.chats[1])}`);
+
+        // 重建的观察：把界面记录原样喂回 buildTranscript
+        const rebuilt = buildTranscript(h.state().messages)
+            .map((m) => m.content).join('\n');
+        assert(rebuilt.includes('[协议错误]'),
+            `下一轮重建也必须认出这是协议错误，实际：${rebuilt.slice(0, 200)}`);
+
+        // 两条路产出的正文（去掉带原文的那一段）必须完全一样
+        const head = (text) => text.slice(text.indexOf('[协议错误]')).split('你上一条回复的原文')[0];
+        assert(head(live.content) === head(rebuilt),
+            '当场与重建的协议错误文案必须逐字一致，否则模型对错误的判断会随轮次漂移');
+
+        // 并且不能退化成通用工具失败文案 —— 那会让模型去改不存在的"参数"
+        assert(!rebuilt.includes('这一步没有成功。请根据上面的错误信息修正参数'),
+            '协议错误不得按工具失败回灌：那次调用没有参数可改');
+    });
+
+    /**
+     * 重建时认不认得出协议错误，全靠 label 这一个字面量。
+     *
+     * 构造侧写 '协议错误'、重建侧比 '协议错误'，任一侧改字就静默退化
+     * （上面那条用例会因为两处都退化而仍然通过），所以这里直接钉住它只有一个来源。
+     */
+    await check('协议错误的 label 只有一个来源', async () => {
+        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        assert(/const PROTOCOL_ERROR_LABEL = '协议错误';/.test(src),
+            'label 必须由具名常量给出');
+        assert(/label: PROTOCOL_ERROR_LABEL,/.test(src),
+            '构造侧必须用该常量，不得手写字面量');
+        assert(/message\.label === PROTOCOL_ERROR_LABEL/.test(src),
+            '重建侧必须用同一个常量比对');
+        // 手写的 '协议错误' 字面量只应出现在常量声明那一处
+        const literals = (src.match(/'协议错误'/g) || []).length;
+        assert(literals === 1,
+            `'协议错误' 字面量只应出现在常量声明里，实际 ${literals} 处（多一处就是两个来源）`);
+    });
+
+    /**
      * 连续错到上限就停 —— 无上限回灌会把整轮预算烧光，
      * 且每一步都要付一次调用费。
      */
@@ -2460,6 +2592,88 @@ const run = async () => {
     });
 
     /* --------------------------- 提示词：输出与参数契约 --------------------------- */
+
+    /* ------------------------------ 知识库缓存 ------------------------------ */
+
+    /**
+     * 换知识库路径后，Agent 那份索引必须失效。
+     *
+     * 这是"一个事实两个存放处"的又一处：面板有自己一份索引缓存，Agent 也有一份。
+     * 面板改路径时只清自己那份的话，界面显示新库、模型继续查旧库 ——
+     * 两边都看不出异常，而这正是最难查的一类故障。
+     */
+    await check('知识库换路径后重新加载，不沿用旧索引', async () => {
+        const loads = [];
+        const bridge = {
+            // 路径要满足 ARTICLE_PATH_RE（<板块>/techniques/*.md），否则
+            // buildKbIndex 会把这条当非文章路径滤掉，篇数恒为 0
+            load: async () => {
+                loads.push(1);
+                return { files: [{ path: 'web/techniques/a.md', content: '# 甲\n\n正文甲' }], boardIndexes: {} };
+            },
+            read: async () => ({ content: '' }),
+        };
+        const { dispatchTool, resetKbCache } = buildDispatch(
+            { intercept: [], request: [], headers: [], cookies: [], local: {}, session: {} },
+            [], null, bridge,
+        );
+
+        const first = j(await dispatchTool('kb', { action: 'status' }));
+        assert(first.articles === 1, `首次应读到 1 篇，实际 ${JSON.stringify(first)}`);
+        assert(loads.length === 1, `首次应加载一次，实际 ${loads.length} 次`);
+
+        // 再查一次：命中缓存，不得重新加载
+        await dispatchTool('kb', { action: 'status' });
+        assert(loads.length === 1, `命中缓存时不该重新加载，实际 ${loads.length} 次`);
+
+        // 用户换了知识库路径 → 面板调用 resetKbCache
+        resetKbCache();
+        await dispatchTool('kb', { action: 'status' });
+        assert(loads.length === 2,
+            `失效后必须重新加载，实际 ${loads.length} 次（缓存没被丢掉）`);
+    });
+
+    /**
+     * 加载在途时换路径：旧结果回来**不得盖住**新索引，且作废的在途 Promise
+     * 不得被下一次调用复用。
+     *
+     * 令牌比对的全部意义就在这里。不做这一步的话，第二次加载会因为
+     * "已经有在途 Promise"而复用旧路径那次，表现是"改了路径，搜索还是旧库的内容"，
+     * 刷新也修不好 —— 因为缓存已经被旧结果写死了。
+     */
+    await check('加载在途时换路径：旧结果不覆盖新索引', async () => {
+        let release;
+        const gate = new Promise((r) => { release = r; });
+        let calls = 0;
+        const loads = [];
+        const bridge = {
+            load: async () => {
+                calls += 1;
+                loads.push(calls);
+                if (calls === 1) await gate;
+                return { files: [], boardIndexes: {} };
+            },
+            read: async () => ({ content: '' }),
+        };
+        const { dispatchTool, resetKbCache } = buildDispatch(
+            { intercept: [], request: [], headers: [], cookies: [], local: {}, session: {} },
+            [], null, bridge,
+        );
+
+        // 第一次加载卡在途
+        const pending = dispatchTool('kb', { action: 'status' });
+
+        // 用户在此期间换了路径
+        resetKbCache();
+
+        release();
+        await pending;
+
+        // 失效之后必须能重新加载，而不是复用那次已经作废的在途 Promise
+        await dispatchTool('kb', { action: 'status' });
+        assert(loads.length === 2,
+            `换路径后应重新加载，实际 ${loads.length} 次（复用了作废的在途 Promise）`);
+    });
 
     await check('输出协议：无围栏直接贴 JSON，且 tool/final 互斥', async () => {
         const src = fs.readFileSync(SRC_PATH, 'utf8');
@@ -3133,6 +3347,111 @@ const run = async () => {
         assert(/onScroll=\{handleScroll\}/.test(src), '滚动容器必须挂 onScroll，否则贴底判据永远不更新');
         assert(/stickRef\.current = el\.scrollHeight - el\.scrollTop - el\.clientHeight <= AGENT_STICK_PX;/.test(src),
             'handleScroll 必须按贴底判据更新 stickRef');
+    });
+
+    /**
+     * 上翻之后必须有回到最新输出的路。
+     *
+     * 跟随一旦变成有条件的，用户翻上去看某一步之后就没有回头路了 ——
+     * 长跑一轮（几十步工具调用）时那可能是几千像素，只能自己一路滚到底。
+     * 所以贴底状态要有一个**渲染镜像**，据此浮出一颗"回到最新"。
+     *
+     * 但镜像不能变成第二个真值：它只决定按钮画不画，判据仍只有 stickRef 一个。
+     */
+    await check('上翻后提供回到最新的入口，且不引入第二个真值', async () => {
+        const src = fs.readFileSync(path.join(ROOT, 'components', 'BrowsePanel.tsx'), 'utf8');
+
+        // 镜像由 handleScroll 同步，且只是 stickRef 的副本
+        assert(/setFollowing\(stickRef\.current\);/.test(src),
+            'following 必须直接取 stickRef 的值，不得另立一套判据');
+        assert(/const \[following, setFollowing\] = useState\(true\)/.test(src),
+            '应有 following 这份渲染镜像（初值 true：首帧就是贴底的）');
+
+        // 按钮：只在离开底部时出现，点了要滚到底**并**恢复跟随
+        assert(/\{!following && \(/.test(src), '按钮必须只在离开底部时出现，贴底时它是多余的');
+        const at = src.indexOf('回到最新。只在用户上翻离开底部时出现');
+        assert(at > 0, '应能找到"回到最新"那颗按钮');
+        const block = src.slice(at, at + 800);
+        assert(/onClick=\{jumpToLatest\}/.test(block), '按钮必须接到 jumpToLatest');
+        assert(/el\.scrollTop = el\.scrollHeight;/.test(src), 'jumpToLatest 必须真的滚到底');
+        assert(/stickRef\.current = true;/.test(src),
+            'jumpToLatest 必须同时恢复跟随，否则下一帧又被判定成"用户在上翻"');
+    });
+
+    /**
+     * 界面自己补的提示必须与真正的回答长得不一样。
+     *
+     * 一样的白底气泡里写一句"（模型本轮没有返回内容，已停止。）"，用户会把它
+     * 当成模型的结论读 —— 而它恰恰表示这一步什么都没产出。
+     */
+    await check('界面提示与模型回答视觉上分开', async () => {
+        const src = fs.readFileSync(path.join(ROOT, 'components', 'BrowsePanel.tsx'), 'utf8');
+        const at = src.indexOf('if (message.notice) {');
+        assert(at > 0, 'assistant 分支里应有 notice 特判');
+        const block = src.slice(at, src.indexOf('if (message.role ===', at) > at
+            ? src.indexOf('return (', at + 400)
+            : at + 900);
+        assert(/border-dashed/.test(block), '界面提示应用虚线边框降级成旁注');
+        assert(/italic/.test(block), '界面提示应用斜体与正文区分');
+    });
+
+    /**
+     * 结论是 Markdown，必须渲染而不是把标记摊出来。
+     *
+     * 系统提示词要求 final 交一整篇 Markdown（标题、列表、表格、代码块），
+     * 而按纯文本铺开会把 ## / ** / | 直接摊在用户眼前。
+     */
+    await check('模型回答按 Markdown 渲染，且不注入 HTML', async () => {
+        const src = fs.readFileSync(path.join(ROOT, 'components', 'BrowsePanel.tsx'), 'utf8');
+
+        assert(/const parseMarkdown = /.test(src), '应有 Markdown 解析器');
+        assert(/<MarkdownBlock text=\{message\.content\} \/>/.test(src),
+            '模型回答必须走 Markdown 渲染');
+
+        // 不注入 HTML：全程构建 React 节点，模型输出永远只是文本
+        assert(!/dangerouslySetInnerHTML/.test(src),
+            'Markdown 渲染不得走 dangerouslySetInnerHTML —— 模型输出是不可信文本');
+
+        // 表格、代码块、列表三种结构都要认
+        for (const [name, re] of [['表格', /<table/], ['代码块', /<pre key=/], ['列表', /<ul key=/]]) {
+            assert(re.test(src), `应支持 ${name} 渲染`);
+        }
+
+        // 流式气泡**不**套 Markdown：此刻流出来的还是 JSON 信封，结构尚未成形
+        const streamAt = src.indexOf('const StreamBubble');
+        const streamBlock = src.slice(streamAt, streamAt + 900);
+        assert(!/MarkdownBlock/.test(streamBlock),
+            '流式气泡不得走 Markdown 渲染：那时流出来的还是 JSON 信封本身');
+    });
+
+    /**
+     * 中文输入法组字期间的回车不能发送。
+     *
+     * 不挡的话，打「分析」两个字、回车选中候选词的那一刻就把半句话发出去了，
+     * 而模型已经拿到一次调用。
+     */
+    await check('输入法组字期间回车不发送', async () => {
+        const src = fs.readFileSync(path.join(ROOT, 'components', 'BrowsePanel.tsx'), 'utf8');
+        const at = src.indexOf('if (event.key === \'Enter\' && !event.shiftKey)');
+        assert(at > 0, '应能找到发送的回车处理');
+        // 往前找同一段 keydown 里的守卫
+        const block = src.slice(Math.max(0, at - 900), at);
+        assert(/isComposing/.test(block),
+            '回车发送前必须挡掉输入法组字态，否则选字那一刻会把半句话发出去');
+    });
+
+    /**
+     * 工具行的角标要显示 label 而不是 tool。
+     *
+     * script_store 的 list / save / update / delete 在裸工具名下长得一模一样，
+     * 而用户要一眼看出这一步做的是哪件事 —— label 就是为这件事写进消息的。
+     */
+    await check('工具行角标显示 label（含动作），自动执行另行标注', async () => {
+        const src = fs.readFileSync(path.join(ROOT, 'components', 'BrowsePanel.tsx'), 'utf8');
+        assert(/\{message\.auto \? `自动·\$\{message\.label \|\| message\.tool\}` : \(message\.label \|\| message\.tool\)\}/.test(src),
+            '角标必须显示 label，且自动执行要标出来源；只写 tool 分不出 script_store 的四个动作');
+        assert(!/\{message\.tool\}<\/span>/.test(src),
+            '不得残留只显示裸工具名的旧写法');
     });
 
     /**

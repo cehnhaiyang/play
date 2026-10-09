@@ -189,6 +189,66 @@ const splitRounds = (messages: AgentMessage[]): AgentMessage[][] => {
 };
 
 /**
+ * 协议错误那条记录的 label。
+ *
+ * 构造（send）与重建（roundToMessages）两处必须认同一个字面量：重建时靠它
+ * 认出"这是一次协议错误"，从而吐回与当场**逐字相同**的回灌文案。
+ */
+const PROTOCOL_ERROR_LABEL = '协议错误';
+
+/**
+ * 协议错误的回灌文案。
+ *
+ * **只能由这一个函数产出。** 同一段历史在"本轮循环里"与"下一轮重建时"长得不一样
+ * 的话，模型对"这一步到底错在哪"的判断会随轮次漂移：当场读到的是"你的 JSON 不合法"，
+ * 下一轮却变成"执行失败，请修正参数"——而那次调用压根没有参数可改。
+ *
+ * 刻意不写"第 N 次"：那个计数只服务于 MAX_PROTOCOL_ERRORS 这道闸门，
+ * 进了文案就没法从消息本身重建（重建时无从知道当时是第几次），
+ * 而这正是两处措辞开始分叉的起点。
+ */
+const protocolErrorObservation = (reply: string): string =>
+    '[协议错误] 你的回复里没有可执行的工具调用，也没有 final 字段。'
+    + '必须严格按协议只回一个 JSON 对象：'
+    + '{"thought":"...","tool":"js","args":{...}} 或 {"thought":"...","final":"..."}。'
+    + '不要输出解释文字，不要用 ```json 围栏。'
+    + 'args.code 是 JSON 字符串：里面的换行必须写成 \\n、引号必须写成 \\"，'
+    + '直接粘多行 JS 会破坏 JSON 解析。'
+    + `\n\n你上一条回复的原文：\n${reply}`;
+
+/**
+ * 环境事件两条消息的正文前缀。
+ *
+ * 前缀就是**来源**：重建上下文时靠它区分"页面自己触发的"与"用户手动跑的"。
+ * 两处（构造与重建）必须认同一个字面量，所以提出来。
+ */
+const AUTO_RUN_PREFIX = '自动执行：';
+const MANUAL_RUN_PREFIX = '手动执行：';
+
+/**
+ * 环境事件的回灌文案：**只由这一个函数产出**。
+ *
+ * 自动执行与手动执行共用 auto 标记（都不是模型发出的调用），但对模型来说
+ * "谁按的"这件事有实质区别：前者是 URL 命中的副作用，后者是用户刚亲手验证过
+ * 这个脚本 —— 前者该被当成背景，后者是一条有用的信号。
+ *
+ * 原先这里统一写成「自动脚本」，于是用户手动点的那次在模型眼里成了页面自动行为。
+ * 靠 `content.replace(/^自动执行：/, '')` 剥前缀也不行：手动那条的前缀是
+ * 「手动执行：」，剥不掉，名字里会带上一整段前缀。
+ */
+const environmentEventObservation = (message: AgentMessage): string => {
+    const manual = message.content.startsWith(MANUAL_RUN_PREFIX);
+    const prefix = manual ? MANUAL_RUN_PREFIX : AUTO_RUN_PREFIX;
+    const name = message.content.startsWith(prefix)
+        ? message.content.slice(prefix.length)
+        : message.content;
+    const result = message.result || '(无返回值)';
+    return manual
+        ? `[用户手动执行了脚本「${name}」]\n${result}`
+        : `[自动脚本「${name}」已在页面上执行]\n${result}`;
+};
+
+/**
  * 一轮对话 → 发给模型的消息序列。
  *
  * 与界面那份 `AgentMessage` 的两个差别（也就是 `buildTranscript` 存在的理由）：
@@ -234,7 +294,12 @@ const roundToMessages = (round: AgentMessage[]): AiChatMessage[] => {
             // 自动执行的脚本不是模型的调用，写成「工具结果」会凭空捏造一次调用；
             // 但它确实改变了页面，所以作为一条**环境事件**如实告知。
             if (message.auto) {
-                observations.push(`[自动脚本「${message.content.replace(/^自动执行：/, '')}」已在页面上执行]\n${message.result || '(无返回值)'}`);
+                observations.push(environmentEventObservation(message));
+            } else if (message.label === PROTOCOL_ERROR_LABEL) {
+                // 协议错误没有"参数"可修，回灌文案必须与当场逐字一致
+                // （见 protocolErrorObservation），否则模型下一轮会照着一句
+                // 与当时不同的说法去改，而它根本没做错那件事。
+                observations.push(protocolErrorObservation(message.result || ''));
             } else {
                 // 措辞必须与 send() 回灌时**逐字一致**：同一段历史在"本轮循环里"与
                 // "下一轮重建时"长得不一样的话，模型对"这步成没成"的判断会随轮次漂移。
@@ -957,6 +1022,13 @@ export interface AgentState {
         /** 手动执行一段脚本（界面上直接跑，不进对话） */
         runScript: (code: string) => Promise<string>;
         /**
+         * 丢弃知识库索引缓存。
+         *
+         * 面板改了知识库路径后必须调用：Agent 这份索引是独立缓存（见 kbCacheRef），
+         * 只清面板自己那份的话，界面显示新库、模型继续查旧库 —— 两边都看不出异常。
+         */
+        resetKbCache: () => void;
+        /**
          * 手动执行一条已保存脚本（脚本页的"运行"按钮）。
          *
          * 与自动执行同一套记账：lastRunAt/lastResult 更新 + 一条 tool 消息进对话。
@@ -1081,11 +1153,26 @@ export const useAgent = (deps: AgentDeps): AgentState => {
      * `entries` 为 null 表示还没读过，空数组表示读过但库里一篇文章都没有 ——
      * 后者不能当"没读过"再读一遍。同时缓存一个在途 Promise：模型可能一步里连发两次
      * search，没有它就会并发读两遍整库。
+     *
+     * `generation` 是**失效令牌**。面板改知识库路径时只丢得掉面板自己那份索引，
+     * 而 Agent 这份是独立缓存 —— 只丢一边的话，面板显示新库、模型继续查旧库，
+     * 两边都看不出任何异常。resetKbCache 自增令牌并清空缓存，在途的那次加载
+     * 回来时令牌已经变了，结果被丢弃而不是盖住新索引。
      */
-    const kbCacheRef = useRef<{ entries: KbEntry[] | null; inflight: Promise<KbEntry[]> | null }>({
-        entries: null,
-        inflight: null,
-    });
+    const kbCacheRef = useRef<{
+        entries: KbEntry[] | null;
+        inflight: Promise<KbEntry[]> | null;
+        generation: number;
+    }>({ entries: null, inflight: null, generation: 0 });
+
+    /** 丢弃知识库索引缓存。改了知识库路径就必须调用，否则模型一直查旧库 */
+    const resetKbCache = useCallback(() => {
+        const cache = kbCacheRef.current;
+        cache.entries = null;
+        // 在途的那次也要放掉：留着它，下一次调用会拿到旧路径的结果
+        cache.inflight = null;
+        cache.generation += 1;
+    }, []);
 
     // 停止标志。不能靠 state：循环体在 await 之间读它，state 更新不会及时可见
     const stoppedRef = useRef(false);
@@ -1284,17 +1371,28 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                 }
             })();
 
+            /**
+             * 超时只是"不等了"，不是"掐断了"：后返回的 run 结果会被丢弃，
+             * 队列按 race 的 settle 推进，不会因此卡住。
+             *
+             * 定时器必须在 run 先结束时清掉。不清的话每次工具调用都会留下一个
+             * 活到 60 秒的定时器，而一轮几十步就是几十个 —— 它们各自还握着
+             * 一段错误文案。功能上看不出问题，但这是纯粹的垃圾。
+             */
+            let timer = 0;
             const timeout = new Promise<string>((resolve) => {
-                window.setTimeout(() => {
+                timer = window.setTimeout(() => {
                     resolve(JSON.stringify({
                         __agentError: `脚本执行超过 ${EXEC_TIMEOUT_MS / 1000} 秒未返回（页面可能在死循环或弹窗阻塞）。请把任务拆小：先取少量字段确认选择器，再分步推进，不要一次 return 整个页面。`,
                     }));
                 }, EXEC_TIMEOUT_MS);
             });
 
-            // 超时只是"不等了"，不是"掐断了"：后返回的 run 结果会被丢弃，
-            // 队列按 race 的 settle 推进，不会因此卡住。
-            return Promise.race([run, timeout]);
+            try {
+                return await Promise.race([run, timeout]);
+            } finally {
+                window.clearTimeout(timer);
+            }
         };
 
         const queued: Promise<string> = execQueueRef.current.then(task, task);
@@ -1805,17 +1903,25 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                  *
                  * 失败不缓存：路径配错时用户会去改设置，缓存住错误就再也读不到新路径。
                  * 成功才写进 entries —— 空库是合法状态，必须与"没读过"区分开。
+                 *
+                 * 加载期间用**令牌**比对：面板改了路径会调 resetKbCache，那时在途的
+                 * 这次加载拿的还是旧路径。不比对的话它回来会把新索引盖掉，
+                 * 表现是"改了路径，搜索还是旧库的内容"，且刷新也修不好。
                  */
                 const getEntries = async (): Promise<KbEntry[]> => {
                     const cache = kbCacheRef.current;
                     if (cache.entries) return cache.entries;
                     if (cache.inflight) return cache.inflight;
 
+                    const generation = cache.generation;
                     const task = (async () => {
                         const payload = await bridge.load();
                         if (payload?.error) throw new Error(payload.error);
                         const built = buildKbIndex(payload?.files || [], payload?.boardIndexes || {});
-                        kbCacheRef.current.entries = built;
+                        // 令牌变了说明路径在这期间被改过，这份结果已经过期
+                        if (kbCacheRef.current.generation === generation) {
+                            kbCacheRef.current.entries = built;
+                        }
                         return built;
                     })();
 
@@ -1823,8 +1929,11 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                     try {
                         return await task;
                     } finally {
-                        // 无论成败都清掉在途标记：失败后要允许下一次重试
-                        kbCacheRef.current.inflight = null;
+                        // 无论成败都清掉在途标记：失败后要允许下一次重试。
+                        // 只清自己那一份 —— 被 reset 掉之后这里再写就是把新状态覆盖了。
+                        if (kbCacheRef.current.generation === generation) {
+                            kbCacheRef.current.inflight = null;
+                        }
                     }
                 };
 
@@ -2105,19 +2214,12 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                     // 空回复回灌一句"你没输出"它也变不出内容来，那是浪费一次调用。
                     if (reply.trim()) {
                         protocolErrors += 1;
-                        const hint = `你的回复里没有可执行的工具调用，也没有 final 字段。`
-                            + `必须严格按协议只回一个 JSON 对象：`
-                            + `{"thought":"...","tool":"js","args":{...}} 或 {"thought":"...","final":"..."}。`
-                            + `不要输出解释文字，不要用 \`\`\`json 围栏。`
-                            + `args.code 是 JSON 字符串：里面的换行必须写成 \\n、引号必须写成 \\"，`
-                            + `直接粘多行 JS 会破坏 JSON 解析。`
-                            + `（第 ${protocolErrors} 次）`;
 
                         appendMessage({
                             id: generateId(), role: 'tool',
                             content: '协议错误：回复里没有工具调用也没有 final',
                             reasoning: keepReasoning(liveReasoning),
-                            label: '协议错误',
+                            label: PROTOCOL_ERROR_LABEL,
                             ok: false,
                             result: reply.trim(),
                             ...(stepUsage ? { usage: stepUsage } : {}),
@@ -2126,7 +2228,9 @@ export const useAgent = (deps: AgentDeps): AgentState => {
 
                         // 把模型自己的原文一并回灌：只说"你错了"它不知道该改哪里，
                         // 看到原文才能定位是自己漏了 JSON 还是围栏没去掉。
-                        transcript.push({ role: 'user', content: `[协议错误] ${hint}\n\n你上一条回复的原文：\n${reply.trim()}` });
+                        // 文案由 protocolErrorObservation 统一产出，与下一轮
+                        // 重建历史时写回的**逐字一致**。
+                        transcript.push({ role: 'user', content: protocolErrorObservation(reply.trim()) });
 
                         if (protocolErrors >= MAX_PROTOCOL_ERRORS) {
                             appendMessage({
@@ -2316,7 +2420,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
         appendMessage({
             id: generateId(),
             role: 'tool',
-            content: `手动执行：${script.name}`,
+            content: `${MANUAL_RUN_PREFIX}${script.name}`,
             tool: 'js',
             label: `js·手动·${script.name}`,
             auto: true,
@@ -2360,7 +2464,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                 appendMessage({
                     id: generateId(),
                     role: 'tool',
-                    content: `自动执行：${script.name}`,
+                    content: `${AUTO_RUN_PREFIX}${script.name}`,
                     tool: 'js',
                     label: `js·自动·${script.name}`,
                     // 标记成自动：它不属于任何一次模型调用，重建上下文时要按
@@ -2377,8 +2481,8 @@ export const useAgent = (deps: AgentDeps): AgentState => {
 
     const actions = useMemo(() => ({
         send, stop, clear, compact, setCompactRatio, runScript, runScriptNow, removeScript, toggleScript,
-        removeMessage, rewindTo,
-    }), [send, stop, clear, compact, setCompactRatio, runScript, runScriptNow, removeScript, toggleScript, removeMessage, rewindTo]);
+        removeMessage, rewindTo, resetKbCache,
+    }), [send, stop, clear, compact, setCompactRatio, runScript, runScriptNow, removeScript, toggleScript, removeMessage, rewindTo, resetKbCache]);
 
     /**
      * 会话用量与两个闸门判据。
