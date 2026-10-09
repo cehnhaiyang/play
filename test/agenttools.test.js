@@ -468,8 +468,9 @@ const buildDispatch = (tamperState, scripts = [], webviewUrl = null, kbBridge = 
         grabBlock('const readWebviewUrl = (webview: WebviewElement): string =>', '\n};'),
         // 异常 → 文案：dispatchTool 的每个 catch 都用它，漏注入会 ReferenceError
         grabBlock('const errorText = (e: unknown): string =>', ';'),
-        // 未知 action 的统一错误文案（含大小写提示）也是产品代码的一环，
+        // 未知 action / area 的统一错误文案也是产品代码的一环，
         // 不抽出来就会 ReferenceError —— 那是脚手架的错，不是产品的错。
+        grabBlock('const unknownAreaError = (area: string): string =>', ';'),
         grabBlock('const unknownActionError = (got: string, valid: string[]): string =>', '\n};'),
         // cookie 定位也是产品代码里的一环，
         // 必须原样抽出来测，不能在这里重写一份。

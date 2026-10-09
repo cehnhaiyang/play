@@ -727,6 +727,14 @@ const asString = (value: unknown): string => (typeof value === 'string' ? value 
 const errorText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 /**
+ * 未知 area 的错误文案。
+ *
+ * storage 与 tokens 共用同一组取值，措辞分叉时模型会以为两处收的是不同的东西。
+ */
+const unknownAreaError = (area: string): string =>
+    `未知 area：${area}（可用 local / session / cookie）`;
+
+/**
  * 未知 action 的错误文案。
  *
  * 光列可用值不够 —— 模型看到"未知 action：SET（可用 get / set）"可能以为是别的
@@ -1679,7 +1687,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                 const action = asString(args.action) || 'get';
                 const area = asString(args.area) || 'local';
                 if (area !== 'local' && area !== 'session' && area !== 'cookie') {
-                    return JSON.stringify({ error: `未知 area：${area}（可用 local / session / cookie）` });
+                    return JSON.stringify({ error: unknownAreaError(area) });
                 }
                 // 先验动作、再验参数：与 tokens 同一理由，写错大小写必须报未知 action，
                 // 不能报"缺少 key"把模型带偏。
@@ -1893,7 +1901,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                     const ok = await fn(key, next);
                     if (!ok) return JSON.stringify({ error: '写回失败：页面可能已禁用存储或配额已满' });
                 } else {
-                    return JSON.stringify({ error: `未知 area：${area}（可用 local / session / cookie）` });
+                    return JSON.stringify({ error: unknownAreaError(area) });
                 }
 
                 return JSON.stringify({
