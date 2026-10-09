@@ -10,13 +10,24 @@
  */
 import JSZip from 'jszip';
 import type {
+    AcgRemainingPages,
     AgentCompaction,
+    AgentExportOptions,
     AgentMessage,
     AiBookFile,
     AiBookPage,
     AiUsage,
+    CollectedPack,
+    DecodedJwt,
+    DetectedGallery,
+    DroppedRule,
     GalleryProbeResult,
     MediaType,
+    PackImage,
+    ParsedAiBook,
+    ResolvedProbeMedia,
+    SplitImportFiles,
+    UnpackedGallery,
     VideoFile,
 } from './meta';
 
@@ -484,13 +495,6 @@ export const signAcgHlsUrl = (requestUrl: string, masterUrl: string): string => 
     return `${requestUrl}${sep}m=${encodeURIComponent(token)}${tPart}&from=${encodeURIComponent(master.pathname)}`;
 };
 
-export interface ResolvedProbeMedia {
-    kind: 'video' | 'audio' | 'image' | 'none';
-    streams: (Partial<VideoFile> & { url: string; title?: string })[];
-    totalPages: number;
-    status: string | null;
-}
-
 /** 探测音轨单项：与 GalleryProbeResult.audioList 同构，但字段放宽为可选以容忍脏数据 */
 interface ProbeAudioTrack {
     name?: string;
@@ -547,13 +551,6 @@ export const resolveProbeMedia = (probe: GalleryProbeResult | null | undefined):
     return { kind: 'none', streams: [], totalPages, status: '作品中未解析到可播放的媒体资源' };
 };
 
-/** 图集后续页回包（主进程原样带回 runId，调用方凭空 runId 丢弃旧轮） */
-export interface AcgRemainingPages {
-    runId: string;
-    pages: { url: string; title: string; page: number }[];
-    errors: unknown[];
-}
-
 /**
  * ACG 图集后续页抓取（App 与 PlayPanel 共用，消除两处重复的 fetchPages 样板）。
  * 只返回首屏之外的页；runId 为空串表示旧轮回包，调用方直接丢弃。
@@ -606,21 +603,6 @@ export const isFieldRuleDropped = (rule: { enabled?: boolean; jsonPath?: string 
 /** 这条请求头规则是否会被引擎丢弃 */
 export const isHeaderRuleDropped = (rule: { enabled?: boolean; headerName?: string } | null | undefined): boolean =>
     !!rule && rule.enabled !== false && !rule.headerName;
-
-/**
- * 被引擎跳过的规则，附带它在原数组里的下标与原因。
- *
- * 下标是给模型/用户**定位**用的：只说"有 2 条被跳过"没用，
- * 得说清是第几条、缺哪个字段，才能一步改对。
- */
-export interface DroppedRule {
-    /** 在哪一类规则里：intercept / request / headers */
-    group: 'intercept' | 'request' | 'headers';
-    /** 在该数组里的下标（0 起） */
-    index: number;
-    /** 缺什么 */
-    reason: string;
-}
 
 export const collectDroppedRules = (rules: {
     intercept?: { enabled?: boolean; jsonPath?: string }[];
@@ -800,11 +782,6 @@ export const pickJwtCandidates = (values: unknown[]): string[] => {
     return out;
 };
 
-export interface DecodedJwt {
-    header: unknown;
-    payload: unknown;
-}
-
 /**
  * base64url 段 → 字节。
  *
@@ -927,11 +904,6 @@ export const buildAiBookJson = (title: string, pages: AiBookPage[]): string => {
 export const buildAiBookBlob = (title: string, pages: AiBookPage[]): Blob =>
     new Blob([buildAiBookJson(title, pages)], { type: 'application/json' });
 
-export interface ParsedAiBook {
-    title: string;
-    pages: AiBookPage[];
-}
-
 /**
  * 解析 .aibook 文本。
  *
@@ -1031,48 +1003,6 @@ export const galleryPageNumber = (fileName: string): number | null => {
 };
 
 /**
- * 画廊徽标（*.gallery）的**文件夹形态**清单结构。
- *
- * 只声明形状，不在这里生成：徽标正文由主进程 electron/acgmhoService.js 的
- * writeGalleryOutputs 落盘（它才是写文件的那一侧）。这里曾有一个
- * buildGalleryManifest() 生成器，但从未被任何调用方使用、字段集也已与
- * 实际写出的内容漂移，故只保留类型。
- *
- * 注意与 meta/interface.ts 的同名接口不是一回事：那个是**下载归档**的清单
- * （含 records 列表），这个是**单文件夹画廊**的徽标。
- */
-export interface GalleryManifest {
-    format: 'the-play-gallery/1';
-    title: string;
-    gid?: string;
-    artist?: string;
-    sourceUrl?: string;
-    totalPages: number;
-    createdAt: string;
-}
-
-export interface DetectedGallery {
-    /** 分组唯一键 */
-    groupId: string;
-    /** 画廊名（徽标文件名） */
-    name: string;
-    /** 所在相对目录 */
-    dir: string;
-    /** 按页码升序排好的图片文件 */
-    pages: { file: File; page: number }[];
-    /** 徽标文件本身（不进播放列表，仅作凭证） */
-    marker: File;
-}
-
-export interface SplitImportFiles {
-    galleries: DetectedGallery[];
-    /** 未被画廊收编的文件（含孤立徽标） */
-    loose: File[];
-    /** 孤立徽标（有 .gallery 但同目录无有效图片）：调用方可转为占位提示条目 */
-    orphanMarkers: File[];
-}
-
-/**
  * 从一批文件（文件/文件夹混合选择）中识别画廊文件夹。
  * 同目录下：徽标存在 + ≥1 张有效图片 ⇒ 成组；其余文件原样归入 loose。
  */
@@ -1145,22 +1075,6 @@ export const parseNameFileContent = (text: string): string | null => {
     if (!line || /[\r\n]/.test(line)) return null;
     return line;
 };
-
-export interface PackImage {
-    file: File;
-    page: number;
-}
-
-export interface CollectedPack {
-    /** 所选根目录名（webkitdirectory 第一级；单文件/扁平选择为空） */
-    root: string;
-    /** 画廊名（.name 内容） */
-    name: string;
-    /** 按（页码，文件名）排好的图片 */
-    images: PackImage[];
-    /** 被无视的文件数（统计用，不报错） */
-    ignoredFiles: number;
-}
 
 /** 按页码升序、同页按文件名排（中文序，与资源管理器所见一致） */
 const byPageThenName = (a: PackImage, b: PackImage): number =>
@@ -1251,11 +1165,6 @@ export const packToGalleryBlob = async (name: string, images: PackImage[]): Prom
     // 图片本身已压缩，STORE 只组包不重压，又快又不掉画质
     return zip.generateAsync({ type: 'blob', compression: 'STORE' });
 };
-
-export interface UnpackedGallery {
-    name: string;
-    pages: PackImage[];
-}
 
 /** 前 2 字节是否为 ZIP 魔数 `PK`（含空包/分卷头都放行，后续由 JSZip 校验） */
 export const isGalleryPackFile = async (file: File): Promise<boolean> => {
@@ -1435,24 +1344,6 @@ const sessionTitle = (messages: AgentMessage[]): string => {
     const first = messages.find((message) => message.role === 'user' && message.content.trim());
     return first ? first.content.replace(/\s+/g, ' ').trim().slice(0, 24) : '未命名会话';
 };
-
-/** 导出选项。默认导出完整会话（含推理），关掉推理是为了直接分享 */
-export interface AgentExportOptions {
-    /**
-     * 是否写入推理过程，默认 true。
-     *
-     * 关掉后文件里连 `<details>` 都不出现，但**文件头会注明"不含推理"** ——
-     * 否则读到一份没有推理的记录，人只会以为模型当时没思考。
-     */
-    includeReasoning?: boolean;
-    /**
-     * 文件名与文件头共用的时间戳，默认取当前时刻。
-     *
-     * 必须是同一个时刻：分两次取的话，文件名的时间与文件头写的对不上，
-     * 导两份还会出现同名覆盖。
-     */
-    at?: number;
-}
 
 /** 取一次选项，把缺省值补齐（两个 builder 与导出动作对缺省的理解必须一致） */
 const resolveExportOptions = (options: AgentExportOptions): Required<AgentExportOptions> => ({

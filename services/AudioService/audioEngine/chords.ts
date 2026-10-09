@@ -1,5 +1,6 @@
 
 import { getMidi } from '../utils';
+import type { ChordSymbol, VoicingStyle } from '../../../meta';
 
 const SHARP_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 const FLAT_NAMES = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B'];
@@ -199,19 +200,6 @@ const ALTERATIONS: Record<string, { degree: number; shift: number }> = {
   '#11': { degree: 17, shift: 1 },
   'b11': { degree: 17, shift: -1 },
 };
-
-export type VoicingStyle = 'close' | 'open' | 'drop2' | 'spread';
-
-export interface ChordSymbol {
-  /** 根音音名（不带八度） */
-  root: string;
-  /** 原始性质文本（规范化前） */
-  quality: string;
-  /** 转位低音音名；无则为 null */
-  bass: string | null;
-  /** 相对根音的半音音程 */
-  intervals: number[];
-}
 
 /** 解析根音/低音音名（允许 #/b/♯/♭），返回 { name, pitchClass } */
 function parseNoteName(text: string): { name: string; pitchClass: number } | null {

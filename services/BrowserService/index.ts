@@ -19,29 +19,11 @@
  * 反过来说，**判据绝不能两边各写一份**。错误码表尤其危险：主进程与渲染层
  * 各维护一张表，漂移的症状是"同一个错误在日志里和界面上叫两个名字"，
  * 而且不报错、不崩溃，只是让人对不上号。
+ *
+ * NavigationError 的形状住在 meta（useBrowse 与面板都要读）：这里只有判据。
  */
 
-/**
- * 一次导航失败。
- *
- * 字段全部来自 `<webview>` 的 `did-fail-load` 事件（errorCode /
- * errorDescription / validatedURL），加上这里归类出来的中文说法。
- */
-export interface NavigationError {
-    errorCode: number;
-    /** 面向用户的一句话 */
-    title: string;
-    /** 可操作的建议；空串表示没有对应建议，界面据此决定要不要画第二行 */
-    hint: string;
-    /** Chromium 原始英文描述，收在详情里给排查用 */
-    raw: string;
-    /** 出错的域名（从 validatedURL 解析），解析不出时为空串 */
-    host: string;
-    /** 证书类错误：这类错误"重试"没有意义，界面要换一条建议 */
-    isCertificate: boolean;
-    /** DNS 类错误：值得单独提示去查地址拼写 */
-    isDns: boolean;
-}
+import type { NavigationError } from '../../meta';
 
 /**
  * Chromium net error 码 → 人话。

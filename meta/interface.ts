@@ -17,6 +17,11 @@ import type {
     EnvelopeCurve,
     FilterKind,
     DrumName,
+    AgentCompaction,
+    AgentMessage,
+    AgentRunStatus,
+    AgentScript,
+    AgentUsage,
 } from './type';
 
 /**
@@ -1329,6 +1334,78 @@ export interface SearchQuery {
 
 export type SearchSort = 'seeders' | 'size' | 'date' | 'site';
 
+/* ------------------------------ 引擎插口契约 ------------------------------ */
+
+/** 引擎交给 provider 的解析上下文 */
+export interface ParseContext {
+    /** 本次实际请求的地址（部分站点需要从中回填信息） */
+    url: string;
+    /** 搜索关键词 */
+    query: string;
+}
+
+/**
+ * provider 产出的条目。
+ * site / siteLabel 由引擎按注册信息统一盖章，provider 不必也不该自己填——
+ * 否则同一个站点在两处各写一遍名字，迟早不一致。
+ */
+export type ProviderHit = Omit<SearchHit, 'site' | 'siteLabel'>;
+
+/** 一次取字节请求 */
+export interface TransportRequest {
+    url: string;
+    headers?: Record<string, string>;
+    /** 单次请求超时（毫秒） */
+    timeoutMs?: number;
+}
+
+/** 一次取字节结果 */
+export interface TransportResponse {
+    ok: boolean;
+    /** HTTP 状态码；0 表示连接根本没建立（超时 / DNS / 网络错误） */
+    status: number;
+    body: string;
+    /** 跟随重定向后的最终地址 */
+    finalUrl: string;
+    /** 失败原因（status 为 0 或非 2xx 时有值），引擎据此在站点状态里说明原因 */
+    error?: string;
+}
+
+/**
+ * 传输层：引擎唯一碰网络的地方。
+ *
+ * 抽成接口有两个实际好处：
+ * 1. 测试时可以注入假实现，离线跑完整扇出流程；
+ * 2. 将来若要改走主进程代取（例如需要过 Cloudflare 挑战），
+ *    只需换一个实现，引擎与全部 provider 一行都不用动。
+ */
+export interface Transport {
+    get(req: TransportRequest): Promise<TransportResponse>;
+}
+
+/**
+ * 站点插口：只需回答"这个站怎么搜、它返回的东西怎么读"。
+ * 翻页、并发、限速、去重、排序、容错全部由引擎负责。
+ */
+export interface SiteProvider {
+    /** 站点元信息（id / 显示名 / 主页 / 是否成人 / 内容类型） */
+    descriptor: SiteDescriptor;
+    /** 关键词 → 搜索地址。纯函数。 */
+    buildSearchUrl(query: string): string;
+    /**
+     * 响应正文 → 归一化条目。纯函数。
+     *
+     * 必须容错：站点改版、返回错误页、返回空结果时应当返回空数组而不是抛错。
+     * 单个站点解析失败不该让整个扇出搜索失败——引擎会把空结果记为「0 条」。
+     */
+    parse(body: string, ctx: ParseContext): ProviderHit[];
+    /**
+     * 站点要求的请求头（多为 Referer）。
+     * 部分站点校验来源，缺失会返回 403 或空列表。
+     */
+    headers?: Record<string, string>;
+}
+
 /** 搜索汇总结果 */
 export interface SearchResult {
     success: boolean;
@@ -1496,6 +1573,73 @@ export interface KbBoardIndex {
     entries?: { id?: string; signals?: string[]; files?: string[] }[];
 }
 
+/** 索引里的一条文章 */
+export interface KbEntry {
+    board: string;
+    path: string;
+    id: string;
+    title: string;
+    summary: string;
+    category: string;
+    /** front-matter 的 signals —— 多为**检测指纹**（如 `script[src*="tinypass.com"]`） */
+    signals: string[];
+    keywords: string[];
+    tags: string[];
+    /** kb-index.json 的 signals —— 多为**路由关键词**，与上面那组语义不同，两组都要 */
+    indexSignals: string[];
+}
+
+/** 一次检索命中的一条 */
+export interface KbSearchHit {
+    path: string;
+    board: string;
+    title: string;
+    summary: string;
+    score: number;
+    /** 命中的词，供模型判断"为什么这条被选出来" */
+    matched: string[];
+}
+
+/** 正文里的一个标题，供大纲与按节切片使用 */
+export interface KbHeading {
+    level: number;
+    title: string;
+    /** 在正文里的字符偏移 */
+    start: number;
+    end: number;
+}
+
+/** 切片后回给调用方的一篇正文 */
+export interface KbReadResult {
+    path: string;
+    title: string;
+    section?: string;
+    outline: { level: number; title: string }[];
+    content: string;
+    bytes: number;
+    truncated: boolean;
+    notice?: string;
+}
+
+/** 主进程 status() 的返回 */
+export interface KbStatusPayload {
+    ready: boolean;
+    root: string;
+    articles: number;
+    bytes: number;
+    error?: string;
+}
+
+/** 解析出的 front-matter：值是标量或内联数组，其余形态一律不收 */
+export type KbFrontMatter = Record<string, string | string[]>;
+
+/** 主进程 kb.read() 的返回 */
+export interface KbReadPayload {
+    path?: string;
+    content?: string;
+    error?: string;
+}
+
 /** 主进程 kb.load() 的返回 */
 export interface KbLoadPayload {
     root: string;
@@ -1503,13 +1647,6 @@ export interface KbLoadPayload {
     boardIndexes: Record<string, KbBoardIndex>;
     /** 因超限或读失败被跳过的文件数 */
     skipped?: number;
-    error?: string;
-}
-
-/** 主进程 kb.read() 的返回 */
-export interface KbReadPayload {
-    path?: string;
-    content?: string;
     error?: string;
 }
 
@@ -2158,4 +2295,793 @@ export interface GalleryFetchProgress {
     item?: GalleryPageItem | null;
     /** 抓取阶段状态 */
     status: GalleryFetchStatus;
+}
+
+/**
+ * ============================================================================
+ * 8. ACG 详情探测与画廊分组
+ * ============================================================================
+ */
+
+/**
+ * ACG 详情探测归一化后的播放意图。
+ *
+ * 两条分支都不允许"拿别的资源冒充"：video 缺直链时不再拿封面图顶替、
+ * audio 缺音轨时不再把页面地址当音频 —— 那会产生播不出的坏条目，
+ * 表现为列表里点一下就报错。缺资源时回落成 kind:'none' 并给出 status 文案。
+ */
+export interface ResolvedProbeMedia {
+    kind: 'video' | 'audio' | 'image' | 'none';
+    streams: (Partial<VideoFile> & { url: string; title?: string })[];
+    totalPages: number;
+    /** kind 为 'none' 时说明缺了什么；有资源时为 null */
+    status: string | null;
+}
+
+/** 图集后续页回包（主进程原样带回 runId，调用方凭空 runId 丢弃旧轮） */
+export interface AcgRemainingPages {
+    runId: string;
+    pages: { url: string; title: string; page: number }[];
+    errors: unknown[];
+}
+
+/** 从一批文件里识别出的一个画廊文件夹 */
+export interface DetectedGallery {
+    /** 分组唯一键 */
+    groupId: string;
+    /** 画廊名（徽标文件名） */
+    name: string;
+    /** 所在相对目录 */
+    dir: string;
+    /** 按页码升序排好的图片文件 */
+    pages: { file: File; page: number }[];
+    /** 徽标文件本身（不进播放列表，仅作凭证） */
+    marker: File;
+}
+
+/** 一批导入文件按画廊分组后的结果 */
+export interface SplitImportFiles {
+    galleries: DetectedGallery[];
+    /** 未被画廊收编的文件（含孤立徽标） */
+    loose: File[];
+    /** 孤立徽标（有 .gallery 但同目录无有效图片）：调用方可转为占位提示条目 */
+    orphanMarkers: File[];
+}
+
+/** 打包源里的一张图：文件 + 它在画廊里的页码 */
+export interface PackImage {
+    file: File;
+    page: number;
+}
+
+/** 从目录收集出的打包源 */
+export interface CollectedPack {
+    /** 所选根目录名（webkitdirectory 第一级；单文件/扁平选择为空） */
+    root: string;
+    /** 画廊名（.name 内容） */
+    name: string;
+    /** 按（页码，文件名）排好的图片 */
+    images: PackImage[];
+    /** 被无视的文件数（统计用，不报错） */
+    ignoredFiles: number;
+}
+
+/** 单文件 .gallery（ZIP 包）解包结果 */
+export interface UnpackedGallery {
+    name: string;
+    pages: PackImage[];
+}
+
+/**
+ * 单文件夹画廊的徽标（`.gallery` 文件）正文。
+ *
+ * 只声明形状，不在这里生成：徽标正文由主进程 electron/acgmhoService.js 的
+ * writeGalleryOutputs 落盘（它才是写文件的那一侧）。这里曾有一个
+ * buildGalleryManifest() 生成器，但从未被任何调用方使用、字段集也已与
+ * 实际写出的内容漂移，故只保留类型。
+ *
+ * 注意与上面的 {@link GalleryManifest} 不是一回事：那个是**下载归档**的清单
+ * （含 records 列表），这个是**单文件夹画廊**的徽标，两者字段集没有交集。
+ */
+export interface GalleryMarkerManifest {
+    format: 'the-play-gallery/1';
+    title: string;
+    gid?: string;
+    artist?: string;
+    sourceUrl?: string;
+    totalPages: number;
+    createdAt: string;
+}
+
+/**
+ * ============================================================================
+ * 9. 浏览器外壳：导航错误与导入统计
+ * ============================================================================
+ */
+
+/**
+ * 一次导航失败。
+ *
+ * 字段全部来自 `<webview>` 的 `did-fail-load` 事件（errorCode /
+ * errorDescription / validatedURL），加上 BrowserService 归类出来的中文说法。
+ */
+export interface NavigationError {
+    errorCode: number;
+    /** 面向用户的一句话 */
+    title: string;
+    /** 可操作的建议；空串表示没有对应建议，界面据此决定要不要画第二行 */
+    hint: string;
+    /** Chromium 原始英文描述，收在详情里给排查用 */
+    raw: string;
+    /** 出错的域名（从 validatedURL 解析），解析不出时为空串 */
+    host: string;
+    /** 证书类错误：这类错误"重试"没有意义，界面要换一条建议 */
+    isCertificate: boolean;
+    /** DNS 类错误：值得单独提示去查地址拼写 */
+    isDns: boolean;
+}
+
+/**
+ * 一次书签导入的去重统计。
+ *
+ * 两个计数器的口径都是**网址条数**（不含文件夹），见 BookmarkService 的合并逻辑。
+ */
+export interface MergeStats {
+    added: number;
+    skipped: number;
+}
+
+/**
+ * ============================================================================
+ * 10. 浏览器外壳：标签页与各子状态
+ * ============================================================================
+ */
+
+/** 地址栏搜索引擎（与 useMagnetSearch 的磁力搜索分区是两回事） */
+export type SearchEngine = 'google' | 'bing' | 'duckduckgo';
+
+export interface Tab {
+    id: string;
+    /** 当前 URL（React 状态同步用） */
+    url: string;
+    /** 首次加载的 URL（webview src 属性用，避免重复加载） */
+    initialUrl: string;
+    title: string;
+    isLoading: boolean;
+    /** 每个标签页独立的历史记录 */
+    history: string[];
+    historyIndex: number;
+    /** 用于触发刷新的 Key */
+    reloadKey: number;
+    /** 强制刷新（忽略缓存）的 Key。与 reloadKey 分开：两者走不同的 webview API */
+    hardReloadKey: number;
+    /** 待处理的导航动作（由 interactions 落到 webview API） */
+    pendingNavigation?: 'back' | 'forward';
+    /** 真实 favicon 地址（page-favicon-updated 事件）。空则回落到 hostname 取色块 */
+    favicon: string;
+    /** 导航失败详情。非空时页面区显示错误页而不是空白 */
+    error: NavigationError | null;
+    /** 渲染进程崩溃（render-process-gone）。与 error 分开：它需要的是"重新加载"而不是"重试" */
+    crashed: boolean;
+    /** 此刻是否正在出声（静音的视频不算） */
+    audible: boolean;
+    /** 是否被静音 */
+    muted: boolean;
+    /** 缩放级别（Electron 的 zoomLevel，每级 1.2 倍）。0 为 100% */
+    zoomLevel: number;
+}
+
+export interface TabsState {
+    tabs: Tab[];
+    activeTabId: string;
+    activeTab: Tab;
+    actions: {
+        createTab: (url?: string) => string;
+        closeTab: (tabId: string) => void;
+        switchTab: (tabId: string) => void;
+        navigateTab: (tabId: string, url: string, isLoading?: boolean, keepTitle?: boolean) => void;
+        updateTabTitle: (tabId: string, title: string) => void;
+        setTabLoading: (tabId: string, isLoading: boolean) => void;
+        goBack: (tabId: string) => void;
+        goForward: (tabId: string) => void;
+        goHome: (tabId: string) => void;
+        reload: (tabId: string) => void;
+        /** 强制刷新：忽略缓存重新拉取。普通刷新改不掉的旧资源靠它 */
+        hardReload: (tabId: string) => void;
+        openInNewTab: (url: string) => void;
+        syncTabUrl: (tabId: string, url: string, historyIndex?: number) => void;
+        clearPendingNavigation: (tabId: string) => void;
+        setTabFavicon: (tabId: string, favicon: string) => void;
+        setTabError: (tabId: string, error: NavigationError | null) => void;
+        setTabCrashed: (tabId: string, crashed: boolean) => void;
+        setTabAudible: (tabId: string, audible: boolean) => void;
+        setTabMuted: (tabId: string, muted: boolean) => void;
+        setTabZoom: (tabId: string, zoomLevel: number) => void;
+        /** 恢复最近关闭的标签页（Ctrl+Shift+T）。没有可恢复的返回 false */
+        reopenClosedTab: () => boolean;
+    };
+}
+
+/**
+ * 书签状态。
+ *
+ * 真值是 `tree`（树）。不再另外派生一份平铺列表：唯一需要平铺的消费者是
+ * 首页的快速访问网格，它已删除；剩下的消费点（书签栏、下拉、管理器）都
+ * 直接遍历树，多一份派生副本只会多一处会漂移的判据。
+ */
+export interface BookmarksState {
+    /** 书签树（真值） */
+    tree: BookmarkTree;
+    /** 收藏夹栏显示策略 */
+    barVisibility: BookmarkBarVisibility;
+    setBarVisibility: (value: BookmarkBarVisibility) => void;
+    isBookmarked: (url: string) => boolean;
+    toggleBookmark: (url: string, title?: string) => void;
+    removeBookmark: (id: string) => void;
+    /** 在指定文件夹下新建文件夹，返回新文件夹 id（失败返回空串） */
+    addFolder: (parentId: string, title: string) => string;
+    /** 重命名节点 */
+    renameNode: (id: string, title: string) => void;
+    /** 改网址节点的 url */
+    updateNodeUrl: (id: string, url: string) => void;
+    /** 移动节点到另一个文件夹 */
+    moveBookmark: (id: string, targetFolderId: string, index?: number) => void;
+    /** 把导入的节点合并进某个根，返回统计 */
+    mergeImported: (target: 'bar' | 'other', nodes: BookmarkNode[]) => MergeStats;
+    /** 清空某个根下的全部内容 */
+    clearRoot: (target: 'bar' | 'other') => void;
+}
+
+export interface SearchState {
+    engine: SearchEngine;
+    setEngine: (engine: SearchEngine) => void;
+    parseInputToUrl: (input: string) => string;
+}
+
+export interface SnifferState {
+    foundLinks: FoundLink[];
+    filteredLinks: FoundLink[];
+    isAnalyzing: boolean;
+    statusMessage: string;
+    filterType: MediaType | 'all';
+    scopeFilter: 'all' | 'current';
+    /**
+     * "持续嗅探"总开关。打开时切页自动扫描 + 网络层持续推送；
+     * 关闭时两者全停（手动点"嗅探"按钮做的一次性扫描不受影响）。
+     * 默认关闭，状态落盘持久化。
+     */
+    sniffEnabled: boolean;
+    error: string;
+    downloadingUrl: string;
+    /** 当前下载的实时进度；没有下载在进行时为 null */
+    downloadProgress: MediaDownloadProgress | null;
+    downloadCapabilities: DownloadCapabilities;
+    actions: {
+        /** runId：同一轮多次扫描共用一个序号，过期轮次的结果与状态更新会被丢弃 */
+        scan: (targetUrl?: string, runId?: number) => Promise<void>;
+        /** 打开/关闭持续嗅探（同步写盘 + 通知主进程开关网络推送） */
+        setSniffEnabled: (enabled: boolean) => void;
+        analyzeWithAi: (targetUrl: string) => Promise<void>;
+        setFilterType: (type: MediaType | 'all') => void;
+        setScopeFilter: (scope: 'all' | 'current') => void;
+        clear: () => void;
+        clearCurrentPage: (pageUrl?: string) => void;
+        download: (link: FoundLink) => Promise<DownloadMediaResult>;
+        /** 取消正在进行的下载（半成品文件由主进程删除） */
+        cancelDownload: () => Promise<void>;
+    };
+}
+
+/** 页面内查找的当前结果 */
+export interface FindInfo {
+    /** 命中总数 */
+    matches: number;
+    /** 当前是第几个（1 起）；无命中时为 0 */
+    active: number;
+}
+
+export interface InteractionsState {
+    inputUrl: string;
+    setInputUrl: (url: string) => void;
+    /**
+     * 地址栏聚焦状态。地址栏必须在聚焦时**停止跟随** activeTab.url，
+     * 否则 SPA 的 in-page 导航会把用户正在敲的地址覆盖掉（见 useBrowse 内注释）。
+     */
+    setInputFocused: (focused: boolean) => void;
+    isCurrentPageBookmarked: boolean;
+    handleNavigate: (urlOrQuery: string) => void;
+    handleOpenInNewTab: (url: string) => void;
+    /**
+     * 取该标签页**稳定身份**的 ref 回调。JSX 里必须写 `ref={getWebviewRef(tab.id)}`，
+     * 不能写内联箭头 —— 原因见 useBrowse 内的注释。
+     *
+     * 这是注册 webview 的**唯一入口**。内部的 registerWebview 刻意不对外暴露：
+     * 内联 ref 箭头会让它每渲染收到一次 null，把 ready 标记与刷新记账清空
+     * （表现为每渲染重载一次、地址栏换地址无效）。只留这个缓存版回调，
+     * 就没有"正确写法 / 错误写法"两条路可选。
+     */
+    getWebviewRef: (tabId: string) => (el: WebviewElement | null) => void;
+    getActiveWebview: () => WebviewElement | null;
+    /**
+     * 订阅「页面就绪」广播：每个标签页每次 dom-ready 各触发一次，回调收到该页 webview。
+     * 返回退订函数。
+     *
+     * 需要长期活在页面里的注入（篡改引擎）挂这里，而不是自己往 webview 上
+     * addEventListener('dom-ready') —— 那样在 webview 尚未挂载时监听会丢失，
+     * 且换标签页后仍绑在旧页上。
+     */
+    onPageReady: (cb: (tabId: string, webview: WebviewElement) => void) => () => void;
+    /** 遍历当前存活的全部 webview（规则变更时向所有页面推送用） */
+    forEachWebview: (cb: (webview: WebviewElement, tabId: string) => void) => void;
+    /** 取某个标签页的 webview（可能未挂载，返回 null） */
+    getWebview: (tabId: string) => WebviewElement | null;
+
+    /* ------------------------------ 页面能力 ------------------------------ */
+
+    /** 中止当前导航。加载卡住时唯一的出路 —— 不调它只能等超时 */
+    stopLoading: (tabId: string) => void;
+    /** 页面内查找。空串 = 结束查找并清掉高亮 */
+    findInPage: (tabId: string, text: string, options?: { forward?: boolean; findNext?: boolean }) => void;
+    /** 结束查找 */
+    stopFindInPage: (tabId: string, keepSelection?: boolean) => void;
+    /** 调整缩放。delta: +1 放大 / -1 缩小 / 0 复位到 100% */
+    zoomBy: (tabId: string, delta: number) => void;
+    /** 静音 / 取消静音 */
+    toggleMute: (tabId: string) => void;
+    /** 重新加载崩溃的页面 */
+    reviveTab: (tabId: string) => void;
+
+    /** 当前查找状态（按标签页）。查找条据此显示 "3/17" */
+    findInfo: FindInfo;
+    /** 当前正在查找的词（空串表示还没打词，条可能开着等输入） */
+    findQuery: string;
+    /** 查找条是否开着（与词分离：刚按 Ctrl+F 时开着但词为空） */
+    findOpen: boolean;
+    /** 打开/关闭查找条。传空串等于关闭 */
+    setFindQuery: (text: string) => void;
+    /** 只打开查找条不等输入（Ctrl+F）；已开着时保持不动 */
+    openFind: () => void;
+    /** 关闭查找条并清掉高亮 */
+    closeFind: () => void;
+    /**
+     * 订阅**只属于界面层**的浏览器动作（聚焦地址栏 / 让 Agent 分析元素 /
+     * 用选中文字搜索）。真值在 BrowsePanel（它持有地址栏 input 的 ref 与
+     * Agent 输入框），useBrowse 无从下手，所以原样转发。返回退订函数。
+     */
+    onUiAction: (cb: (command: BrowserCommand) => void) => () => void;
+}
+
+export interface TamperState {
+    state: {
+        interceptRules: TamperRule[];
+        requestRules: TamperRule[];
+        headerRules: HeaderRule[];
+    };
+    actions: {
+        /**
+         * 应用规则：注入全部存活页面，并尝试持久化。
+         *
+         * 返回值是**持久化**结果，不是注入结果 —— 两者会分离（配额爆了规则
+         * 仍对当前页面生效，但重启就没了），调用方必须能说出这个区别。
+         */
+        saveRules: (intercept: TamperRule[], request: TamperRule[], headers: HeaderRule[]) => boolean;
+        /**
+         * 只注入不落盘。
+         *
+         * 给 Agent 工具用：模型改规则可以立刻生效，但不该越过用户把浏览器行为
+         * 永久改掉。面板会显示「未应用」，由用户点「应用更改」才写进本地存储。
+         */
+        applyRules: (intercept: TamperRule[], request: TamperRule[], headers: HeaderRule[]) => void;
+        getLocalStorage: () => Promise<string>;
+        getSessionStorage: () => Promise<string>;
+        setLocalStorage: (key: string, val: string) => Promise<boolean>;
+        removeLocalStorage: (key: string) => Promise<boolean>;
+        setSessionStorage: (key: string, val: string) => Promise<boolean>;
+        removeSessionStorage: (key: string) => Promise<boolean>;
+        /** 读当前页面的 Cookie。地址不可查询时返回空数组 */
+        getCookies: () => Promise<CookieItem[]>;
+        /** 覆盖一条 Cookie（整条覆盖，必须带上原字段） */
+        setCookie: (cookie: CookieItem) => Promise<boolean>;
+        /** 按 name 删除 Cookie；同名不同 path 会被一起删掉（Electron 无按 path 删的入口） */
+        removeCookie: (name: string) => Promise<boolean>;
+    };
+}
+
+/**
+ * 网页自身触发的下载（区别于嗅探下载 / 画廊下载 / BT）。
+ *
+ * 状态由**主进程**持有（DownloadItem 只在那里），渲染层只是镜像 ——
+ * 所以这里的 actions 全是"发一条 IPC 然后等主进程推新快照回来"，
+ * 不做乐观更新。乐观更新在这里是错的：暂停能不能成功取决于服务器
+ * 是否支持 Range 请求，本地先改状态会让界面显示"已暂停"而实际还在下。
+ */
+export interface DownloadsState {
+    items: BrowserDownload[];
+    /** 正在进行的条数（进度条徽标用） */
+    activeCount: number;
+    actions: {
+        pause: (id: string) => Promise<void>;
+        resume: (id: string) => Promise<void>;
+        cancel: (id: string) => Promise<void>;
+        /** 在系统文件管理器里定位到文件 */
+        reveal: (id: string) => Promise<void>;
+        open: (id: string) => Promise<void>;
+        /** 只从列表移除记录，不删文件 */
+        remove: (id: string) => Promise<void>;
+        /** 清掉所有已结束的记录 */
+        clearFinished: () => void;
+    };
+}
+
+/** 浏览器面板的全部状态。各子状态自己持有真值，这里只做汇总 */
+export interface BrowseState {
+    tabs: TabsState;
+    bookmarks: BookmarksState;
+    search: SearchState;
+    sniffer: SnifferState;
+    interactions: InteractionsState;
+    tamper: TamperState;
+    downloads: DownloadsState;
+}
+
+/**
+ * ============================================================================
+ * 11. Agent 工作空间
+ * ============================================================================
+ */
+
+export interface AgentDeps {
+    getActiveWebview: () => WebviewElement | null;
+    /** 页面就绪广播：自动执行的脚本挂在这里，不另挂监听 */
+    onPageReady: (cb: (tabId: string, webview: WebviewElement) => void) => () => void;
+    /**
+     * 篡改引擎的完整状态。
+     *
+     * 要 state 不只是 actions：规则的真值由 useTamper 持有，`tamper` 的
+     * 部分更新必须先读到当前值再合并。Agent 这边**不另存副本** —— 两份真值
+     * 迟早会不一致。
+     */
+    tamper: TamperState;
+    /**
+     * 知识库取数桥。
+     *
+     * 与 tamper 同一手法：Agent 不自己 require 主进程、也不碰 window，由 App 把
+     * preload 暴露的 kb API 注进来，测试可以直接喂一个假桥。
+     * 可空 —— 桥缺失时 kb 工具回结构化错误而不是崩，那是加载故障不是运行环境。
+     */
+    kb?: KbBridge;
+}
+
+export interface AgentState {
+    messages: AgentMessage[];
+    scripts: AgentScript[];
+    status: AgentRunStatus;
+    error: string;
+    /**
+     * 正在流式输出的这一轮（尚未定稿）。
+     * 内容实时增长；这一轮结束后它会转成正式的 assistant 消息并清空。
+     */
+    streaming: { content: string; reasoning: string } | null;
+    /**
+     * 现在能不能改历史（删除 / 回退 / 清空）。
+     *
+     * 运行中或压缩中为 false：前者主循环正拿着 messages 追加，此刻改动会和它的
+     * 下一次 appendMessage 抢同一个数组；后者压缩正拿着 upTo 锚点做落盘，
+     * 此刻改动会让锚点失效。界面据此禁用按钮，而不是让用户点了没反应。
+     */
+    canEdit: boolean;
+    /** 会话累计 token 统计（含当前上下文占用） */
+    usage: AgentUsage;
+    /**
+     * 上下文是否已达硬门槛。为 true 时输入框禁用，且 send() 直接拒绝。
+     *
+     * 与 canCompact 正交：门槛到了但消息太少时（按当前档位算不出可压的内容），
+     * 压缩救不了，只能清空 —— 界面必须分别处理这两种情况。
+     */
+    contextFull: boolean;
+    /**
+     * 现在压缩有没有意义：按当前档位至少能覆盖 1 条才压得出东西。
+     *
+     * 与 contextFull 正交：前者是"满了"，后者是"压得动吗"。合成一个判据会让用户
+     * 在两件不同的事之间猜。
+     */
+    canCompact: boolean;
+    /** 正在压缩中（摘要调用在途）。界面据此禁用按钮并显示进度 */
+    compacting: boolean;
+    /** 当前压缩档位（0.4 / 0.6 / 0.8 / 1），落盘持久化 */
+    compactRatio: number;
+    actions: {
+        send: (prompt: string) => Promise<void>;
+        stop: () => void;
+        clear: () => void;
+        /** 删除单条消息体（只删这一条，不牵连同轮的其他消息） */
+        removeMessage: (id: string) => void;
+        /**
+         * 回退到某条消息**之前**：这条连同它之后的全部移除。
+         *
+         * 与 removeMessage 同一粒度（都只认这一条），差别在于一个删中间、
+         * 一个砍尾巴。返回该条的提问原文供填回输入框；这条不是用户提问时返回空串。
+         */
+        rewindTo: (id: string) => string;
+        /**
+         * 把分界线之后的旧消息按当前档位压成结构化摘要，剩下的原样保留。
+         *
+         * **只由用户手动触发，没有自动压缩。** 压缩是不可逆的历史改写加上一次模型
+         * 调用，这两样代价都不该由程序替他决定；程序只负责在 contextFull 时拦住他。
+         *
+         * 返回压缩记录；无可压消息或正在运行 / 压缩中时返回 null。
+         */
+        compact: () => Promise<AgentCompaction | null>;
+        /**
+         * 切换压缩档位（0.4 / 0.6 / 0.8 / 1）。非法值直接忽略 ——
+         * 界面只会从 COMPACT_RATIOS 里选，这里是防手写调用传错。
+         */
+        setCompactRatio: (ratio: number) => void;
+        /**
+         * 丢弃知识库索引缓存。
+         *
+         * 面板改了知识库路径后必须调用：Agent 这份索引是独立缓存，
+         * 只清面板自己那份的话，界面显示新库、模型继续查旧库 —— 两边都看不出异常。
+         */
+        resetKbCache: () => void;
+        /**
+         * 手动执行一条已保存脚本（脚本页的"运行"按钮）。
+         *
+         * 与自动执行同一套记账：lastRunAt/lastResult 更新 + 一条 tool 消息进对话。
+         * 消息的 origin 标成 manual —— 它不属于任何一次模型调用，重建上下文时按
+         * "环境事件"写回，且要如实说出是用户按的而不是页面自动跑的。
+         *
+         * 运行中拒绝：主循环正拿着 webview 跑模型的步骤，此刻手动执行会与它的下一步
+         * 交错读页面，两边看到的状态互相污染。规则与改历史一致。
+         *
+         * 返回给界面显示的观察结果（失败时是错误文案）。
+         */
+        runScriptNow: (id: string) => Promise<string>;
+        removeScript: (id: string) => void;
+        toggleScript: (id: string) => void;
+    };
+}
+
+/**
+ * ============================================================================
+ * 12. 播放列表与 AI 绘本入列
+ * ============================================================================
+ */
+
+/**
+ * AI 绘本入列的一页。
+ *
+ * `file` 与 `url` 二选一：生成器直接产出 File；从 .aibook 导入时图片是
+ * 内联 data URL，调用方先转成 Blob URL 再传 url。
+ */
+export interface AiBookEntryPage {
+    /** 该页图片（生成器路径），有 file 时优先用它建条目 */
+    file?: File | null;
+    /** 该页图片地址（导入路径：blob: 或 http(s)） */
+    url?: string;
+    /** 该页文案 */
+    text: string;
+    /** 该页已缓存的语音（Base64 PCM，可选） */
+    audio?: string;
+}
+
+/**
+ * 当前项在其所属分组内的页码位置。
+ * 画廊成组时页码必须相对本组计算：直接拿 playlist 全局下标展示，
+ * 看第 3 页会显示成“第 137 项”，首项/末项跳转还会跳到别的作品去。
+ */
+export interface PagePosition {
+    /** 组内序号（1 起；无选中项为 0） */
+    index: number;
+    /** 组内总项数 */
+    total: number;
+    /** 组首项在 playlist.files 中的下标 */
+    firstIndex: number;
+    /** 组末项在 playlist.files 中的下标 */
+    lastIndex: number;
+    /** 是否处于多页分组（画廊成组） */
+    grouped: boolean;
+}
+
+export interface UsePlayReturn {
+    state: PlayerState;
+    playlist: PlaylistState;
+    /**
+     * 视频元素引用。写成结构类型而不是 React.RefObject：
+     * meta 要被 Node 回归测试直接编译，那里没有 React 的类型。
+     * 形状与 useRef 的返回完全一致。
+     */
+    videoRef: { current: HTMLVideoElement | null };
+    currentFile: VideoFile | null;
+    mediaError: string | null;
+    /**
+     * 非致命警告：播放继续，但内容有缺失（如 HLS 源站丢了分片，已跳过）。
+     * 与 mediaError 分开：错误是"播不了"，需要用户手动关掉；
+     * 警告是"能播但少了点东西"，会自动消失，不该用红色错误横幅吓人。
+     */
+    mediaWarning: string | null;
+    /** 当前项的组内页码位置（非分组项按整列表计算） */
+    pageInfo: PagePosition;
+    methods: {
+        play: () => Promise<void>;
+        pause: () => void;
+        togglePlay: () => void;
+        seek: (time: number) => void;
+        setVolume: (volume: number) => void;
+        setPlaybackRate: (rate: number) => void;
+        setPlaybackMode: (mode: PlaybackMode) => void;
+        setObjectFit: (fit: ObjectFitMode) => void;
+        toggleMute: () => void;
+        toggleFullscreen: (element?: HTMLElement | null) => void;
+        togglePip: () => Promise<void>;
+        addFiles: (files: FileList | File[]) => void;
+        /** 单文件 .gallery（ZIP 包）解包后成组入列：与文件夹画廊同展示，跳到本组第一页 */
+        addUnpackedGallery: (name: string, pages: { file: File; page: number }[]) => void;
+        /**
+         * AI 绘本成组入列：每页一张图 + 一段文案，groupType='ai-book'。
+         * 播放器识别到该组会切到「绘本阅读器」版式（左图右文），而不是普通图片浏览。
+         */
+        addAiBook: (name: string, pages: AiBookEntryPage[]) => void;
+        /** 绘本朗读语音缓存写回（按条目 id） */
+        cacheAudioData: (fileId: string, base64: string) => void;
+        addStream: (url: string, name?: string, autoPlay?: boolean, mediaType?: MediaType) => void;
+        addMultipleStreams: (streams: (Partial<VideoFile> & { url: string; title?: string })[], autoPlayFirst?: boolean, clearPrevious?: boolean) => void;
+        appendStreams: (streams: (Partial<VideoFile> & { url: string; title?: string })[]) => void;
+        /** 有序合并：同 groupId 的图集页按 page 升序归位（迟到/重试的页插回正确位置），当前看到的那页锚定不动 */
+        mergeOrderedStreams: (streams: (Partial<VideoFile> & { url: string; title?: string })[], groupId?: string) => void;
+        selectTrack: (index: number) => void;
+        nextTrack: (manual?: boolean) => void;
+        prevTrack: () => void;
+        /** 顺序翻页（图集/文档专用）：无视 Random/SingleLoop/StopAfter，永远按列表顺序走 */
+        nextPage: () => void;
+        prevPage: () => void;
+        removeTrack: (index: number) => void;
+        removeTracks: (indexes: number[]) => void;
+        clearPlaylist: () => void;
+        clearError: () => void;
+        /** 关掉非致命警告横幅（如"已跳过 N 个失效分片"） */
+        clearWarning: () => void;
+    };
+}
+
+/**
+ * ============================================================================
+ * 13. 磁力搜索与 ACGMHO 图集保存
+ * ============================================================================
+ */
+
+export interface MagnetSearchState {
+    q: string;
+    /** 搜索分区：表站 or 里站。必选，UI 上是一组二选一分段控件 */
+    group: SiteGroup;
+    sort: SearchSort;
+    minSeeders: number;
+}
+
+export type AcgSaveTaskStatus = 'saving' | 'completed' | 'cancelled' | 'error';
+
+/** 一次「保存整本图集到磁盘」的任务 */
+export interface AcgSaveTask {
+    /** 作品数字 ID（任务键） */
+    gid: string;
+    title: string;
+    totalFiles: number;
+    doneFiles: number;
+    percent: number;
+    status: AcgSaveTaskStatus;
+    message: string;
+    outDir?: string;
+    updatedAt: number;
+}
+
+/**
+ * ============================================================================
+ * 14. 音频引擎：编译产物与和弦
+ * ============================================================================
+ */
+
+/** 非致命提示。代码能编译，但某些写法大概率不是作者本意 */
+export interface SPGWarning {
+    message: string;
+    line: number;
+}
+
+/** 一次编译的产物 */
+export interface ParseResult {
+    instruments: Map<string, InstrumentDef>;
+    sequences: Map<string, SequenceDef>;
+    effects: EffectDef[];
+    mix: MixTrack[];
+    tempo: number;
+    masterVolumeConfig: number;
+    /** 调性（如 C / Am / F#），供 LLM 自查与 UI 显示 */
+    key: string;
+    /** 音阶类型 */
+    scale: string;
+    /** 摇摆量 0~1 */
+    swing: number;
+    /** 编译过程中收集的非致命提示 */
+    warnings: SPGWarning[];
+}
+
+/** 内置鼓组一件乐器的合成参数 */
+export interface DrumSpec {
+    model: 'membrane' | 'noise' | 'metallic';
+    /** 基频 (Hz) */
+    freq: number;
+    /** 音高包络深度（半音） */
+    pitchAmount: number;
+    /** 音高包络衰减 (秒) */
+    pitchDecay: number;
+    /** 振幅衰减 (秒) */
+    decay: number;
+    /** 噪声层混合比 (0~1) */
+    noise: number;
+    /** 噪声层滤波器类型 */
+    noiseFilter: BiquadFilterType;
+    /** 噪声层滤波频率 (Hz) */
+    noiseFreq: number;
+    /** 噪声层 Q */
+    noiseQ: number;
+    /** 金属层的非谐比率 */
+    ratios?: number[];
+    /** 基础增益 */
+    gain: number;
+    /** 高通清理低频泥浆 (Hz) */
+    highpass?: number;
+}
+
+/** 和弦声部排列方式 */
+export type VoicingStyle = 'close' | 'open' | 'drop2' | 'spread';
+
+/** 解析出的和弦符号 */
+export interface ChordSymbol {
+    /** 根音音名（不带八度） */
+    root: string;
+    /** 原始性质文本（规范化前） */
+    quality: string;
+    /** 转位低音音名；无则为 null */
+    bass: string | null;
+    /** 相对根音的半音音程 */
+    intervals: number[];
+}
+
+/**
+ * ============================================================================
+ * 15. 组件 Props 与对外 ref
+ * ============================================================================
+ */
+
+export interface GalleryPanelProps {
+    onBack: () => void;
+    currentUrl?: string;
+    onBrowseInPlayer?: (gallery: {
+        title: string;
+        gid?: string;
+        pages: { url: string; title: string; page?: number }[];
+    }) => void;
+    /**
+     * 纯媒体直推（视频 / 音频）：调用方把条目直接进播放列表，不建画廊分组。
+     * mediaType 必须原样带过去：ACG 音声作品的「音轨」是 HLS（.m3u8）地址，
+     * 下游若按 URL 重新推断只会看到 .m3u8，会把 mp3 音轨判成流媒体、
+     * 进而被播放器的「视频」筛选吞掉。类型由探测结果决定，不由扩展名决定。
+     */
+    onPlayMediaStreams?: (pages: { url: string; title: string; mediaType?: MediaType }[]) => void;
+    onAppendToPlayer?: (
+        pages: { url: string; title: string; page?: number }[],
+        gid?: string
+    ) => void;
+    onMergeToPlayer?: (
+        pages: { url: string; title: string; page?: number }[],
+        gid?: string
+    ) => void;
+}
+
+export interface TorrentPanelProps {
+    onBack: () => void;
+}
+
+/** 音频面板对话区的对外句柄：父级凭它把报错代码塞进来触发自动修复 */
+export interface ChatInterfaceRef {
+    triggerFix: (code: string, error: string) => Promise<void>;
 }

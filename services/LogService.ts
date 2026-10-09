@@ -1,4 +1,5 @@
 import { loadJSON, saveJSON } from '../const';
+import type { LogEntry, LogLevel } from '../meta';
 
 /**
  * ============================================================================
@@ -16,20 +17,10 @@ import { loadJSON, saveJSON } from '../const';
  * 模块在浏览器里 import 即自动安装（import 顺序先于任何模块顶层代码执行，
  * 只靠 index.tsx 里显式调用会漏掉各模块 import 阶段的顶层日志）。
  * Node 里（回归测试 require 编译产物）不自动安装，避免污染测试输出。
+ *
+ * LogLevel / LogEntry 的形状住在 meta（悬浮球面板也读它们）：这里只有
+ * 环形缓冲与落盘，不再另写一份契约。
  */
-
-export type LogLevel = 'log' | 'info' | 'warn' | 'error' | 'debug';
-
-export interface LogEntry {
-    seq: number;
-    /** Date.now() */
-    ts: number;
-    level: LogLevel;
-    /** 格式化后的纯文本，不存原始对象（省内存、落盘小、无循环引用） */
-    message: string;
-    /** 日志来源：现在只有渲染层，主进程合并进来时填 'main' */
-    source: 'renderer';
-}
 
 /** 内存环形缓冲上限：再多就是刷屏型 bug，面板渲染也扛不住 */
 export const LOG_BUFFER_CAP = 1000;

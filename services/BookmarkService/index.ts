@@ -17,7 +17,7 @@
  * 而不是抛异常 —— 拖拽是高频交互，抛异常会打断整个渲染。
  */
 
-import type { BookmarkNode, BookmarkTree } from '../../meta';
+import type { BookmarkNode, BookmarkTree, MergeStats } from '../../meta';
 
 /* ========================================================================== */
 /*                                  查找                                       */
@@ -363,12 +363,6 @@ export function migrateFlatBookmarks(list: unknown, fallbackId: () => string): B
 /* ========================================================================== */
 /*                                  导入                                       */
 /* ========================================================================== */
-
-/** 一次导入的去重统计 */
-export interface MergeStats {
-    added: number;
-    skipped: number;
-}
 
 /**
  * 把导入的节点合并进现有文件夹。

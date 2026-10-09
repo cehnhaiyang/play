@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import Hls from 'hls.js';
-import { PlayerState, PlaylistState, PlaybackMode, ObjectFitMode, VideoFile, MediaType } from '../meta';
+import { PlayerState, PlaylistState, PlaybackMode, ObjectFitMode, VideoFile, MediaType, AiBookEntryPage, PagePosition, UsePlayReturn } from '../meta';
 import {
     createStreamFile,
     createVideoFile,
@@ -46,17 +46,6 @@ interface StoredPlaylist {
  * `file` 与 `url` 二选一：生成器直接产出 File；从 .aibook 导入时图片是
  * 内联 data URL，调用方先转成 Blob URL 再传 url。
  */
-export interface AiBookEntryPage {
-    /** 该页图片（生成器路径），有 file 时优先用它建条目 */
-    file?: File | null;
-    /** 该页图片地址（导入路径：blob: 或 http(s)） */
-    url?: string;
-    /** 该页文案 */
-    text: string;
-    /** 该页已缓存的语音（Base64 PCM，可选） */
-    audio?: string;
-}
-
 const PLAYLIST_STORE_KEY = 'theplay.playlist.v1';
 const PLAYLIST_STORE_MAX = 200;
 
@@ -135,86 +124,12 @@ const restorePlaylist = (): PlaylistState => {
 };
 
 /**
- * 当前项在其所属分组内的页码位置。
- * 画廊成组时页码必须相对本组计算：直接拿 playlist 全局下标展示，
- * 看第 3 页会显示成“第 137 项”，首项/末项跳转还会跳到别的作品去。
- */
-export interface PagePosition {
-    /** 组内序号（1 起；无选中项为 0） */
-    index: number;
-    /** 组内总项数 */
-    total: number;
-    /** 组首项在 playlist.files 中的下标 */
-    firstIndex: number;
-    /** 组末项在 playlist.files 中的下标 */
-    lastIndex: number;
-    /** 是否处于多页分组（画廊成组） */
-    grouped: boolean;
-}
-
-/**
  * 是否为「幻灯片」型媒体：图集/文档没有 video 元素，播放态即自动轮播开关。
  * 其余非音视频类型（gallery 占位、other）是纯静态页，不存在播放态——
  * 三处判定必须共用本函数，否则会出现「能进播放态却没人自动隐藏控制条」这类不一致。
  */
 const isSlideshowMedia = (mediaType: VideoFile['mediaType']): boolean =>
     mediaType === 'image' || mediaType === 'document';
-
-export interface UsePlayReturn {
-    state: PlayerState;
-    playlist: PlaylistState;
-    videoRef: React.RefObject<HTMLVideoElement | null>;
-    currentFile: VideoFile | null;
-    mediaError: string | null;
-    /**
-     * 非致命警告：播放继续，但内容有缺失（如 HLS 源站丢了分片，已跳过）。
-     * 与 mediaError 分开：错误是"播不了"，需要用户手动关掉；
-     * 警告是"能播但少了点东西"，会自动消失，不该用红色错误横幅吓人。
-     */
-    mediaWarning: string | null;
-    /** 当前项的组内页码位置（非分组项按整列表计算） */
-    pageInfo: PagePosition;
-    methods: {
-        play: () => Promise<void>;
-        pause: () => void;
-        togglePlay: () => void;
-        seek: (time: number) => void;
-        setVolume: (volume: number) => void;
-        setPlaybackRate: (rate: number) => void;
-        setPlaybackMode: (mode: PlaybackMode) => void;
-        setObjectFit: (fit: ObjectFitMode) => void;
-        toggleMute: () => void;
-        toggleFullscreen: (element?: HTMLElement | null) => void;
-        togglePip: () => Promise<void>;
-        addFiles: (files: FileList | File[]) => void;
-        /** 单文件 .gallery（ZIP 包）解包后成组入列：与文件夹画廊同展示，跳到本组第一页 */
-        addUnpackedGallery: (name: string, pages: { file: File; page: number }[]) => void;
-        /**
-         * AI 绘本成组入列：每页一张图 + 一段文案，groupType='ai-book'。
-         * 播放器识别到该组会切到「绘本阅读器」版式（左图右文），而不是普通图片浏览。
-         */
-        addAiBook: (name: string, pages: AiBookEntryPage[]) => void;
-        /** 绘本朗读语音缓存写回（按条目 id） */
-        cacheAudioData: (fileId: string, base64: string) => void;
-        addStream: (url: string, name?: string, autoPlay?: boolean, mediaType?: MediaType) => void;
-        addMultipleStreams: (streams: (Partial<VideoFile> & { url: string; title?: string })[], autoPlayFirst?: boolean, clearPrevious?: boolean) => void;
-        appendStreams: (streams: (Partial<VideoFile> & { url: string; title?: string })[]) => void;
-        /** 有序合并：同 groupId 的图集页按 page 升序归位（迟到/重试的页插回正确位置），当前看到的那页锚定不动 */
-        mergeOrderedStreams: (streams: (Partial<VideoFile> & { url: string; title?: string })[], groupId?: string) => void;
-        selectTrack: (index: number) => void;
-        nextTrack: (manual?: boolean) => void;
-        prevTrack: () => void;
-        /** 顺序翻页（图集/文档专用）：无视 Random/SingleLoop/StopAfter，永远按列表顺序走 */
-        nextPage: () => void;
-        prevPage: () => void;
-        removeTrack: (index: number) => void;
-        removeTracks: (indexes: number[]) => void;
-        clearPlaylist: () => void;
-        clearError: () => void;
-        /** 关掉非致命警告横幅（如"已跳过 N 个失效分片"） */
-        clearWarning: () => void;
-    };
-}
 
 export const usePlay = (): UsePlayReturn => {
     const videoRef = useRef<HTMLVideoElement | null>(null);

@@ -35,12 +35,14 @@ import {
     X,
     Zap,
 } from 'lucide-react';
-import type { SnifferState } from '../hooks';
 import { SNIFF_FILTER_OPTIONS } from '../hooks';
 import type {
     AiConfig,
+    AiProviderPreset,
     FoundLink,
+    LogLevel,
     MediaDownloadProgress,
+    SnifferState,
 } from '../meta';
 import { getElectronAPI } from '../meta';
 import { isLinkFromPage, loadJSON, requiresFfmpeg, saveJSON } from '../const';
@@ -55,7 +57,6 @@ import {
     resolveReasoningEffort,
     saveAiConfig,
     testAiConnection,
-    type AiProviderPreset,
 } from '../services/AiService';
 import {
     LOG_BUFFER_CAP,
@@ -64,7 +65,6 @@ import {
     getLogEntries,
     getLogVersion,
     subscribeLogs,
-    type LogLevel,
 } from '../services/LogService';
 
 /**

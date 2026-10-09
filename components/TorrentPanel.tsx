@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 import { SORT_OPTIONS, useMagnetSearch } from '../hooks';
 import { SITE_GROUP_LABELS } from '../meta';
-import type { SearchHit, SearchSiteStatus, TorrentTaskSnapshot } from '../meta';
+import type { SearchHit, SearchSiteStatus, TorrentPanelProps, TorrentTaskSnapshot } from '../meta';
 import { formatBytes } from '../services/SearchService';
 
 /**
@@ -276,10 +276,6 @@ const TaskRow = React.memo(function TaskRow({
         </div>
     );
 });
-
-export interface TorrentPanelProps {
-    onBack: () => void;
-}
 
 export const TorrentPanel: React.FC<TorrentPanelProps> = ({ onBack }) => {
     const { state, actions } = useMagnetSearch();

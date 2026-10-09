@@ -1,17 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
     AgentCompaction,
+    AgentDeps,
     AgentMessage,
     AgentMessageOrigin,
     AgentRunStatus,
     AgentScript,
+    AgentState,
     AgentToolName,
     AgentUsage,
     AiChatMessage,
     AiUsage,
     HeaderRule,
-    KbBridge,
+    KbEntry,
     TamperRule,
+    TamperState,
     WebviewElement,
 } from '../meta';
 import { chat, estimatePromptTokens } from '../services/AiService';
@@ -21,7 +24,6 @@ import {
     readKbArticle,
     searchKb,
     KB_SEARCH_LIMIT,
-    type KbEntry,
 } from '../services/KbService';
 import {
     buildCookieKeys,
@@ -34,7 +36,6 @@ import {
     rewriteJwtPayload,
     saveJSON,
 } from '../const';
-import type { TamperState } from './useBrowse';
 
 /**
  * ============================================================================
@@ -972,120 +973,6 @@ const safeParseObject = (raw: string): Record<string, unknown> => {
  */
 const cookieKeyError = (key: string): string =>
     `找不到 cookie：${key}。key 要用 storage get 或 tokens find 返回的那个原样传入。`;
-
-/* -------------------------------------------------------------------------- */
-/*                                  类型                                       */
-/* -------------------------------------------------------------------------- */
-
-export interface AgentDeps {
-    getActiveWebview: () => WebviewElement | null;
-    /** 页面就绪广播：自动执行的脚本挂在这里，不另挂监听 */
-    onPageReady: (cb: (tabId: string, webview: WebviewElement) => void) => () => void;
-    /**
-     * 篡改引擎的完整状态。
-     *
-     * 要 state 不只是 actions：规则的真值由 useTamper 持有，`tamper` 的
-     * 部分更新必须先读到当前值再合并。Agent 这边**不另存副本** —— 两份真值
-     * 迟早会不一致。
-     */
-    tamper: TamperState;
-    /**
-     * 知识库取数桥。
-     *
-     * 与 tamper 同一手法：Agent 不自己 require 主进程、也不碰 window，由 App 把
-     * preload 暴露的 kb API 注进来，测试可以直接喂一个假桥。
-     * 可空 —— 桥缺失时 kb 工具回结构化错误而不是崩，那是加载故障不是运行环境。
-     */
-    kb?: KbBridge;
-}
-
-export interface AgentState {
-    messages: AgentMessage[];
-    scripts: AgentScript[];
-    status: AgentRunStatus;
-    error: string;
-    /**
-     * 正在流式输出的这一轮（尚未定稿）。
-     * 内容实时增长；这一轮结束后它会转成正式的 assistant 消息并清空。
-     */
-    streaming: { content: string; reasoning: string } | null;
-    /**
-     * 现在能不能改历史（删除 / 回退 / 清空）。
-     *
-     * 运行中或压缩中为 false：前者主循环正拿着 messages 追加，此刻改动会和它的
-     * 下一次 appendMessage 抢同一个数组；后者压缩正拿着 upTo 锚点做落盘，
-     * 此刻改动会让锚点失效。界面据此禁用按钮，而不是让用户点了没反应。
-     */
-    canEdit: boolean;
-    /** 会话累计 token 统计（含当前上下文占用） */
-    usage: AgentUsage;
-    /**
-     * 上下文是否已达硬门槛。为 true 时输入框禁用，且 send() 直接拒绝。
-     *
-     * 与 canCompact 正交：门槛到了但消息太少时（按当前档位算不出可压的内容），
-     * 压缩救不了，只能清空 —— 界面必须分别处理这两种情况。
-     */
-    contextFull: boolean;
-    /**
-     * 现在压缩有没有意义：按当前档位至少能覆盖 1 条才压得出东西。
-     *
-     * 与 contextFull 正交：前者是"满了"，后者是"压得动吗"。合成一个判据会让用户
-     * 在两件不同的事之间猜。
-     */
-    canCompact: boolean;
-    /** 正在压缩中（摘要调用在途）。界面据此禁用按钮并显示进度 */
-    compacting: boolean;
-    /** 当前压缩档位（0.4 / 0.6 / 0.8 / 1），落盘持久化 */
-    compactRatio: number;
-    actions: {
-        send: (prompt: string) => Promise<void>;
-        stop: () => void;
-        clear: () => void;
-        /** 删除单条消息体（只删这一条，不牵连同轮的其他消息） */
-        removeMessage: (id: string) => void;
-        /**
-         * 回退到某条消息**之前**：这条连同它之后的全部移除。
-         *
-         * 与 removeMessage 同一粒度（都只认这一条），差别在于一个删中间、
-         * 一个砍尾巴。返回该条的提问原文供填回输入框；这条不是用户提问时返回空串。
-         */
-        rewindTo: (id: string) => string;
-        /**
-         * 把分界线之后的旧消息按当前档位压成结构化摘要，剩下的原样保留。
-         *
-         * **只由用户手动触发，没有自动压缩。** 压缩是不可逆的历史改写加上一次模型
-         * 调用，这两样代价都不该由程序替他决定；程序只负责在 contextFull 时拦住他。
-         *
-         * 返回压缩记录；无可压消息或正在运行 / 压缩中时返回 null。
-         */
-        compact: () => Promise<AgentCompaction | null>;
-        /**
-         * 切换压缩档位（0.4 / 0.6 / 0.8 / 1）。非法值直接忽略 ——
-         * 界面只会从 COMPACT_RATIOS 里选，这里是防手写调用传错。
-         */
-        setCompactRatio: (ratio: number) => void;
-        /**
-         * 丢弃知识库索引缓存。
-         *
-         * 面板改了知识库路径后必须调用：Agent 这份索引是独立缓存（见 kbCacheRef），
-         * 只清面板自己那份的话，界面显示新库、模型继续查旧库 —— 两边都看不出异常。
-         */
-        resetKbCache: () => void;
-        /**
-         * 手动执行一条已保存脚本（脚本页的"运行"按钮）。
-         *
-         * 与自动执行同一套记账：lastRunAt/lastResult 更新 + 一条 tool 消息进对话。
-         * 消息的 origin 标成 manual —— 它不属于任何一次模型调用，重建上下文时按
-         * "环境事件"写回，且要如实说出是用户按的而不是页面自动跑的。
-         *
-         * 运行中拒绝：主循环正拿着 webview 跑模型的步骤，此刻手动执行会与它的下一步
-         * 交错读页面，两边看到的状态互相污染。规则与改历史一致。
-         */
-        runScriptNow: (id: string) => Promise<string>;
-        removeScript: (id: string) => void;
-        toggleScript: (id: string) => void;
-    };
-}
 
 /**
  * 定稿一轮推理文本：截断到落盘上限，空串归一成 undefined。

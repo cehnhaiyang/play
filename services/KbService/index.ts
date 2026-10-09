@@ -1,3 +1,13 @@
+import type {
+    KbBoardIndex,
+    KbEntry,
+    KbFrontMatter,
+    KbHeading,
+    KbReadResult,
+    KbSearchHit,
+    KbSourceFile,
+} from '../../meta';
+
 /**
  * 知识库服务：把 open-reverselab 的 Markdown 文章索引化并提供检索。
  *
@@ -14,84 +24,11 @@
  * 那份索引有三个实测缺口 —— 有文章不在任何索引里、有条目用 `../..` 越界到别的
  * 板块、有整个分类在 docs 的生成物里缺失。以磁盘为准、把 kb-index.json 只当作
  * **一路加权信号**，这三个缺陷就在我们这侧被消掉了，不需要改动外部仓库。
+ *
+ * 形状全部来自 meta（索引条目、检索命中、正文切片、front-matter 与主进程
+ * load/status 的返回）：这里只放判据与算法。主进程与渲染层各写一份形状的话，
+ * 漂移的症状是"字段名对不上但两边都不报错"。
  */
-
-/* -------------------------------------------------------------------------- */
-/*                                   类型                                      */
-/* -------------------------------------------------------------------------- */
-
-/** 主进程读回来的一份原始文件。path 是 kb 根目录下的相对路径，统一 '/' 分隔 */
-export interface KbSourceFile {
-    path: string;
-    content: string;
-}
-
-/** 仓库自带 kb-index.json 的形状（只取我们用得到的字段） */
-export interface KbBoardIndex {
-    entries?: { id?: string; signals?: string[]; files?: string[] }[];
-}
-
-/** 索引里的一条文章 */
-export interface KbEntry {
-    board: string;
-    path: string;
-    id: string;
-    title: string;
-    summary: string;
-    category: string;
-    /** front-matter 的 signals —— 多为**检测指纹**（如 `script[src*="tinypass.com"]`） */
-    signals: string[];
-    keywords: string[];
-    tags: string[];
-    /** kb-index.json 的 signals —— 多为**路由关键词**，与上面那组语义不同，两组都要 */
-    indexSignals: string[];
-}
-
-export interface KbSearchHit {
-    path: string;
-    board: string;
-    title: string;
-    summary: string;
-    score: number;
-    /** 命中的词，供模型判断"为什么这条被选出来" */
-    matched: string[];
-}
-
-export interface KbHeading {
-    level: number;
-    title: string;
-    /** 在正文里的字符偏移 */
-    start: number;
-    end: number;
-}
-
-export interface KbReadResult {
-    path: string;
-    title: string;
-    section?: string;
-    outline: { level: number; title: string }[];
-    content: string;
-    bytes: number;
-    truncated: boolean;
-    notice?: string;
-}
-
-/** 主进程 load() 的返回 */
-export interface KbLoadPayload {
-    root: string;
-    files: KbSourceFile[];
-    boardIndexes: Record<string, KbBoardIndex>;
-    error?: string;
-}
-
-/** 主进程 status() 的返回 */
-export interface KbStatusPayload {
-    ready: boolean;
-    root: string;
-    articles: number;
-    bytes: number;
-    error?: string;
-}
 
 /* -------------------------------------------------------------------------- */
 /*                                 常量与工具                                   */
@@ -169,8 +106,6 @@ const basename = (path: string): string => path.split('/').pop() || path;
 /* -------------------------------------------------------------------------- */
 /*                              front-matter 解析                              */
 /* -------------------------------------------------------------------------- */
-
-export type KbFrontMatter = Record<string, string | string[]>;
 
 const unquote = (raw: string): string => {
     const t = raw.trim();

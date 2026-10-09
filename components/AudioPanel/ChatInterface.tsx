@@ -1,12 +1,8 @@
 
 /// <reference lib="dom" />
 import React, { useState, useEffect, useRef, useImperativeHandle, forwardRef } from 'react';
-import { Message } from '../../meta';
+import { Message, ChatInterfaceRef } from '../../meta';
 import { PaperAirplaneIcon, SparklesIcon, UserCircleIcon, CpuChipIcon } from '@heroicons/react/24/solid';
-
-export interface ChatInterfaceRef {
-    triggerFix: (code: string, error: string) => Promise<void>;
-}
 
 interface ChatInterfaceProps {
   initialMessages: Message[];

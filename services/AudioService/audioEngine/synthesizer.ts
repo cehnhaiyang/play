@@ -1,8 +1,8 @@
 
 /// <reference lib="dom" />
-import { ScheduledEvent, EffectDef, Envelope, DrumName } from '../../../meta';
+import { ScheduledEvent, EffectDef, Envelope, DrumName, DrumSpec } from '../../../meta';
 import { fillNoise, createRandom, clamp, midiToFreq } from '../utils';
-import { DRUM_SPECS, DrumSpec } from './drums';
+import { DRUM_SPECS } from './drums';
 
 /** 指数自动化不能到 0，用极小值代替 */
 const ZERO = 0.0001;

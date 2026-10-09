@@ -3,17 +3,30 @@ import {
     BookmarkNode,
     BookmarkTree,
     BookmarkBarVisibility,
+    BookmarksState,
+    BrowseState,
     BrowserCommand,
     BrowserDownload,
     BrowserDownloadAction,
     CookieItem,
     DownloadCapabilities,
     DownloadMediaResult,
+    DownloadsState,
+    FindInfo,
     FoundLink,
     HeaderRule,
+    InteractionsState,
     MediaDownloadProgress,
     MediaType,
+    MergeStats,
+    NavigationError,
+    SearchEngine,
+    SearchState,
+    SnifferState,
+    Tab,
+    TabsState,
     TamperRule,
+    TamperState,
     WebviewElement,
     getElectronAPI,
 } from '../meta';
@@ -27,10 +40,7 @@ import {
     zoomFactorToLevel,
     ZOOM_MIN_LEVEL,
     ZOOM_MAX_LEVEL,
-    type NavigationError,
 } from '../services/BrowserService';
-export type { MergeStats } from '../services/BookmarkService';
-export type { BookmarkBarVisibility } from '../meta';
 import {
     collectUrls,
     findNode,
@@ -45,7 +55,6 @@ import {
     normalizeTree,
     removeNode,
     replaceNode,
-    type MergeStats,
 } from '../services/BookmarkService';
 import {
     generateId,
@@ -182,8 +191,6 @@ const DEFAULT_CAPABILITIES: DownloadCapabilities = {
 /* -------------------------------------------------------------------------- */
 /*                                地址栏解析                                    */
 /* -------------------------------------------------------------------------- */
-
-export type SearchEngine = 'google' | 'bing' | 'duckduckgo';
 
 /**
  * 引擎清单是**唯一真值**：地址栏的选择器与落盘校验都读它。
@@ -1028,148 +1035,6 @@ const buildTamperScript = (config: TamperConfig): string =>
 /* -------------------------------------------------------------------------- */
 
 /**
- * 一次导航失败。
- *
- * 类型与判据都来自 services/BrowserService —— **这里只是再导出**，
- * 让 hooks 的使用方不必知道它住在哪一层。判据绝不能在本文件里再写一份：
- * 主进程与渲染层各维护一张错误码表，漂移的症状是"同一个错误在日志里和
- * 界面上叫两个名字"，不报错、不崩溃，只是让人对不上号。
- */
-export type { NavigationError };
-
-export interface Tab {
-    id: string;
-    /** 当前 URL（React 状态同步用） */
-    url: string;
-    /** 首次加载的 URL（webview src 属性用，避免重复加载） */
-    initialUrl: string;
-    title: string;
-    isLoading: boolean;
-    /** 每个标签页独立的历史记录 */
-    history: string[];
-    historyIndex: number;
-    /** 用于触发刷新的 Key */
-    reloadKey: number;
-    /** 强制刷新（忽略缓存）的 Key。与 reloadKey 分开：两者走不同的 webview API */
-    hardReloadKey: number;
-    /** 待处理的导航动作（由 interactions 落到 webview API） */
-    pendingNavigation?: 'back' | 'forward';
-    /** 真实 favicon 地址（page-favicon-updated 事件）。空则回落到 hostname 取色块 */
-    favicon: string;
-    /** 导航失败详情。非空时页面区显示错误页而不是空白 */
-    error: NavigationError | null;
-    /** 渲染进程崩溃（render-process-gone）。与 error 分开：它需要的是"重新加载"而不是"重试" */
-    crashed: boolean;
-    /** 此刻是否正在出声（静音的视频不算） */
-    audible: boolean;
-    /** 是否被静音 */
-    muted: boolean;
-    /** 缩放级别（Electron 的 zoomLevel，每级 1.2 倍）。0 为 100% */
-    zoomLevel: number;
-}
-
-export interface TabsState {
-    tabs: Tab[];
-    activeTabId: string;
-    activeTab: Tab;
-    actions: {
-        createTab: (url?: string) => string;
-        closeTab: (tabId: string) => void;
-        switchTab: (tabId: string) => void;
-        navigateTab: (tabId: string, url: string, isLoading?: boolean, keepTitle?: boolean) => void;
-        updateTabTitle: (tabId: string, title: string) => void;
-        setTabLoading: (tabId: string, isLoading: boolean) => void;
-        goBack: (tabId: string) => void;
-        goForward: (tabId: string) => void;
-        goHome: (tabId: string) => void;
-        reload: (tabId: string) => void;
-        /** 强制刷新：忽略缓存重新拉取。普通刷新改不掉的旧资源靠它 */
-        hardReload: (tabId: string) => void;
-        openInNewTab: (url: string) => void;
-        syncTabUrl: (tabId: string, url: string, historyIndex?: number) => void;
-        clearPendingNavigation: (tabId: string) => void;
-        setTabFavicon: (tabId: string, favicon: string) => void;
-        setTabError: (tabId: string, error: NavigationError | null) => void;
-        setTabCrashed: (tabId: string, crashed: boolean) => void;
-        setTabAudible: (tabId: string, audible: boolean) => void;
-        setTabMuted: (tabId: string, muted: boolean) => void;
-        setTabZoom: (tabId: string, zoomLevel: number) => void;
-        /** 恢复最近关闭的标签页（Ctrl+Shift+T）。没有可恢复的返回 false */
-        reopenClosedTab: () => boolean;
-    };
-}
-
-/**
- * 书签状态。
- *
- * 真值是 `tree`（树）。不再另外派生一份平铺列表：唯一需要平铺的消费者是
- * 首页的快速访问网格，它已删除；剩下的消费点（书签栏、下拉、管理器）都
- * 直接遍历树，多一份派生副本只会多一处会漂移的判据。
- */
-export interface BookmarksState {
-    /** 书签树（真值） */
-    tree: BookmarkTree;
-    /** 收藏夹栏显示策略 */
-    barVisibility: BookmarkBarVisibility;
-    setBarVisibility: (value: BookmarkBarVisibility) => void;
-    isBookmarked: (url: string) => boolean;
-    toggleBookmark: (url: string, title?: string) => void;
-    removeBookmark: (id: string) => void;
-    /** 在指定文件夹下新建文件夹，返回新文件夹 id（失败返回空串） */
-    addFolder: (parentId: string, title: string) => string;
-    /** 重命名节点 */
-    renameNode: (id: string, title: string) => void;
-    /** 改网址节点的 url */
-    updateNodeUrl: (id: string, url: string) => void;
-    /** 移动节点到另一个文件夹 */
-    moveBookmark: (id: string, targetFolderId: string, index?: number) => void;
-    /** 把导入的节点合并进某个根，返回统计 */
-    mergeImported: (target: 'bar' | 'other', nodes: BookmarkNode[]) => MergeStats;
-    /** 清空某个根下的全部内容 */
-    clearRoot: (target: 'bar' | 'other') => void;
-}
-
-export interface SearchState {
-    engine: SearchEngine;
-    setEngine: (engine: SearchEngine) => void;
-    parseInputToUrl: (input: string) => string;
-}
-
-export interface SnifferState {
-    foundLinks: FoundLink[];
-    filteredLinks: FoundLink[];
-    isAnalyzing: boolean;
-    statusMessage: string;
-    filterType: MediaType | 'all';
-    scopeFilter: 'all' | 'current';
-    /**
-     * "持续嗅探"总开关。打开时切页自动扫描 + 网络层持续推送；
-     * 关闭时两者全停（手动点"嗅探"按钮做的一次性扫描不受影响）。
-     * 默认关闭，状态落盘持久化。
-     */
-    sniffEnabled: boolean;
-    error: string;
-    downloadingUrl: string;
-    /** 当前下载的实时进度；没有下载在进行时为 null */
-    downloadProgress: MediaDownloadProgress | null;
-    downloadCapabilities: DownloadCapabilities;
-    actions: {
-        /** runId：同一轮多次扫描共用一个序号，过期轮次的结果与状态更新会被丢弃 */
-        scan: (targetUrl?: string, runId?: number) => Promise<void>;
-        /** 打开/关闭持续嗅探（同步写盘 + 通知主进程开关网络推送） */
-        setSniffEnabled: (enabled: boolean) => void;
-        analyzeWithAi: (targetUrl: string) => Promise<void>;
-        setFilterType: (type: MediaType | 'all') => void;
-        setScopeFilter: (scope: 'all' | 'current') => void;
-        clear: () => void;
-        clearCurrentPage: (pageUrl?: string) => void;
-        download: (link: FoundLink) => Promise<DownloadMediaResult>;
-        /** 取消正在进行的下载（半成品文件由主进程删除） */
-        cancelDownload: () => Promise<void>;
-    };
-}
-
-/**
  * 地址栏此刻该不该跟随页面 URL。
  *
  * 用户在编辑时**不能**跟随：SPA 每次 pushState / hash 变化都会更新 activeTab.url，
@@ -1180,157 +1045,6 @@ export interface SnifferState {
  * 而错了的表现是"用户输入被吞"或"地址栏永远停在旧地址"，都不容易一眼看出来。
  */
 export const shouldAddressBarFollow = (inputFocused: boolean): boolean => !inputFocused;
-
-/** 页面内查找的当前结果 */
-export interface FindInfo {
-    /** 命中总数 */
-    matches: number;
-    /** 当前是第几个（1 起）；无命中时为 0 */
-    active: number;
-}
-
-export interface InteractionsState {
-    inputUrl: string;
-    setInputUrl: (url: string) => void;
-    /**
-     * 地址栏聚焦状态。地址栏必须在聚焦时**停止跟随** activeTab.url，
-     * 否则 SPA 的 in-page 导航会把用户正在敲的地址覆盖掉（见 useInteractions 内注释）。
-     */
-    setInputFocused: (focused: boolean) => void;
-    isCurrentPageBookmarked: boolean;
-    handleNavigate: (urlOrQuery: string) => void;
-    handleOpenInNewTab: (url: string) => void;
-    /**
-     * 取该标签页**稳定身份**的 ref 回调。JSX 里必须写 `ref={getWebviewRef(tab.id)}`，
-     * 不能写内联箭头 —— 原因见 useInteractions 内的注释。
-     *
-     * 这是注册 webview 的**唯一入口**。内部的 registerWebview 刻意不对外暴露：
-     * 内联 ref 箭头会让它每渲染收到一次 null，把 ready 标记与刷新记账清空
-     * （表现为每渲染重载一次、地址栏换地址无效）。只留这个缓存版回调，
-     * 就没有"正确写法 / 错误写法"两条路可选。
-     */
-    getWebviewRef: (tabId: string) => (el: WebviewElement | null) => void;
-    getActiveWebview: () => WebviewElement | null;
-    /**
-     * 订阅「页面就绪」广播：每个标签页每次 dom-ready 各触发一次，回调收到该页 webview。
-     * 返回退订函数。
-     *
-     * 需要长期活在页面里的注入（篡改引擎）挂这里，而不是自己往 webview 上
-     * addEventListener('dom-ready') —— 那样在 webview 尚未挂载时监听会丢失，
-     * 且换标签页后仍绑在旧页上。
-     */
-    onPageReady: (cb: (tabId: string, webview: WebviewElement) => void) => () => void;
-    /** 遍历当前存活的全部 webview（规则变更时向所有页面推送用） */
-    forEachWebview: (cb: (webview: WebviewElement, tabId: string) => void) => void;
-    /** 取某个标签页的 webview（可能未挂载，返回 null） */
-    getWebview: (tabId: string) => WebviewElement | null;
-
-    /* ------------------------------ 页面能力 ------------------------------ */
-
-    /** 中止当前导航。加载卡住时唯一的出路 —— 不调它只能等超时 */
-    stopLoading: (tabId: string) => void;
-    /** 页面内查找。空串 = 结束查找并清掉高亮 */
-    findInPage: (tabId: string, text: string, options?: { forward?: boolean; findNext?: boolean }) => void;
-    /** 结束查找 */
-    stopFindInPage: (tabId: string, keepSelection?: boolean) => void;
-    /** 调整缩放。delta: +1 放大 / -1 缩小 / 0 复位到 100% */
-    zoomBy: (tabId: string, delta: number) => void;
-    /** 静音 / 取消静音 */
-    toggleMute: (tabId: string) => void;
-    /** 重新加载崩溃的页面 */
-    reviveTab: (tabId: string) => void;
-
-    /** 当前查找状态（按标签页）。查找条据此显示 "3/17" */
-    findInfo: FindInfo;
-    /** 当前正在查找的词（空串表示还没打词，条可能开着等输入） */
-    findQuery: string;
-    /** 查找条是否开着（与词分离：刚按 Ctrl+F 时开着但词为空） */
-    findOpen: boolean;
-    /** 打开/关闭查找条。传空串等于关闭 */
-    setFindQuery: (text: string) => void;
-    /** 只打开查找条不等输入（Ctrl+F）；已开着时保持不动 */
-    openFind: () => void;
-    /** 关闭查找条并清掉高亮 */
-    closeFind: () => void;
-    /**
-     * 订阅**只属于界面层**的浏览器动作（聚焦地址栏 / 让 Agent 分析元素 /
-     * 用选中文字搜索）。真值在 BrowsePanel（它持有地址栏 input 的 ref 与
-     * Agent 输入框），useBrowse 无从下手，所以原样转发。返回退订函数。
-     */
-    onUiAction: (cb: (command: BrowserCommand) => void) => () => void;
-}
-
-export interface TamperState {
-    state: {
-        interceptRules: TamperRule[];
-        requestRules: TamperRule[];
-        headerRules: HeaderRule[];
-    };
-    actions: {
-        /**
-         * 应用规则：注入全部存活页面，并尝试持久化。
-         *
-         * 返回值是**持久化**结果，不是注入结果 —— 两者会分离（配额爆了规则
-         * 仍对当前页面生效，但重启就没了），调用方必须能说出这个区别。
-         */
-        saveRules: (intercept: TamperRule[], request: TamperRule[], headers: HeaderRule[]) => boolean;
-        /**
-         * 只注入不落盘。
-         *
-         * 给 Agent 工具用：模型改规则可以立刻生效，但不该越过用户把浏览器行为
-         * 永久改掉。面板会显示「未应用」，由用户点「应用更改」才写进本地存储。
-         */
-        applyRules: (intercept: TamperRule[], request: TamperRule[], headers: HeaderRule[]) => void;
-        getLocalStorage: () => Promise<string>;
-        getSessionStorage: () => Promise<string>;
-        setLocalStorage: (key: string, val: string) => Promise<boolean>;
-        removeLocalStorage: (key: string) => Promise<boolean>;
-        setSessionStorage: (key: string, val: string) => Promise<boolean>;
-        removeSessionStorage: (key: string) => Promise<boolean>;
-        /** 读当前页面的 Cookie。地址不可查询时返回空数组 */
-        getCookies: () => Promise<CookieItem[]>;
-        /** 覆盖一条 Cookie（整条覆盖，必须带上原字段） */
-        setCookie: (cookie: CookieItem) => Promise<boolean>;
-        /** 按 name 删除 Cookie；同名不同 path 会被一起删掉（Electron 无按 path 删的入口） */
-        removeCookie: (name: string) => Promise<boolean>;
-    };
-}
-
-export interface BrowseState {
-    tabs: TabsState;
-    bookmarks: BookmarksState;
-    search: SearchState;
-    sniffer: SnifferState;
-    interactions: InteractionsState;
-    tamper: TamperState;
-    downloads: DownloadsState;
-}
-
-/**
- * 网页自身触发的下载（区别于嗅探下载 / 画廊下载 / BT）。
- *
- * 状态由**主进程**持有（DownloadItem 只在那里），渲染层只是镜像 ——
- * 所以这里的 actions 全是"发一条 IPC 然后等主进程推新快照回来"，
- * 不做乐观更新。乐观更新在这里是错的：暂停能不能成功取决于服务器
- * 是否支持 Range 请求，本地先改状态会让界面显示"已暂停"而实际还在下。
- */
-export interface DownloadsState {
-    items: BrowserDownload[];
-    /** 正在进行的条数（进度条徽标用） */
-    activeCount: number;
-    actions: {
-        pause: (id: string) => Promise<void>;
-        resume: (id: string) => Promise<void>;
-        cancel: (id: string) => Promise<void>;
-        /** 在系统文件管理器里定位到文件 */
-        reveal: (id: string) => Promise<void>;
-        open: (id: string) => Promise<void>;
-        /** 只从列表移除记录，不删文件 */
-        remove: (id: string) => Promise<void>;
-        /** 清掉所有已结束的记录 */
-        clearFinished: () => void;
-    };
-}
 
 /* -------------------------------------------------------------------------- */
 /*                              内部：标签页                                    */

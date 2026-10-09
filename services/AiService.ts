@@ -3,7 +3,10 @@ import type {
     AiChatOptions,
     AiConfig,
     AiContentPart,
+    AiEffortOption,
     AiImageInput,
+    AiModelPreset,
+    AiProviderPreset,
     AiStory,
     AiStreamDelta,
     AiTestResult,
@@ -35,51 +38,6 @@ export const DEFAULT_AI_CONFIG: AiConfig = {
     model: 'global:deepseek-v4.1-flash',
     reasoningEffort: 'low',
 };
-
-/** 界面上的一个档位：value 是配置里的档位（缺省即「不思考」），label 是按钮文字 */
-export interface AiEffortOption {
-    /** 缺省表示不下发思考参数 */
-    value?: ReasoningEffort;
-    label: string;
-    hint: string;
-}
-
-/** 服务商认的取值：low / high / max 换成它认的写法；未列出的档位原样下发 */
-export type AiEffortMap = Partial<Record<ReasoningEffort, string>>;
-
-/**
- * 模型预设：思考配置挂在这里，不挂服务商。
- *
- * 同一个服务商下不同模型对 reasoning_effort 的态度可以完全相反——实测
- * agent2api 的 GET /v1/models 逐个模型给出 supports_reasoning 字段，
- * LongCat-2.0 是 false，glm-5.3 / deepseek-v4 / kimi-k3 是 true。
- * 挂在服务商上就表达不了这种差异：选一次服务商，只能对所有模型统一下发或统一不发。
- */
-export interface AiModelPreset {
-    /** 下发给服务商的模型标识，界面也用它显示 */
-    id: string;
-    /**
-     * 该模型是否需要思考档位。
-     * `false` = 不需要：整条链路都不带 reasoning_effort（档位可能已写进模型名）。
-     * 缺省视为需要。
-     */
-    reasoning?: boolean;
-    /** 该模型的档位映射 */
-    efforts?: AiEffortMap;
-}
-
-/** 服务商预设：地址、密钥与模型候选；思考配置属于模型，服务商不持有 */
-export interface AiProviderPreset {
-    id: string;
-    /** 按钮文字 */
-    label: string;
-    /** 按钮悬浮提示 */
-    note: string;
-    baseUrl: string;
-    apiKey: string;
-    /** 该服务商的模型候选；第一个是套用预设时的默认值 */
-    models: AiModelPreset[];
-}
 
 /** 界面档位：不思考 + 低 / 高 / 最大三档 */
 export const EFFORT_OPTIONS: AiEffortOption[] = [

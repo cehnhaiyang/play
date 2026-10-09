@@ -1,11 +1,11 @@
 
 /// <reference lib="dom" />
 import React, { useState, useRef, useCallback } from 'react';
-import ChatInterface, { ChatInterfaceRef } from './ChatInterface';
+import ChatInterface from './ChatInterface';
 import CodeEditor from './CodeEditor';
 import Visualizer from './Visualizer';
 import AudioToolbox from './AudioToolbox';
-import { AppState, Message, Project } from '../../meta';
+import { AppState, ChatInterfaceRef, Message, Project } from '../../meta';
 import { useAudio } from '../../hooks'; 
 import { 
   PlayIcon, StopIcon, ArrowUpTrayIcon, ArchiveBoxArrowDownIcon, 

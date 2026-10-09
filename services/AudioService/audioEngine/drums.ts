@@ -1,6 +1,6 @@
 
 /// <reference lib="dom" />
-import type { DrumName } from '../../../meta';
+import type { DrumName, DrumSpec } from '../../../meta';
 
 /**
  * 内置鼓组合成器。
@@ -11,32 +11,6 @@ import type { DrumName } from '../../../meta';
  * - `noise`    噪声为主、带通塑形（军鼓 / 拍手 / 沙锤）
  * - `metallic` 多个非谐方波分音叠加（镲片 / 踩镲 / 牛铃）
  */
-
-export interface DrumSpec {
-    model: 'membrane' | 'noise' | 'metallic';
-    /** 基频 (Hz) */
-    freq: number;
-    /** 音高包络深度（半音） */
-    pitchAmount: number;
-    /** 音高包络衰减 (秒) */
-    pitchDecay: number;
-    /** 振幅衰减 (秒) */
-    decay: number;
-    /** 噪声层混合比 (0~1) */
-    noise: number;
-    /** 噪声层滤波器类型 */
-    noiseFilter: BiquadFilterType;
-    /** 噪声层滤波频率 (Hz) */
-    noiseFreq: number;
-    /** 噪声层 Q */
-    noiseQ: number;
-    /** 金属层的非谐比率 */
-    ratios?: number[];
-    /** 基础增益 */
-    gain: number;
-    /** 高通清理低频泥浆 (Hz) */
-    highpass?: number;
-}
 
 export const DRUM_SPECS: Record<DrumName, DrumSpec> = {
     kick: {

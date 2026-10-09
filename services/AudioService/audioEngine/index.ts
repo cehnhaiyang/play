@@ -1,8 +1,8 @@
 
 /// <reference lib="dom" />
-import { ParserError, ScheduledEvent } from '../../../meta';
+import { ParserError, ScheduledEvent, ParseResult, SPGWarning } from '../../../meta';
 import { bufferToWave, clamp } from '../utils';
-import { SPGParser, ParseResult, SPGError, SPGWarning } from './parser';
+import { SPGParser, SPGError } from './parser';
 import { EventScheduler } from './scheduler';
 import { AudioSynthesizer } from './synthesizer';
 

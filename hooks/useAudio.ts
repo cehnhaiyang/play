@@ -1,10 +1,9 @@
 /// <reference lib="dom" />
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import type React from 'react';
-import { Project, Message, AppState, ParserError } from '../meta';
+import { Project, Message, AppState, ParserError, SPGWarning } from '../meta';
 import { loadProjects, saveProjects, createNewProject } from '../services/AudioService/persistence';
 import { BrowserAudioEngine } from '../services/AudioService/audioEngine';
-import type { SPGWarning } from '../services/AudioService/audioEngine/parser';
 import { exportProjectBundle, bufferToWave } from '../services/AudioService/utils';
 import { generateSyntax, fixSyntax } from '../services/AiService';
 import { downloadBlob, loadJSON, removeStored, saveJSON } from '../const';

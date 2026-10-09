@@ -56,20 +56,19 @@ import {
 } from 'lucide-react';
 import { useBrowse } from '../hooks';
 import type {
-    AgentState,
     BookmarksState,
     DownloadsState,
     FindInfo,
     SearchEngine,
     Tab,
-    TamperState,
     TabsState,
-} from '../hooks';
+} from '../meta';
 import { SEARCH_ENGINE_OPTIONS, isAddressLike, CONTEXT_LIMIT_TOKENS, COMPACT_RATIOS } from '../hooks';
 import type {
     AgentCompaction,
     AgentMessage,
     AgentScript,
+    AgentState,
     AgentUsage,
     AiUsage,
     BookmarkNode,
@@ -79,8 +78,13 @@ import type {
     EdgeImportResult,
     EdgeAccountEntry,
     HeaderRule,
+    KbEntry,
+    KbSearchHit,
     KbStatus,
+    MergeStats,
+    NavigationError,
     TamperRule,
+    TamperState,
     WebviewElement,
 } from '../meta';
 import { getAppWindow, getElectronAPI } from '../meta';
@@ -96,7 +100,7 @@ import {
     saveJSON,
 } from '../const';
 import { formatBytes } from '../services/SearchService';
-import { zoomLevelToPercent, isEditableTarget, type NavigationError } from '../services/BrowserService';
+import { zoomLevelToPercent, isEditableTarget } from '../services/BrowserService';
 import {
     collectFolders,
     countNodes,
@@ -104,13 +108,10 @@ import {
     findParent,
     flattenUrls,
     isDescendant,
-    type MergeStats,
 } from '../services/BookmarkService';
 import {
     buildKbIndex,
     searchKb,
-    type KbEntry,
-    type KbSearchHit,
 } from '../services/KbService';
 
 /**

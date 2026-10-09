@@ -227,6 +227,51 @@ export type MessageRole = 'user' | 'model' | 'system';
  */
 export type ReasoningEffort = 'low' | 'high' | 'max';
 
+/** 界面上的一个档位：value 是配置里的档位（缺省即「不思考」），label 是按钮文字 */
+export interface AiEffortOption {
+    /** 缺省表示不下发思考参数 */
+    value?: ReasoningEffort;
+    label: string;
+    hint: string;
+}
+
+/** 服务商认的取值：low / high / max 换成它认的写法；未列出的档位原样下发 */
+export type AiEffortMap = Partial<Record<ReasoningEffort, string>>;
+
+/**
+ * 模型预设：思考配置挂在这里，不挂服务商。
+ *
+ * 同一个服务商下不同模型对 reasoning_effort 的态度可以完全相反 —— 实测
+ * agent2api 的 GET /v1/models 逐个模型给出 supports_reasoning 字段，
+ * LongCat-2.0 是 false，glm-5.3 / deepseek-v4 / kimi-k3 是 true。
+ * 挂在服务商上就表达不了这种差异：选一次服务商，只能对所有模型统一下发或统一不发。
+ */
+export interface AiModelPreset {
+    /** 下发给服务商的模型标识，界面也用它显示 */
+    id: string;
+    /**
+     * 该模型是否需要思考档位。
+     * `false` = 不需要：整条链路都不带 reasoning_effort（档位可能已写进模型名）。
+     * 缺省视为需要。
+     */
+    reasoning?: boolean;
+    /** 该模型的档位映射 */
+    efforts?: AiEffortMap;
+}
+
+/** 服务商预设：地址、密钥与模型候选；思考配置属于模型，服务商不持有 */
+export interface AiProviderPreset {
+    id: string;
+    /** 按钮文字 */
+    label: string;
+    /** 按钮悬浮提示 */
+    note: string;
+    baseUrl: string;
+    apiKey: string;
+    /** 该服务商的模型候选；第一个是套用预设时的默认值 */
+    models: AiModelPreset[];
+}
+
 /**
  * AI 服务连接配置（OpenAI 兼容协议）
  * 由主进程 settings.json 持有，渲染层只通过 IPC 读写，密钥不落到渲染进程。
@@ -392,6 +437,12 @@ export interface AiBookFile {
     /** 格式版本，便于以后演进 */
     version: string;
     /** 书名 */
+    title: string;
+    pages: AiBookPage[];
+}
+
+/** .aibook 文本解析结果（书名缺省时已回落到调用方给的 fallback） */
+export interface ParsedAiBook {
     title: string;
     pages: AiBookPage[];
 }
@@ -584,6 +635,29 @@ export interface AgentCompaction {
     overBudget: boolean;
 }
 
+/**
+ * 会话导出的选项。
+ *
+ * 定义在 meta 而不是 const.ts：导出的两个 builder 与导出动作分处两处，
+ * 对缺省的理解必须一致（见 resolveExportOptions）。
+ */
+export interface AgentExportOptions {
+    /**
+     * 是否写入推理过程，默认 true。
+     *
+     * 关掉后文件里连 `<details>` 都不出现，但**文件头会注明"不含推理"** ——
+     * 否则读到一份没有推理的记录，人只会以为模型当时没思考。
+     */
+    includeReasoning?: boolean;
+    /**
+     * 文件名与文件头共用的时间戳，默认取当前时刻。
+     *
+     * 必须是同一个时刻：分两次取的话，文件名的时间与文件头写的对不上，
+     * 导两份还会出现同名覆盖。
+     */
+    at?: number;
+}
+
 /** 会话累计 token 统计（按现存消息重算，删除 / 回退后自动收敛） */
 export interface AgentUsage {
     /** 累计输入 token（每次模型调用的 prompt 都计入，不做任何去重） */
@@ -610,8 +684,52 @@ export interface AgentUsage {
 }
 
 /**
+ * JWT 解码结果。两段都保持 unknown：payload 的形状由签发方决定，
+ * 这里只负责拆段与解码，不替调用方猜字段。
+ */
+export interface DecodedJwt {
+    header: unknown;
+    payload: unknown;
+}
+
+/**
+ * 被篡改引擎跳过的规则，附带它在原数组里的下标与原因。
+ *
+ * 下标是给模型/用户**定位**用的：只说"有 2 条被跳过"没用，
+ * 得说清是第几条、缺哪个字段，才能一步改对。
+ */
+export interface DroppedRule {
+    /** 在哪一类规则里：intercept / request / headers */
+    group: 'intercept' | 'request' | 'headers';
+    /** 在该数组里的下标（0 起） */
+    index: number;
+    /** 缺什么 */
+    reason: string;
+}
+
+/**
  * ============================================================================
- * 5. 图集下载生命周期状态
+ * 6. 运行日志
+ * ============================================================================
+ */
+
+export type LogLevel = 'log' | 'info' | 'warn' | 'error' | 'debug';
+
+/** 一条运行日志。主进程日志将来合并进来时直接填 source，面板不用改 */
+export interface LogEntry {
+    seq: number;
+    /** Date.now() */
+    ts: number;
+    level: LogLevel;
+    /** 格式化后的纯文本，不存原始对象（省内存、落盘小、无循环引用） */
+    message: string;
+    /** 日志来源：现在只有渲染层，主进程合并进来时填 'main' */
+    source: 'renderer';
+}
+
+/**
+ * ============================================================================
+ * 8. 图集下载生命周期状态
  * ============================================================================
  */
 

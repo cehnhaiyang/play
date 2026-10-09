@@ -7,8 +7,7 @@ import {
     Radio, Archive, Search, GripVertical, ListMusic, Inbox, AlertTriangle, Keyboard, Upload,
     Loader2, Wand2, Images, BookOpen,
 } from 'lucide-react';
-import { UsePlayReturn } from '../hooks/usePlay';
-import { PlaybackMode, ObjectFitMode, VideoFile, MediaType, getElectronAPI, type AiStory } from '../meta';
+import { PlaybackMode, ObjectFitMode, VideoFile, MediaType, UsePlayReturn, getElectronAPI, type AiStory } from '../meta';
 import {
     buildAiBookBlob,
     collectPackSources,

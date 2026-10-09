@@ -8,6 +8,7 @@ import {
     TorrentTaskSnapshot,
     SiteDescriptor,
     SiteGroup,
+    MagnetSearchState,
     getElectronAPI,
 } from '../meta';
 import { loadJSON, saveJSON } from '../const';
@@ -32,14 +33,6 @@ import { search as runSearch, sitesFor } from '../services/SearchService';
  * 命名说明：不叫 useSearch，因为 useBrowse 里的地址栏搜索引擎选择器
  * （google/bing/duckduckgo）已经占用了那个名字，与此处无关。
  */
-
-export interface MagnetSearchState {
-    q: string;
-    /** 搜索分区：表站 or 里站。必选，UI 上是一组二选一分段控件 */
-    group: SiteGroup;
-    sort: SearchSort;
-    minSeeders: number;
-}
 
 const DEFAULT_QUERY: MagnetSearchState = {
     q: '',

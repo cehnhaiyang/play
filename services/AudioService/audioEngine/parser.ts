@@ -3,36 +3,14 @@ import {
     InstrumentDef, SequenceDef, EffectDef, Envelope, FilterDef, LFODef,
     ExpandedOscillatorType, SequenceCommand, MixTrack, FilterKind,
     EnvelopeCurve, ArpPattern, DrumName, NoteExpression, EffectType, LFOTarget,
-    ProgressionCommand, RunCommand,
+    ParseResult, ProgressionCommand, RunCommand, SPGWarning,
 } from '../../../meta';
 import { parseDuration, getMidi } from '../utils';
 import { getPreset, PRESET_NAMES } from './presets';
 import {
-    parseChordSymbol, voicingToPitches, VoicingStyle, CHORD_QUALITY_NAMES,
+    parseChordSymbol, voicingToPitches, CHORD_QUALITY_NAMES,
 } from './chords';
-
-/** 非致命提示。代码能编译，但某些写法大概率不是作者本意 */
-export interface SPGWarning {
-    message: string;
-    line: number;
-}
-
-export interface ParseResult {
-    instruments: Map<string, InstrumentDef>;
-    sequences: Map<string, SequenceDef>;
-    effects: EffectDef[];
-    mix: MixTrack[];
-    tempo: number;
-    masterVolumeConfig: number;
-    /** 调性（如 C / Am / F#），供 LLM 自查与 UI 显示 */
-    key: string;
-    /** 音阶类型 */
-    scale: string;
-    /** 摇摆量 0~1 */
-    swing: number;
-    /** 编译过程中收集的非致命提示 */
-    warnings: SPGWarning[];
-}
+import type { VoicingStyle } from '../../../meta';
 
 /* -------------------------------------------------------------------------- */
 /*                                  常量白名单                                  */

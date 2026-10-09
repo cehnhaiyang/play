@@ -1,5 +1,7 @@
 import { useState, useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import {
+    AcgSaveTask,
+    AcgSaveTaskStatus,
     AcgmhoChannelDef,
     AcgmhoGalleryItem,
     GalleryDownloadProgress,
@@ -12,25 +14,6 @@ import {
     getElectronAPI,
 } from '../meta';
 import { loadJSON, removeStored, saveJSON } from '../const';
-
-/* ========================================================================== */
-/*                             1. 类型定义与公共配置                           */
-/* ========================================================================== */
-
-export type AcgSaveTaskStatus = 'saving' | 'completed' | 'cancelled' | 'error';
-
-export interface AcgSaveTask {
-    /** 作品数字 ID（任务键） */
-    gid: string;
-    title: string;
-    totalFiles: number;
-    doneFiles: number;
-    percent: number;
-    status: AcgSaveTaskStatus;
-    message: string;
-    outDir?: string;
-    updatedAt: number;
-}
 
 interface ChannelCache {
     items: AcgmhoGalleryItem[];
