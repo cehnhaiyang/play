@@ -3614,7 +3614,10 @@ const StreamBubble: React.FC<{ content: string; reasoning: string }> = ({ conten
                 而这一步定稿后同一个组件会以折叠态出现在历史里 */}
             {reasoning && <ReasoningBlock text={reasoning} defaultOpen />}
 
-            <div className="whitespace-pre-wrap break-words rounded-xl rounded-tl-sm bg-white/6 px-2.5 py-2 text-[11px] leading-relaxed text-slate-200">
+            {/* 这一段在滚动区**之外**（它还没定稿，不该进 messages），
+                所以必须自己限高：不限的话，一段长回复会一路把输入框顶出屏幕 ——
+                而用户此刻正想打字叫停它。max-h 与内部的 overflow 一起兜住 */}
+            <div className="custom-scrollbar max-h-56 overflow-y-auto whitespace-pre-wrap break-words rounded-xl rounded-tl-sm bg-white/6 px-2.5 py-2 text-[11px] leading-relaxed text-slate-200">
                 {content || <span className="text-slate-600">…</span>}
                 <span className="ml-0.5 inline-block h-3 w-1.5 animate-pulse rounded-sm bg-indigo-400 align-text-bottom" />
             </div>
@@ -4974,15 +4977,17 @@ const AgentSidebar: React.FC<{
                         )}
                     </div>
 
-                    {/* 内容区。relative 是给"回到最新"那颗浮动按钮定位用的：
-                        它必须浮在滚动区之上，而不是把下面的消息挤走 */}
+                    {/* 内容区 */}
                     {activeTab === 'chat' ? (
-                        <div className="relative flex min-h-0 flex-1 flex-col px-3 pb-3">
-                            <div
-                                ref={scrollRef}
-                                onScroll={handleScroll}
-                                className="custom-scrollbar min-h-0 flex-1 space-y-2.5 overflow-y-auto py-2.5 pr-1"
-                            >
+                        <div className="flex min-h-0 flex-1 flex-col px-3 pb-3">
+                            {/* 滚动区自带定位上下文：'回到最新'要贴在**它的**底边，
+                                挂在外层的话会浮到下面的输入框上面去 */}
+                            <div className="relative flex min-h-0 flex-1 flex-col">
+                                <div
+                                    ref={scrollRef}
+                                    onScroll={handleScroll}
+                                    className="custom-scrollbar min-h-0 flex-1 space-y-2.5 overflow-y-auto py-2.5 pr-1"
+                                >
                                 {messages.length === 0 ? (
                                     <EmptyHint onPick={(text) => setInput((prev) => (prev.trim() ? prev : text))} />
                                 ) : (
@@ -4999,27 +5004,29 @@ const AgentSidebar: React.FC<{
                                     ))
                                 )}
 
-                                {busy && (
-                                    <div className="flex items-center gap-2 px-1 text-[10px] text-slate-500">
-                                        <Loader2 className="h-3 w-3 animate-spin" />
-                                        {status === 'thinking' ? '模型思考中…' : '正在页面里执行…'}
-                                    </div>
+                                    {busy && (
+                                        <div className="flex items-center gap-2 px-1 text-[10px] text-slate-500">
+                                            <Loader2 className="h-3 w-3 animate-spin" />
+                                            {status === 'thinking' ? '模型思考中…' : '正在页面里执行…'}
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* 回到最新。只在用户上翻离开底部时出现 ——
+                                    自动跟随变成有条件之后，这是唯一的回头路；
+                                    贴底时它是多余的，所以不常驻。
+                                    它属于**滚动区**这个定位上下文，所以写在这里。 */}
+                                {!following && (
+                                    <button
+                                        onClick={jumpToLatest}
+                                        className="absolute bottom-3 right-4 z-10 flex items-center gap-1 rounded-full border border-white/12 bg-slate-900/95 px-2.5 py-1 text-[10px] font-bold text-slate-300 shadow-[0_6px_20px_rgba(0,0,0,0.6)] backdrop-blur transition hover:border-indigo-400/40 hover:text-white"
+                                        title="回到最新一条，并恢复自动跟随"
+                                    >
+                                        <ChevronsRight className="h-3 w-3 rotate-90" />
+                                        回到最新
+                                    </button>
                                 )}
                             </div>
-
-                            {/* 回到最新。只在用户上翻离开底部时出现 ——
-                                自动跟随变成有条件之后，这是唯一的回头路；
-                                贴底时它是多余的，所以不常驻。 */}
-                            {!following && (
-                                <button
-                                    onClick={jumpToLatest}
-                                    className="absolute bottom-3 right-4 z-10 flex items-center gap-1 rounded-full border border-white/12 bg-slate-900/95 px-2.5 py-1 text-[10px] font-bold text-slate-300 shadow-[0_6px_20px_rgba(0,0,0,0.6)] backdrop-blur transition hover:border-indigo-400/40 hover:text-white"
-                                    title="回到最新一条，并恢复自动跟随"
-                                >
-                                    <ChevronsRight className="h-3 w-3 rotate-90" />
-                                    回到最新
-                                </button>
-                            )}
 
                             {/* 流式气泡：正在写但还没定稿的这一轮。
                 它不进 messages，定稿时（或中断时）才转成正式消息，避免列表里出现两份 */}
