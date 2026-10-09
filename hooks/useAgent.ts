@@ -9,8 +9,8 @@ import type {
     AgentUsage,
     AiChatMessage,
     AiUsage,
-    ElectronKbAPI,
     HeaderRule,
+    KbBridge,
     TamperRule,
     WebviewElement,
 } from '../meta';
@@ -81,6 +81,15 @@ const RESULT_LIMIT_BYTES = 32768;
  * 只会把整轮的调用费烧光，且每一步都要付一次钱。
  */
 const MAX_PROTOCOL_ERRORS = 3;
+
+/**
+ * 页面脚本单次执行超时（毫秒）。
+ *
+ * executeJavaScript 没有 abort：页面死循环时这个 Promise 永远不 settle，
+ * stop() 够不到它，主循环会卡死在"正在页面里执行…"。超时后按普通工具
+ * 失败回灌，模型能读到原因并换路，用户点停止也不会卡住。
+ */
+const EXEC_TIMEOUT_MS = 60000;
 
 /**
  * 单条推理文本的落盘上限（字节）。
@@ -450,7 +459,7 @@ const SYSTEM_PROMPT = `
 - 页面环境共享：你的 JS 与页面主世界共享内存、Cookie、全局变量及已登录状态。
 
 ## 对话历史
-你**能看到之前几轮的对话与工具结果**，它们按前缀区分来源：[工具 X 的执行结果] 是你自己调用工具拿到的观察，[自动脚本「…」…] 是页面自动执行留下的环境事件（不是你调用的），[用户手动执行了脚本「…」] 是用户自己点按钮跑的一次（同样不是你调用的，但它说明用户刚亲手确认过这段脚本），[系统提示] 是界面补的、不是你说过的话。别把后三者当成自己的结论。
+你**能看到之前几轮的对话与工具结果**，它们按前缀区分来源：[工具 X 的执行结果] 是你自己调用工具拿到的观察，[自动脚本「…」…] 是页面自动执行留下的环境事件（不是你调用的），[用户手动执行了脚本「…」] 是用户自己点按钮跑的一次（同样不是你调用的，但它说明用户刚亲手确认过这段脚本），[系统提示] 是界面补的、不是你说过的话，[协议错误] 是你上一条回复没按协议输出时系统的回执。别把后四者当成自己的结论。
 
 ## 输出协议（严格执行）
 只输出单个合法的 JSON 对象，禁止输出 Markdown 围栏代码块（禁止使用 \`\`\`json）：
@@ -541,6 +550,15 @@ const requestTokensOf = (messages: AiChatMessage[]): number =>
 
 /** 上下文占用：按现存对话重建后的**下一次请求**输入量（硬门槛与界面显示共用） */
 const contextTokensOf = (messages: AgentMessage[]): number => requestTokensOf(buildTranscript(messages));
+
+/**
+ * 上下文越线时给用户看的那句话。
+ *
+ * 两道闸门（send 入口、轮内每步）共用它：措辞分叉时用户会以为自己遇到的是
+ * 两件不同的事，而实际都只有一条出路（压缩或清空）。
+ */
+const contextFullMessage = (): string =>
+    `上下文已达 ${CONTEXT_LIMIT_TOKENS.toLocaleString()} token 上限，必须先压缩或清空对话才能继续。`;
 
 /**
  * 摘要器的系统提示词。
@@ -963,14 +981,6 @@ export interface AgentDeps {
     kb?: KbBridge;
 }
 
-/**
- * 知识库桥：preload 那套 API 里 Agent 只用得上读的两个。
- *
- * 从 meta 的接口**派生**而不是另写一份形状 —— 另写一份迟早与真桥分叉，
- * 而分叉的症状是 App 传进来的实参在类型上不兼容，只能靠断言压过去。
- */
-export type KbBridge = Pick<ElectronKbAPI, 'load' | 'read'>;
-
 export interface AgentState {
     messages: AgentMessage[];
     scripts: AgentScript[];
@@ -1361,15 +1371,6 @@ export const useAgent = (deps: AgentDeps): AgentState => {
      * 某一次失败不能把排在后面的全部卡死（与 server.js 的上游队列同一理由）。
      */
     const execQueueRef = useRef<Promise<unknown>>(Promise.resolve());
-
-    /**
-     * 页面脚本单次执行超时（毫秒）。
-     *
-     * executeJavaScript 没有 abort：页面死循环时这个 Promise 永远不 settle，
-     * stop() 够不到它，主循环会卡死在"正在页面里执行…"。超时后按普通工具
-     * 失败回灌，模型能读到原因并换路，用户点停止也不会卡住。
-     */
-    const EXEC_TIMEOUT_MS = 60000;
 
     const execOn = useCallback(async (webview: WebviewElement, code: string): Promise<string> => {
         const task = async (): Promise<string> => {
@@ -2052,10 +2053,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
          * 的是它创建那一刻的快照；messagesRef 由 effect 持续同步，永远是当前值。
          */
         if (contextTokensOf(messagesRef.current) >= CONTEXT_LIMIT_TOKENS) {
-            setError(
-                `上下文已达 ${CONTEXT_LIMIT_TOKENS.toLocaleString()} token 上限，`
-                + '必须先压缩或清空对话才能继续。'
-            );
+            setError(contextFullMessage());
             return;
         }
 
@@ -2091,14 +2089,11 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                     appendMessage({
                         id: generateId(),
                         role: 'assistant',
-                        content: `本轮上下文已达 ${CONTEXT_LIMIT_TOKENS.toLocaleString()} token 上限，已停止。请先压缩或清空对话，再让我继续。`,
+                        content: `本轮${contextFullMessage()}`,
                         notice: true,
                         at: Date.now(),
                     });
-                    setError(
-                        `上下文已达 ${CONTEXT_LIMIT_TOKENS.toLocaleString()} token 上限，`
-                        + '必须先压缩或清空对话才能继续。'
-                    );
+                    setError(contextFullMessage());
                     break;
                 }
 

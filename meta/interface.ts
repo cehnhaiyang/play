@@ -1514,15 +1514,25 @@ export interface KbReadPayload {
 }
 
 /**
+ * 知识库的取数桥：渲染层唯一需要主进程配合的两个动作。
+ *
+ * `load` 一次读完整个库（约 3MB），渲染层长期驻留索引，之后检索不再往返 IPC；
+ * `read` 按需取单篇正文。解析 / 检索 / 切片全在 services/KbService（纯 TS，可单测），
+ * 主进程只搬字节 —— 所以这里没有第三条"顺便算一下"的方法。
+ */
+export interface KbBridge {
+    load: () => Promise<KbLoadPayload>;
+    read: (path: string) => Promise<KbReadPayload>;
+}
+
+/**
  * Electron 注入到渲染层的知识库 API。
  *
- * 主进程只搬字节，解析 / 检索 / 切片全在 services/KbService（纯 TS，可单测）。
+ * 比取数桥多两条：状态查询与换路径（面板用得上，Agent 用不上）。
+ * 形状上**显式声明为 KbBridge 的超集**，这样 `electronAPI.kb` 能直接当桥传给
+ * useAgent —— 少了这层关系，App 那侧就只能靠断言或另写一份形状压过去。
  */
-export interface ElectronKbAPI {
-    /** 整库一次读完（约 3MB）。渲染层长期驻留，之后检索不再往返 IPC */
-    load: () => Promise<KbLoadPayload>;
-    /** 读单篇正文 */
-    read: (path: string) => Promise<KbReadPayload>;
+export interface ElectronKbAPI extends KbBridge {
     /** 轻量状态：根目录 / 篇数 / 是否就绪 */
     status: () => Promise<KbStatus>;
     /** 保存 kb 根目录，返回里带新的 status */

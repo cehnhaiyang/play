@@ -1789,11 +1789,12 @@ const run = async () => {
             msg({ role: 'tool', label: 'js', result: 'r' }),
             msg({ role: 'tool', content: '自动执行：x', origin: 'auto', result: 'r' }),
             msg({ role: 'tool', content: '手动执行：y', origin: 'manual', result: 'r' }),
+            msg({ role: 'tool', label: '协议错误', result: '我忘了写 JSON', ok: false }),
             msg({ role: 'assistant', content: '提示', notice: true }),
         ]).map((m) => m.content).join('\n');
 
         // 界面补的提示前缀写作 [系统提示]（带右括号），提示词里也是这么写的
-        for (const prefix of ['[工具 ', '[自动脚本', '[用户手动执行了脚本', '[系统提示]']) {
+        for (const prefix of ['[工具 ', '[自动脚本', '[用户手动执行了脚本', '[系统提示]', '[协议错误]']) {
             assert(produced.includes(prefix), `实现应写出 ${prefix}（本断言已失效，需更新）`);
             assert(spec.includes(prefix), `提示词必须声明 ${prefix}，否则模型不知道那是历史`);
         }
@@ -2968,9 +2969,27 @@ const run = async () => {
             '被拒绝的提问不得进对话流');
     });
 
+    /**
+     * 两道闸门（send 入口、轮内每步）给用户看的必须是**同一句话**。
+     *
+     * 措辞分叉时，用户会以为自己遇到的是两件不同的事，而实际都只有一条出路。
+     * 所以文案只能由 contextFullMessage 一个函数产出。
+     */
+    await check('两道门槛共用同一句文案', async () => {
+        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        assert(/const contextFullMessage = \(\): string =>/.test(src),
+            '越线文案必须由具名函数产出');
+        const uses = src.match(/contextFullMessage\(\)/g) || [];
+        assert(uses.length === 3,
+            `两处 setError 与轮内那条提示都应调它（声明处除外），实际 ${uses.length} 处`);
+        // 文案本体只应出现一次 —— 就是 contextFullMessage 里那一份
+        const bodies = src.match(/上下文已达 \$\{CONTEXT_LIMIT_TOKENS/g) || [];
+        assert(bodies.length === 1,
+            `不得再手写第二份越线文案，实际 ${bodies.length} 处`);
+    });
+
     /** 门槛是 >= 而不是 >：正好等于时也要拦住 */
-    await check('正好等于门槛时也拦住（>= 语义）', async () => {
-        const h = buildAgentHarness();
+    await check('正好等于门槛时也拦住（>= 语义）', async () => {        const h = buildAgentHarness();
         // 用中文字符凑一个刚好到门槛的上下文。estimateTokens 对 CJK 是 1.5 字符/token，
         // 所以要 n 个 token 就写 ceil(n * 1.5) 个汉字。
         const chars = Math.ceil(CONTEXT_LIMIT_TOKENS * 1.5);
