@@ -2486,7 +2486,16 @@ const run = async () => {
         const src = fs.readFileSync(SRC_PATH, 'utf8');
         const at = src.indexOf('## 执行准则');
         assert(at > 0, '应有「执行准则」一节');
-        const section = src.slice(at, src.indexOf('## 完成标准', at));
+        /**
+         * 这一节是提示词的**最后一节**，所以收尾锚点取模板字符串的结束符，
+         * 不是下一个 `## ` —— 它后面已经没有别的标题了。
+         *
+         * 原先锚的是 `## 完成标准`，而那一节早就并进「执行准则与硬约束」了：
+         * indexOf 返回 -1，slice(at, -1) 直接切到文件末尾。断言看着在跑，
+         * 实际把整份源码都当成了"这一节"—— 几条否定断言（如"旧说法必须删掉"）
+         * 因此永远为真，等于没测。所以下面先把锚点存在性钉住。
+         */
+        const section = src.slice(at, src.indexOf('`;', at));
         assert(/更换策略/.test(section), '必须要求同一招失败两次就换路（死胡同里每步都要付一次调用费）');
         assert(/不是任务的终点/.test(section), '必须声明失败只是这一步的结果，否则模型失败一两次就含糊收尾');
         assert(!/再动手取数据/.test(section), '旧的"先数数再取数"必须删掉（与一次拿够矛盾）');

@@ -32,7 +32,7 @@ const check = (name, fn) => {
 
 const run = () => {
   const aiService = require(path.join(BUILD, 'services', 'AiService.js'));
-  const { AI_PROVIDERS, resolveReasoningEffort, findAiModelPreset, findAiProvider, getModelPresets } = aiService;
+  const { AI_PROVIDERS, DEFAULT_AI_CONFIG, resolveReasoningEffort, findAiModelPreset, findAiProvider, getModelPresets } = aiService;
 
   const byId = (id) => AI_PROVIDERS.find((p) => p.id === id);
   const TC = byId('tc2api').baseUrl;
@@ -131,9 +131,20 @@ const run = () => {
       '未知地址应兜底给第一个服务商的候选');
   });
 
-  check('候选: tc2api 的三个模型候选与默认配置同源', () => {
+  /**
+   * 默认模型必须能在预设表里查到 —— 否则 resolveReasoningEffort 会落到
+   * "预设表外的模型"那条回落分支，档位映射静默失效（不再报错，只是不下发）。
+   *
+   * 原先这里把三个候选 id 逐个抄进断言，模型表一改就必然过期 ——
+   * 而它要钉的从来不是"表里有哪几个名字"，是"默认配置与候选表同源"。
+   */
+  check('候选: tc2api 的首个候选与默认配置同源，且默认模型在预设表内', () => {
     const ids = getModelPresets(TC).map((m) => m.id);
-    assert.deepStrictEqual(ids, ['global:deepseek-v4.1-flash', 'deepseek-v4.1-flash', 'global:glm-5.2']);
+    assert(ids.length > 0, 'tc2api 应有模型候选');
+    assert.strictEqual(ids[0], DEFAULT_AI_CONFIG.model,
+      `首个候选应与默认配置的模型一致，实际 ${ids[0]} vs ${DEFAULT_AI_CONFIG.model}`);
+    assert(findAiModelPreset(TC, DEFAULT_AI_CONFIG.model),
+      `默认模型 ${DEFAULT_AI_CONFIG.model} 必须在预设表里，否则档位映射会静默失效`);
   });
 
   console.log(`AI 服务商与档位映射：通过 ${passed} 项，失败 ${failed} 项`);

@@ -155,7 +155,10 @@ const run = () => {
         const floatingSrc = fs.readFileSync(path.join(ROOT, 'components', 'Floating.tsx'), 'utf8');
         assert(/useSyncExternalStore\(subscribe, getLogVersion\)/.test(floatingSrc),
             '没有用 useSyncExternalStore 订阅 —— 每次渲染都重读全量');
-        assert(/if \(!activeRef\.current\) return \(\) => \{\};/.test(floatingSrc),
+        // 判据是"订阅被 activeRef 门控、隐藏时返回空退订函数"，不是大括号之间
+        // 有没有空格 —— 原先写成 `() => {}` 的严格字面量，产品把空格排版成
+        // `() => { }` 就报"订阅没有门控"，而门控其实一直都在。
+        assert(/if \(!activeRef\.current\) return \(\) => \{\s*\};/.test(floatingSrc),
             '订阅没有拿 activeRef 门控 —— 隐藏面板也会被每条日志重渲染');
         assert(/<LogsFloating active=\{logsActive\}/.test(floatingSrc), 'logsNode 没有传 active');
     });
