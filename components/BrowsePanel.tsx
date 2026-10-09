@@ -3759,7 +3759,11 @@ const MessageRow: React.FC<{
                     <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-white/8">
                         <AlertCircle className="h-3.5 w-3.5 text-slate-500" />
                     </div>
-                    <div className="min-w-0 flex-1">
+                    <div className="min-w-0 flex-1 space-y-1.5">
+                        {/* 中断那一条**带着模型已经流出的推理**（见 send 的中止分支）：
+                            它恰恰是"它当时在想什么"的唯一记录，不能因为这条被降级成
+                            旁注就一起丢掉 */}
+                        {message.reasoning && <ReasoningBlock text={message.reasoning} />}
                         <p className="rounded-xl border border-dashed border-white/12 bg-white/[0.02] px-2.5 py-2 text-[10px] italic leading-relaxed text-slate-500">
                             {message.content}
                         </p>
