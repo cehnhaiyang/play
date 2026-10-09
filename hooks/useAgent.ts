@@ -1019,8 +1019,6 @@ export interface AgentState {
          * 界面只会从 COMPACT_RATIOS 里选，这里是防手写调用传错。
          */
         setCompactRatio: (ratio: number) => void;
-        /** 手动执行一段脚本（界面上直接跑，不进对话） */
-        runScript: (code: string) => Promise<string>;
         /**
          * 丢弃知识库索引缓存。
          *
@@ -2402,8 +2400,6 @@ export const useAgent = (deps: AgentDeps): AgentState => {
         return prompt;
     }, []);
 
-    const runScript = useCallback((code: string) => execActive(code), [execActive]);
-
     /**
      * 手动执行一条已保存脚本。记账与自动执行对齐（lastRunAt / lastResult / tool
      * 消息），界面上的"最近执行"与"返回值"对两种触发方式一致 —— 否则手动点的那次
@@ -2480,9 +2476,9 @@ export const useAgent = (deps: AgentDeps): AgentState => {
     }), [deps.onPageReady, execOn, appendMessage]);
 
     const actions = useMemo(() => ({
-        send, stop, clear, compact, setCompactRatio, runScript, runScriptNow, removeScript, toggleScript,
+        send, stop, clear, compact, setCompactRatio, runScriptNow, removeScript, toggleScript,
         removeMessage, rewindTo, resetKbCache,
-    }), [send, stop, clear, compact, setCompactRatio, runScript, runScriptNow, removeScript, toggleScript, removeMessage, rewindTo, resetKbCache]);
+    }), [send, stop, clear, compact, setCompactRatio, runScriptNow, removeScript, toggleScript, removeMessage, rewindTo, resetKbCache]);
 
     /**
      * 会话用量与两个闸门判据。
