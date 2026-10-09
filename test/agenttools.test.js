@@ -140,6 +140,41 @@ const loadBuildTranscript = () => {
 
 const { buildTranscript, insertAfterId, COMPACT_PREFIX, CONTEXT_LIMIT_TOKENS } = loadBuildTranscript();
 
+/**
+ * Markdown 渲染器里那两个**纯**判定函数。
+ *
+ * 表格识别是这里唯一会"猜错就吃掉正文"的地方：把一段普通文本误判成表格，
+ * 那一行就会以单元格的形式散开。所以单独把判据抽出来直接喂输入 ——
+ * 光断言源码里有 `<table` 证明不了它认不认得出真表格。
+ */
+const loadMarkdownHelpers = () => {
+    const src = fs.readFileSync(path.join(ROOT, 'components', 'BrowsePanel.tsx'), 'utf8');
+
+    /**
+     * 按**起始标记 + 第一个分号**切一个表达式体函数。
+     *
+     * 刻意不把函数体整行当结束标记：那样产品里换个写法（多加一个条件、
+     * 换个正则）就会让切片抛错、整套用例崩掉 —— 而那是排版变了，不是行为变了。
+     * 锚在"下一个分号"上，改写函数体不会碰到切片，只有真正的行为回归才会
+     * 让断言失败。
+     */
+    const grabExpr = (marker) => {
+        const start = src.indexOf(marker);
+        if (start < 0) throw new Error(`BrowsePanel.tsx 里找不到 ${marker}`);
+        const end = src.indexOf(';', start);
+        if (end < 0) throw new Error(`找不到 ${marker} 的结尾`);
+        return src.slice(start, end + 1);
+    };
+
+    const code = [
+        grabExpr('const isTableDivider = (line: string): boolean =>'),
+        grabExpr('const splitTableRow = (line: string): string[] =>'),
+    ].join('\n');
+    return new Function(`${strip(code)}\nreturn { isTableDivider, splitTableRow };`)();
+};
+
+const { isTableDivider, splitTableRow } = loadMarkdownHelpers();
+
 /* -------------------------------------------------------------------------- */
 /*                        端到端 harness：真跑 useAgent                        */
 /* -------------------------------------------------------------------------- */
@@ -3422,6 +3457,42 @@ const run = async () => {
         const streamBlock = src.slice(streamAt, streamAt + 900);
         assert(!/MarkdownBlock/.test(streamBlock),
             '流式气泡不得走 Markdown 渲染：那时流出来的还是 JSON 信封本身');
+    });
+
+    /**
+     * 表格判据必须**认得出真表格、且不误吞普通文本**。
+     *
+     * 这是整个渲染器里唯一"猜错就吃掉正文"的地方：把一段普通文本当成表格，
+     * 那一行会以单元格的形式散开。所以直接喂输入，而不是断言源码里有 `<table`。
+     */
+    await check('表格判据：认得出分隔行，不误判普通文本', async () => {
+        // 真分隔行：三种对齐写法都要认
+        for (const line of ['| --- | --- |', '|---|---|', '| :-- | :-: | --: |', '--- | ---']) {
+            assert(isTableDivider(line), `应认出分隔行：${line}`);
+        }
+
+        // 普通文本绝不能当成分隔行 —— 下面每一条都含 | 或 -，但都不是分隔行
+        for (const line of [
+            '| 字段 | 值 |',                 // 表头本身
+            '价格是 3-5 元',                  // 只有连字符
+            'a | b',                          // 只有竖线，没有横线
+            '| 2024-01-01 | 事件 |',          // 日期里的连字符
+            '说明：见 | 上面',
+            '- 列表项',                       // 列表不是表格
+            // 下面两条是**只由 | 与空白/冒号组成、但没有横线**的行。它们是
+            // "必须有 -" 这条判据的唯一守门用例：少了它们，把 /-/ 去掉的变异体
+            // 照样全绿（其余用例都靠中文字符把 charset 那关挡掉了）。
+            '| | |',
+            '|:|:|',
+        ]) {
+            assert(!isTableDivider(line), `不得把普通文本判成分隔行：${line}`);
+        }
+
+        // 单元格切分：首尾竖线是装饰，不去掉会多出两个空列
+        assert(splitTableRow('| a | b |').join(',') === 'a,b',
+            `首尾竖线应剥掉，实际 ${JSON.stringify(splitTableRow('| a | b |'))}`);
+        assert(splitTableRow('a | b').join(',') === 'a,b', '无首尾竖线也要切对');
+        assert(splitTableRow('|  |  |').join(',') === ',', '空单元格保留位置');
     });
 
     /**
