@@ -1,2 +1,0 @@
-"""ReverseLab local MCP helpers."""
-
