@@ -1,0 +1,79 @@
+config {
+  tempo: 50
+  master_gain: 0.75
+}
+
+define_instrument(name="abyssal_drone") {
+  // A deep, rumbling texture that feels like it's underwater or underground
+  wave: "sawtooth"
+  envelope: adsr(3.0, 1.0, 0.9, 4.0)
+  filter: lowpass(90, 2.0) // Very stifled, shifting cutoff
+  lfo: sine(freq=0.15, amount=40, target=filter) // Slow, breathing modulation
+  gain: 0.9
+  detune: 15 // Thick, unsettling detune
+}
+
+define_instrument(name="neurotic_pluck") {
+  // Sudden, sharp, dissonant sounds
+  wave: "square"
+  envelope: adsr(0.01, 0.2, 0.0, 0.4)
+  filter: bandpass(2000, 5.0) // Thin, piercing frequency
+  gain: 0.6
+  pan: -0.5
+  lfo: sawtooth(freq=8, amount=100, target=frequency) // Fast vibrato/panic
+}
+
+define_instrument(name="heartbeat") {
+  preset: "kick"
+  envelope: adsr(0.01, 0.3, 0.0, 0.2)
+  filter: lowpass(60, 0.5) // Sub-bass only
+  gain: 0.85
+}
+
+effect_chain {
+  distortion(amount=0.15) // Adds subtle grit/noise
+  delay(time=0.6, feedback=0.5, mix=0.3) // Disorienting echoes
+  reverb(decay=8.0, mix=0.5) // Massive, dark space
+}
+
+sequence(name="drone_bed", instrument="abyssal_drone") {
+  // The terror foundation using a Tritone interval (C to F#)
+  chord(["C1", "Gb1"], "1n");
+  chord(["C1", "Gb1"], "1n");
+  // Shift slightly down to increase tension
+  chord(["B0", "F1"], "1n");
+  chord(["B0", "F1"], "1n");
+}
+
+sequence(name="scares", instrument="neurotic_pluck") {
+  // Unpredictable, high-pitched stabs
+  rest("2n");
+  note("C6", "16n"); 
+  rest("4n");
+  
+  // Dissonant cluster
+  chord(["F5", "F#5"], "8n");
+  rest("2n");
+  rest("4n");
+  
+  note("Db6", "32n");
+  note("C6", "32n");
+  rest("1n");
+}
+
+sequence(name="pulse", instrument="heartbeat") {
+  // Irregular, slow pulse imitating a scared heart
+  note("C1", "4n");
+  rest("4n");
+  rest("2n");
+  
+  note("C1", "4n");
+  note("C1", "4n"); // Double beat
+  rest("2n");
+}
+
+mix {
+  track(source="drone_bed", time=0, loop=4)
+  track(source="pulse", time=0, loop=4)
+  track(source="scares", time=0, loop=4)
+}

@@ -1,0 +1,187 @@
+# 压抑恐怖 —— SPG 工程（按引擎实际语法重写并扩展）
+#
+# 骨架：三全音（C–Gb）长音 + 错拍心跳 + 神经质刺音 + 丧钟。
+# 除两条心跳外，每个声部都是 4 小节长（tempo 50 下 4 小节 = 19.2 秒），mix 的 loop
+# 才能严丝合缝地叠加；心跳只有 1 小节（4.8 秒），靠 loop=8 铺满同样长度。
+# 全曲 8 小节：长音与心跳铺满，刺音占第 3-6 小节，丧钟与加快的心率从第 5 小节起。
+
+config {
+  tempo: 50          # 慢到能听见"等待"，恐怖感主要来自这个速度
+  master_gain: 0.7
+  key: "Cm"
+  scale: "locrian"   # 含 b2 与 b5：小二度与三全音是恐惧的两个音程来源（末尾和弦借用了一个 b5 之外的 E）
+  swing: 0.12        # 极轻的摇摆，让偏拍的音站不稳
+}
+
+# 深渊长音：振幅 / 滤波 / 慢速 LFO 三层包络叠出"呼吸"的错觉
+define_instrument(name="abyss_drone") {
+  wave: "sawtooth"
+  envelope: "adsr(3.5, 2.0, 0.92, 6.0, curve=linear)"
+  filter: "lowpass(160, 3.5)"
+  filter_envelope: "adsr(4.0, 3.0, 0.75, 6.0, curve=linear)"
+  filter_env_amount: 240        # 每个和弦自己"开一次口"，4 秒才亮到顶
+  lfo: "sine(freq=0.13, amount=55, target=filter, ramp=4.0)"
+  detune: 14
+  voices: 3                     # 三层失谐锯齿：音墙而非单音
+  unison_spread: 22
+  spread: 0.7                   # 声部左右铺开，低频不再挤在正中
+  gain: 0.5
+  effect_chain { reverb(decay=8.0, mix=0.45, damping=2200) }
+}
+
+# 次低频压力：每个音都从下方五度滑上来，像胸腔被慢慢压住
+define_instrument(name="pressure") {
+  wave: "sine"
+  envelope: "adsr(2.5, 1.5, 0.85, 5.0, curve=linear)"
+  glide: 0.9
+  glide_from: -7
+  gain: 0.6
+  lfo: "sine(freq=0.09, amount=0.3, target=gain, ramp=3.0)"
+}
+
+# 神经质刺音：极短的 perc 包络 + 高 Q 带通 + 快速颤音，专做"抽气"式的惊吓
+define_instrument(name="nerve_stab") {
+  wave: "square"
+  envelope: "perc(0.001, 0.08, 0.05)"
+  filter: "bandpass(2400, 6)"
+  filter_envelope: "perc(0.001, 0.06, 0.03)"
+  filter_env_amount: 2800
+  lfo: "sawtooth(freq=7.5, amount=45, target=frequency, ramp=0.02)"
+  attack_noise: 0.3             # 起音处的噪声爆发：刺进来的那一下
+  pan: -0.35
+  gain: 0.5
+  effect_chain {
+    delay(time="16n", feedback=0.38, mix=0.3, damping=2600)
+    reverb(decay=3.2, mix=0.4, damping=4200)
+  }
+}
+
+# 呼吸：粉噪声本身无音高，带通中心由音符决定，再用极慢的 LFO 改音量
+define_instrument(name="breath") {
+  wave: "pink_noise"
+  envelope: "adsr(3.0, 2.0, 0.8, 4.0, curve=linear)"
+  filter: "lowpass(1200, 0.8)"
+  lfo: "sine(freq=0.07, amount=0.4, target=gain, ramp=2.5)"
+  gain: 0.35
+  pan: -0.25
+  effect_chain { reverb(decay=6.5, mix=0.55, damping=2400) }
+}
+
+# 丧钟：钟体预设 + 低通压暗，长延迟与长混响把尾音拖过下一小节
+define_instrument(name="toll") {
+  preset: "bell"
+  filter: "lowpass(2400, 0.7)"
+  gain: 0.42
+  pan: 0.3
+  effect_chain {
+    delay(time="4n.", feedback=0.42, mix=0.3, damping=1800)
+    reverb(decay=9.0, mix=0.6, pre_delay=0.04, damping=3000)
+  }
+}
+
+# 4 小节：C–Gb 三全音持续两小节，再整体下滑半音，张力始终不解决
+sequence(name="drone_bed", instrument="abyss_drone", gain=0.75) {
+  chord(["C2","Gb2"], "1n")
+  chord(["C2","Gb2"], "1n")
+  chord(["B1","F2"],  "1n")
+  chord(["Bb1","E2"], "1n")
+}
+
+# 4 小节：与长音同和声，但低八度，负责"身体能感觉到"的那部分
+sequence(name="pressure_swell", instrument="pressure", gain=0.7) {
+  note("C1",  "2n")
+  note("Gb1", "2n")
+  note("C1",  "2n")
+  note("F1",  "2n")
+  note("B0",  "2n")
+  note("F1",  "2n")
+  note("Bb0", "1n")
+}
+
+# 1 小节：真实心音是"咚—哒"两下，第二声更闷更弱；一小节两次，靠 mix 的 loop 重复
+sequence(name="heartbeat") {
+  hit("kick", "8n", tune=-4, decay=1.2, snap=0.15, velocity=1.0)
+  hit("kick", "8n", tune=-5, decay=0.7, tone=-400, velocity=0.42)
+  rest("4n")
+  hit("kick", "8n", tune=-3, decay=1.05, snap=0.1, velocity=0.8)
+  hit("kick", "8n", tune=-6, decay=0.65, tone=-400, velocity=0.35)
+  rest("4n")
+}
+
+# 1 小节：同样的"咚—哒"压成三组，音高上移、力度变小 —— 心率快了，人却没力气了
+# 每组占 1 拍（8n + 16n + 16n），三组之后补 1 拍休止，整段正好 4 拍
+sequence(name="heartbeat_fast") {
+  hit("kick", "8n",  tune=2,  decay=0.85, snap=0.1,  velocity=0.8)
+  hit("kick", "16n", tune=-1, decay=0.5,  tone=-350, velocity=0.35)
+  rest("16n")
+  hit("kick", "8n",  tune=2,  decay=0.85, snap=0.1,  velocity=0.75)
+  hit("kick", "16n", tune=-1, decay=0.5,  tone=-350, velocity=0.32)
+  rest("16n")
+  hit("kick", "8n",  tune=3,  decay=0.8,  snap=0.08, velocity=0.7)
+  hit("kick", "16n", tune=0,  decay=0.5,  tone=-350, velocity=0.3)
+  rest("16n")
+  rest("4n")
+}
+
+# 4 小节：长音之间留出真正的空白，噪声层才有"房间"的感觉
+sequence(name="breath_bed", instrument="breath", gain=0.8) {
+  note("C3",  "1n", velocity=0.5)
+  rest("8n")
+  note("Gb3", "2n.", velocity=0.42)
+  rest("4n")
+  note("B2",  "1n", velocity=0.48)
+  rest("4n")
+  note("F3",  "2n", velocity=0.38)
+  rest("8n")
+}
+
+# 4 小节：大段留白 + 突然的刺音。小二度簇与半音下行是最刺耳的两个动作
+sequence(name="nerve_scares", instrument="nerve_stab", gain=0.6) {
+  rest("2n.")
+  note("C6", "16n", velocity=1.0, accent=true)
+  rest("4n..")
+  chord(["F5","Gb5"], "16n", velocity=0.9, pan=0.5)
+  rest("4n..")
+  run(["C6","B5","Bb5","A5"], "32n", direction="down", velocity=0.75, pan=0.4)
+  rest("1n")
+  note("Bb5", "8n", velocity=0.8, gate=0.6)
+  rest("2n.")
+  chord(["C6","Db6"], "8n", velocity=1.0, accent=true, strum=0.15)
+  rest("8n")
+}
+
+# 4 小节：三次钟声，钟与钟之间用金属刮擦填空，最后一次落在循环末小节收束全曲
+sequence(name="bell_toll", instrument="toll", gain=0.85) {
+  note("C3", "2n", velocity=0.9)
+  hit("crash", "2n", decay=1.4, tone=-1800, velocity=0.2, pan=-0.6)
+  rest("2n")
+  note("Gb3", "2n", velocity=0.7)
+  rest("2n")
+  note("C3", "1n", velocity=0.85)
+  hit("ride", "2n", decay=1.6, tone=-900, velocity=0.16, pan=0.5)
+}
+
+# 分层进入：长音与心跳打底，刺音第 3 小节进，丧钟与快心率第 5 小节进
+mix {
+  track(source="drone_bed",      time=0,    loop=2, gain=0.9)
+  track(source="pressure_swell", time=0,    loop=2, gain=0.8)
+  track(source="heartbeat",      time=0,    loop=8, gain=0.95)
+  track(source="breath_bed",     time=0,    loop=2, gain=0.75, pan=-0.2, stagger=0.35)
+  track(source="nerve_scares",   time="2m", loop=1, gain=0.9)
+  track(source="bell_toll",      time="4m", loop=1, gain=0.85)
+  track(source="heartbeat_fast", time="4m", loop=4, gain=0.8)
+}
+
+# ---------------------------------------------------------------- 调参笔记
+# 1. 长音、心跳、呼吸三层都从第 0 秒起步，听起来却不整齐，靠的是两处刻意设计：
+#    呼吸层 0.35 秒的错位，以及各音序内部的休止——恐怖音乐最忌讳声部同时换音。
+# 2. mix 的 loop 是"再演一遍"：每次循环从上一遍的终点接续，不叠加错位。
+#    想做出"一遍比一遍更紧"要用多次 track，或用 stagger。
+# 3. 逐音符参数（velocity / pan / tune / decay / snap / accent …）写在括号里，
+#    是 note()、hit()、chord()、run() 这些指令的命名参数，不是独立指令。
+# 4. 音量是三级相乘：乐器 gain × 音序 gain × track gain。整体听着发闷或过载时，
+#    先调 config 的 master_gain，再动 track，最后才动乐器。
+# 5. 呼吸层的 stagger 让第二遍晚 0.35 秒起步，也因此比钟声多响 0.35 秒。
+#    这是刻意的余韵；想让全曲严格收在最后一次钟声上，删掉那行 track 的 stagger 即可。
+# 6. 想把"压抑"再压一层：把 abyss_drone 的 filter 频率降到 110 左右、
+#    把 nerve_stab 的 delay 反馈提到 0.5；想松开一点则反向调。

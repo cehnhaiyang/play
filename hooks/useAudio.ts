@@ -303,6 +303,13 @@ export const useAudio = ({
                 setAppState(AppState.READY);
             } catch (error: unknown) {
                 console.error('导出音频工程包失败:', error);
+                // 失败必须说出来。此前只写 console：渲染超时或分配失败时，
+                // 按钮转圈停下、界面回到就绪、什么都没下载，用户完全无从判断
+                // 是"还没开始"还是"已经失败了"。line 0 表示与具体某一行无关。
+                setParserError({
+                    message: error instanceof Error ? error.message : '导出失败，请重试',
+                    line: 0,
+                });
                 setAppState(AppState.ERROR);
             }
         },

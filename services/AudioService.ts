@@ -4036,9 +4036,14 @@ export class AudioSynthesizer {
   /** 生成混响脉冲响应 */
   private makeImpulse(ctx: BaseAudioContext, decay: number, damping: number): AudioBuffer {
     const rate = ctx.sampleRate;
-    const length = Math.max(1, Math.floor(rate * Math.max(0.05, decay)));
+    // decay 直接决定这次分配的大小，必须先夹住：`reverb(decay=600)` 这类写法
+    // 会申请 2 通道 × 44100×600 帧的缓冲（约 420MB）并在生成循环里跑上千万次，
+    // 表现就是导出/试听彻底卡死且没有任何报错。上限与 compile() 计算尾音时
+    // 用的是同一个常量，保证"留多长的尾"和"造多长的脉冲"不会各说各话。
+    const seconds = clamp(decay, 0.05, MAX_REVERB_DECAY, 2.0);
+    const length = Math.max(1, Math.floor(rate * seconds));
     const impulse = ctx.createBuffer(2, length, rate);
-    const rand = createRandom(0x1e5 + Math.floor(decay * 1000));
+    const rand = createRandom(0x1e5 + Math.floor(seconds * 1000));
     // 阻尼越高，脉冲高频衰减越快
     const lpCoef = clamp(damping / (ctx.sampleRate / 2), 0.02, 1, 0.3);
     for (let ch = 0; ch < 2; ch++) {
@@ -4962,8 +4967,25 @@ export class AudioSynthesizer {
 
 /** 效果尾音的额外预留时长 (秒) */
 const EFFECT_TAIL = 3.0;
+
+/** 混响脉冲长度上限（秒）。同时约束脉冲分配大小与尾音长度。 */
+const MAX_REVERB_DECAY = 12;
 /** 导出时的采样率 */
 const RENDER_SAMPLE_RATE = 44100;
+
+/**
+ * 离线渲染的时长上限。
+ *
+ * 渲染长度直接决定内存：立体声 32 位浮点缓冲约 8 字节/帧，再加 16 位 PCM
+ * 输出的 4 字节/帧，15 分钟就是 ~480MB。越过之后 Chromium 的分配会失败或
+ * 长时间无响应，而调用方只会看到一个永不结束的 Promise —— 表现为导出按钮
+ * 一直转圈且没有任何报错。这里提前拒绝，并说清是哪一步超了。
+ */
+const MAX_RENDER_SECONDS = 900;
+const MAX_RENDER_FRAMES = MAX_RENDER_SECONDS * RENDER_SAMPLE_RATE;
+
+/** 离线渲染的最长等待。超时说明渲染线程已卡死，不能让界面永远停在"导出中"。 */
+const RENDER_TIMEOUT_MS = 120_000;
 
 /**
  * 浏览器端音频引擎：编译 → 实时试听 / 离线导出。
@@ -5132,12 +5154,14 @@ export class BrowserAudioEngine {
 
       this.scheduledEvents = events;
       // 效果链会拖出尾音，导出时需要留出余量；混响 decay 可达十几秒，
-      // 固定 3 秒会把长尾硬生生切掉，这里按实际 decay 动态留（上限 12 秒）。
+      // 固定 3 秒会把长尾硬生生切掉，这里按实际 decay 动态留。
+      // 上限与 makeImpulse 共用同一个常量：脉冲实际只有那么长，
+      // 尾音留得比它更久只是在 WAV 末尾堆静音。
       const longestReverb = parsed.effects.reduce(
         (m, e) => (e.type === 'reverb' ? Math.max(m, e.decay) : m), 0
       );
       const tailRoom = parsed.effects.length > 0
-        ? Math.min(Math.max(EFFECT_TAIL, longestReverb), 12)
+        ? Math.min(Math.max(EFFECT_TAIL, longestReverb), MAX_REVERB_DECAY)
         : 0.5;
       this.totalDuration = totalDuration + tailRoom;
 
@@ -5247,6 +5271,13 @@ export class BrowserAudioEngine {
     const sampleRate = RENDER_SAMPLE_RATE;
     const length = Math.max(1, Math.ceil((this.totalDuration || 1) * sampleRate));
 
+    if (length > MAX_RENDER_FRAMES) {
+      const minutes = (length / sampleRate / 60).toFixed(1);
+      throw new Error(
+        `工程时长 ${minutes} 分钟，超过离线导出上限 ${MAX_RENDER_SECONDS / 60} 分钟。请缩短序列或分段导出。`
+      );
+    }
+
     const Win = window as unknown as {
       OfflineAudioContext?: typeof OfflineAudioContext;
       webkitOfflineAudioContext?: typeof OfflineAudioContext;
@@ -5287,8 +5318,27 @@ export class BrowserAudioEngine {
       () => { /* 离线渲染无需跟踪音源 */ }
     );
 
-    const renderedBuffer = await offlineCtx.startRendering();
+    const renderedBuffer = await this.renderWithTimeout(offlineCtx);
     return bufferToWave(renderedBuffer, length);
+  }
+
+  /**
+   * `startRendering()` 卡住时既不 resolve 也不 reject（渲染线程分配失败、
+   * 脉冲响应过长都会这样）。此时调用方的 await 永远挂着，界面停在"导出中"，
+   * 而导出期间工具栏是禁用的 —— 用户连重试都做不到。
+   * 加一个有界等待，把"永不结束"变成一条能读的错误。
+   */
+  private renderWithTimeout(ctx: OfflineAudioContext): Promise<AudioBuffer> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`离线渲染超时（${RENDER_TIMEOUT_MS / 1000} 秒未完成），已中止导出。请缩短工程后重试。`));
+      }, RENDER_TIMEOUT_MS);
+
+      ctx.startRendering().then(
+        (buffer) => { clearTimeout(timer); resolve(buffer); },
+        (err: unknown) => { clearTimeout(timer); reject(err); }
+      );
+    });
   }
 }
 

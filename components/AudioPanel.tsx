@@ -351,13 +351,23 @@ const CodeEditor: React.FC<CodeEditorProps> = ({ code, onChange, error }) => {
     // 于是无论把光标移到哪里都显示 0。这里把列一并算出来（1 起，与编辑器惯例一致）。
     const [currentCol, setCurrentCol] = useState(1);
 
-    // 同步滚动
+    /**
+     * 同步滚动。
+     *
+     * 可见的代码是 `pre` 那层，textarea 的字体色是 transparent（只留光标）。
+     * 因此两个轴都必须跟着 textarea 走：此前只同步 scrollTop，
+     * 拖横向滚动条时 textarea 确实在滚，但滚的是那层看不见的文字，
+     * 可见的 pre 纹丝不动 —— 表现为"横向滚动条完全没反应"。
+     * 行号槽只吃纵向滚动，横向不参与。
+     */
     const handleScroll = () => {
-        if (textareaRef.current && preRef.current && lineNumbersRef.current) {
-            const scrollTop = textareaRef.current.scrollTop;
+        if (!textareaRef.current) return;
+        const { scrollTop, scrollLeft } = textareaRef.current;
+        if (preRef.current) {
             preRef.current.scrollTop = scrollTop;
-            lineNumbersRef.current.scrollTop = scrollTop;
+            preRef.current.scrollLeft = scrollLeft;
         }
+        if (lineNumbersRef.current) lineNumbersRef.current.scrollTop = scrollTop;
     };
 
     // 跟踪光标位置来高亮当前行
@@ -572,7 +582,8 @@ const CodeEditor: React.FC<CodeEditorProps> = ({ code, onChange, error }) => {
                     {lineCount} 行
                 </span>
                 <span className="flex items-center gap-2">
-                    {error && <span className="text-rose-400/90">第 {error.line} 行有错</span>}
+                    {error && error.line > 0 && <span className="text-rose-400/90">第 {error.line} 行有错</span>}
+                    {error && error.line <= 0 && <span className="text-rose-400/90">运行错误</span>}
                     <span className="text-zinc-600">SPG 1.0</span>
                 </span>
             </div>
@@ -1879,20 +1890,28 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                                         <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
                                         <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500" />
                                     </span>
-                                    第 {parserError.line} 行出错
+                                    {/* line 0 表示错误与具体某行无关（如导出超时），
+                                        此时报"第 0 行出错"会把用户引到一行不存在的代码上 */}
+                                    {parserError.line > 0 ? `第 ${parserError.line} 行出错` : '导出失败'}
                                 </span>
-                                {autoFixCount > 0 && (
+                                {autoFixCount > 0 && parserError.line > 0 && (
                                     <span className="font-mono text-[10px] text-amber-400" title="自动修复尝试次数">
                                         修复 {autoFixCount}/{MAX_AUTO_FIX}
                                     </span>
                                 )}
-                                <div className="h-4 w-px bg-rose-500/30" />
-                                <button
-                                    onClick={handleManualFix}
-                                    className="flex items-center gap-1 text-xs font-bold text-rose-200 transition-colors hover:text-white"
-                                >
-                                    <SparklesIcon className="w-3 h-3" /> 立即修复
-                                </button>
+                                {/* 只有语法错误才谈得上"修复"：导出超时、环境不支持这类
+                                    错误交给模型，只会让它去改一段本身没问题的代码 */}
+                                {parserError.line > 0 && (
+                                    <>
+                                        <div className="h-4 w-px bg-rose-500/30" />
+                                        <button
+                                            onClick={handleManualFix}
+                                            className="flex items-center gap-1 text-xs font-bold text-rose-200 transition-colors hover:text-white"
+                                        >
+                                            <SparklesIcon className="w-3 h-3" /> 立即修复
+                                        </button>
+                                    </>
+                                )}
                             </div>
                         ) : (
                             <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border transition-colors ${isPlaying ? 'bg-emerald-950/40 border-emerald-500/30' : 'bg-white/[0.03] border-white/8'
@@ -1999,7 +2018,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                                     <span className="h-2 w-2 rounded-full bg-cyan-400/60" />
                                     script.spg
                                 </span>
-                                {parserError && (
+                                {parserError && parserError.line > 0 && (
                                     <span className="font-mono text-[10px] text-rose-400/90">
                                         编译失败
                                     </span>
