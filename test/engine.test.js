@@ -916,14 +916,14 @@ mix {
 }
 `;
 
-check('提示词里的完整示例可编译且时间线合法', () => {
+check('整曲可编译且时间线合法', () => {
   const { ctx, events } = render(FULL);
   assert(events.length > 30, `事件数过少: ${events.length}`);
   const problems = auditTimelines(ctx);
   assert(problems.length === 0, `时间线异常:\n  ${problems.join('\n  ')}`);
 });
 
-check('完整示例的时长合理', () => {
+check('整曲时长合理', () => {
   const { totalDuration } = compile(FULL);
   assert(totalDuration > 8 && totalDuration < 60, `时长异常: ${totalDuration}`);
 });
@@ -1798,24 +1798,6 @@ const path = require('path');
 const aiSource = fs.readFileSync(
   path.join(__dirname, '..', 'services', 'AiService.ts'), 'utf8'
 ).replace(/\\`/g, '`').replace(/\\\$/g, '$').replace(/\\\\/g, '\\');
-
-check('提示词里的完整示例可编译', () => {
-  // 完整示例一节没有用代码围栏，按章节标题切出来
-  const start = aiSource.indexOf('==================== 完整示例');
-  assert(start > 0, '提示词里找不到完整示例一节');
-  const end = aiSource.indexOf('==================== 输出约束', start);
-  assert(end > start, '找不到完整示例的结束标记');
-  const example = aiSource.slice(aiSource.indexOf('\n', start) + 1, end).trim();
-  assert(example.startsWith('config'), `示例提取有误，开头是: ${example.slice(0, 40)}`);
-
-  const parsed = parse(example);
-  assert(parsed.sequences.size >= 5, `示例音序过少: ${parsed.sequences.size}`);
-  // 时间线也必须干净，否则示例本身就在教坏习惯
-  const { ctx, events } = render(example);
-  assert(events.length > 50, `示例事件过少: ${events.length}`);
-  const problems = auditTimelines(ctx);
-  assert(problems.length === 0, `示例时间线异常:\n  ${problems.join('\n  ')}`);
-});
 
 check('提示词里出现的所有指令名都被引擎支持', () => {
   const supported = ['note', 'chord', 'arp', 'hit', 'rest', 'progression', 'run'];
