@@ -4,27 +4,30 @@
   "version": "0.1.0",
   "description": "浏览器侧的嗅探、Agent 与篡改工具；重活（播放、BT、ffmpeg、落盘）交给本机 The Play 应用。",
   "minimum_chrome_version": "116",
+
   "background": {
     "service_worker": "service-worker.js",
     "type": "module"
   },
+
   "action": {
-    "default_title": "The Play"
+    "default_title": "The Play（点击打开侧边栏）"
   },
+
   "side_panel": {
     "default_path": "panel.html"
   },
+
   "permissions": [
     "sidePanel",
     "storage",
     "tabs",
-    "scripting",
     "webRequest",
     "webNavigation",
     "cookies",
-    "downloads",
-    "nativeMessaging"
+    "downloads"
   ],
+
   "host_permissions": [
     "<all_urls>"
   ]

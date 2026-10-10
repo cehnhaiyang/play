@@ -65,9 +65,12 @@ const main = async () => {
   console.log('\n=== 插件嗅探分类 ===');
   const extSnifferOk = require('./extsniffer.test.js').run();
 
+  console.log('\n=== 插件产物自检 ===');
+  const manifestOk = require('./manifest.test.js').run();
+
   if (!engineOk || !compatOk || !aibookOk || !aiproviderOk || !searchSyncOk || !searchAsyncOk
     || !mainStaticOk || !agentToolsOk
-    || !logsOk || !bridgeOk || !extSnifferOk) {
+    || !logsOk || !bridgeOk || !extSnifferOk || !manifestOk) {
     process.exitCode = 1;
     console.log('\n存在失败用例。');
   } else {

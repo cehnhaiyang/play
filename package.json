@@ -10,8 +10,9 @@
         "electron:dev": "concurrently -k \"vite\" \"wait-on tcp:5173 && electron .\"",
         "electron:build": "vite build && electron-builder",
         "test:spg": "node test/index.js",
-        "ext:build": "vite build --config extension/vite.config.mts",
+        "ext:build": "vite build --config extension/vite.config.mts && node test/manifest.test.js",
         "ext:dev": "vite build --config extension/vite.config.mts --watch",
+        "ext:check": "node test/manifest.test.js",
         "ext:typecheck": "tsc --noEmit -p extension/tsconfig.json"
     },
     "dependencies": {
