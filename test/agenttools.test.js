@@ -275,7 +275,6 @@ const buildAgentHarness = (options = {}) => {
     };
 
     const CONST = require('./build/const.js');
-    const KBSVC = require('./build/services/KbService/index.js');
     const fakeWindow = { setTimeout: () => 1, clearTimeout: () => {} };
 
     // 去掉 import（类型导入 strip 后已消失）与 export；
@@ -286,16 +285,13 @@ const buildAgentHarness = (options = {}) => {
         'const { buildCookieKeys, collectDroppedRules, decodeJwt, findCookieByKey, generateId, pickJwtCandidates, rewriteJwtPayload } = Const;',
         // loadJSON / saveJSON 用测试自己的内存桩顶掉，免得落到真的 localStorage
         'const { loadJSON, saveJSON } = persist;',
-        // useAgent 从 KbService 具名导入五个符号，其中 KB_SEARCH_LIMIT 还要插值进
-        // 提示词模板 —— 漏注入会在求值时直接抛 ReferenceError，而不是某条断言失败。
-        'const { buildKbIndex, normalizeRel, readKbArticle, searchKb, KB_SEARCH_LIMIT } = KbService;',
     ].join('\n') + '\n'
         + strip(SRC)
             .replace(/^import[\s\S]*?from\s+'[^']*';\s*$/gm, '')
             .replace(/^export /gm, '');
 
     const makeAgent = new Function(
-        'React', 'AiService', 'Const', 'persist', 'KbService', 'window', 'TextEncoder',
+        'React', 'AiService', 'Const', 'persist', 'window', 'TextEncoder',
         `${body}\nreturn useAgent;`,
     );
 
@@ -367,7 +363,7 @@ const buildAgentHarness = (options = {}) => {
 
     // estimatePromptTokens 用**编译产物**（build/services/AiService.js），
     // 与产品同源：hook 拿它算上下文占用，测试自己重写一份就测不到真实口径了
-    const factory = makeAgent(ReactProxy, { chat, estimatePromptTokens: AI.estimatePromptTokens }, CONST, persist, KBSVC, fakeWindow, TextEncoder);
+    const factory = makeAgent(ReactProxy, { chat, estimatePromptTokens: AI.estimatePromptTokens }, CONST, persist, fakeWindow, TextEncoder);
 
     /**
      * 假 webview。默认**有页面**，需要造"没有可用页面"的用例传 webview:false。
@@ -455,7 +451,7 @@ const buildAgentHarness = (options = {}) => {
  * tamper 是个可观测的假引擎：applyRules / saveRules 分别记账，
  * 这样"有没有越界落盘"是可断言的。
  */
-const buildDispatch = (tamperState, scripts = [], webviewUrl = null, kbBridge = null) => {
+const buildDispatch = (tamperState, scripts = [], webviewUrl = null) => {
     const helpers = [
         grabBlock('const toRuleString = (value: unknown): string =>', "String(value));"),
         grabBlock('const STRICT_NUMBER_RE = ', '/;'),
@@ -487,9 +483,6 @@ const useCallback = (fn) => fn;
 // buildCookieKeys / findCookieByKey 是 cookie 唯一键（面板与 tokens 工具共用），
 // 漏注入会让 tokens find 直接抛 ReferenceError —— 那是测试脚手架的错，不是产品代码的。
 const { decodeJwt, pickJwtCandidates, rewriteJwtPayload, collectDroppedRules, buildCookieKeys, findCookieByKey } = __CONST__;
-// 知识库检索：kb 分支要调 buildKbIndex / searchKb / readKbArticle / normalizeRel，
-// 用**编译产物**而不是重写副本 —— 与产品同源
-const { buildKbIndex, normalizeRel, readKbArticle, searchKb, KB_SEARCH_LIMIT } = __KBSVC__;
 const asString = (v) => (typeof v === 'string' ? v : '');
 const generateId = () => 'gen-' + Math.random().toString(36).slice(2, 8);
 const SCRIPTS_STORE_MAX = 3;
@@ -534,23 +527,10 @@ const waitForPageReady = async () => true;
 const scriptsRef = { current: ${JSON.stringify(scripts)} };
 const setScripts = (fn) => { scriptsRef.current = fn(scriptsRef.current); };
 
-/**
- * 知识库缓存与失效令牌。
- *
- * 缓存对象的形状按产品代码搭（切片求值拿不到 useRef），但 **resetKbCache
- * 必须切产品代码那一份**：在这里重写一遍的话，测的是这个桩而不是产品 ——
- * 变异验证已经证明过这一点（把产品里的 cache.inflight = null 删掉，
- * 用桩的版本照样全绿）。
- */
-const kbCacheRef = { current: { entries: null, inflight: null, generation: 0 } };
-const kbBridgeRef = { current: __KB__ };
-
-${strip(grabBlock('const resetKbCache = useCallback(() => {', '}, []);'))}
-
 ${strip(dispatch)}
-return { dispatchTool, calls, tamperRef, scriptsRef, resetKbCache };
+return { dispatchTool, calls, tamperRef, scriptsRef };
 `;
-    return new Function('__CONST__', '__KB__', '__KBSVC__', body)(CONST, kbBridge || null, require('./build/services/KbService/index.js'));
+    return new Function('__CONST__', body)(CONST);
 };
 
 /* -------------------------------------------------------------------------- */
@@ -2268,7 +2248,7 @@ const run = async () => {
             webview: false,
             replies: [
                 JSON.stringify({ thought: '取数', tool: 'js', args: { action: 'R', code: 'return 1;' } }),
-                JSON.stringify({ thought: '页面不可用，改用知识库', final: '拿不到页面数据。' }),
+                JSON.stringify({ thought: '页面不可用，直接给结论', final: '拿不到页面数据。' }),
             ],
         });
         await h.send('取一下');
@@ -2636,132 +2616,20 @@ const run = async () => {
     });
 
     /**
-     * 提示词里引用的 KB 入口必须真的能搜到。
-     *
-     * 提示词教模型「不确定时先 search "攻击网"」，而攻击网那 4 篇文章是唯一
-     * 没有 front-matter 的（靠 H1 兜底取标题）。哪天索引规则一改把它们漏掉，
-     * 提示词就变成在教模型找一个不存在的东西 —— 而这条不会有任何报错。
-     */
-    await check('提示词推荐的「攻击网」入口确实可搜到', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
-        assert(src.includes('search "攻击网"'), '提示词应给出攻击网入口');
-
-        const KB = require('./build/services/KbService/index.js');
-        const kbService = require(path.join(ROOT, 'electron', 'kbService.js'));
-        const root = kbService.resolveKbRoot('');
-        if (!root) return; // 没有 KB 目录时跳过（CI / fresh clone）
-
-        const payload = kbService.loadKbSource('');
-        const entries = KB.buildKbIndex(payload.files, payload.boardIndexes);
-        const hits = KB.searchKb(entries, '攻击网');
-        assert(hits.length > 0, '「攻击网」必须能搜到，否则提示词在教模型找一个不存在的东西');
-        assert(hits.some((h) => h.path.includes('attack-network')),
-            `应命中 attack-network.md，实际 ${hits.map((h) => h.path).join(', ')}`);
-    });
-
-    /**
      * 提示词里的数字必须来自真值，不能手抄。
      *
-     * 踩过：`kb search 回最多 5 条` 与 `正文 ≤24KB` 都是手写的，
-     * 而真值在 KbService 的 KB_SEARCH_LIMIT / KB_READ_LIMIT_BYTES 里 ——
+     * 踩过：js 返回值上限曾经是手写的，而真值在 RESULT_LIMIT_BYTES 里 ——
      * 改了常量提示词不跟着变，模型就按错的上限规划步骤。
      */
-    await check('提示词用插值引用 KB 常量，不手抄数字', async () => {
+    await check('提示词用插值引用常量，不手抄数字', async () => {
         const src = fs.readFileSync(SRC_PATH, 'utf8');
-        assert(/\$\{KB_SEARCH_LIMIT\}/.test(src),
-            'search 条数上限应插值 KB_SEARCH_LIMIT，而不是写死');
         assert(/\$\{RESULT_LIMIT_BYTES \/ 1024\}KB/.test(src),
             'js 返回值上限应插值 RESULT_LIMIT_BYTES —— 手抄的 32KB 在常量改动后必然过期');
-        assert(!/search 回最多 \d+ 条/.test(src), '不得把条数上限手抄进提示词');
         assert(!/正文 ≤\d+KB/.test(src), '不得把正文上限手抄进提示词');
         assert(!/上限 \d+KB/.test(src), '不得把返回值上限手抄进提示词');
-        // 篇数同理：它会随 KB 升级变，写死必然过期
-        assert(!/知识库（\d+ 篇/.test(src), '不得把文章篇数写死 —— KB 升级后必然对不上');
     });
 
     /* --------------------------- 提示词：输出与参数契约 --------------------------- */
-
-    /* ------------------------------ 知识库缓存 ------------------------------ */
-
-    /**
-     * 换知识库路径后，Agent 那份索引必须失效。
-     *
-     * 这是"一个事实两个存放处"的又一处：面板有自己一份索引缓存，Agent 也有一份。
-     * 面板改路径时只清自己那份的话，界面显示新库、模型继续查旧库 ——
-     * 两边都看不出异常，而这正是最难查的一类故障。
-     */
-    await check('知识库换路径后重新加载，不沿用旧索引', async () => {
-        const loads = [];
-        const bridge = {
-            // 路径要满足 ARTICLE_PATH_RE（<板块>/techniques/*.md），否则
-            // buildKbIndex 会把这条当非文章路径滤掉，篇数恒为 0
-            load: async () => {
-                loads.push(1);
-                return { files: [{ path: 'web/techniques/a.md', content: '# 甲\n\n正文甲' }], boardIndexes: {} };
-            },
-            read: async () => ({ content: '' }),
-        };
-        const { dispatchTool, resetKbCache } = buildDispatch(
-            { intercept: [], request: [], headers: [], cookies: [], local: {}, session: {} },
-            [], null, bridge,
-        );
-
-        const first = j(await dispatchTool('kb', { action: 'status' }));
-        assert(first.articles === 1, `首次应读到 1 篇，实际 ${JSON.stringify(first)}`);
-        assert(loads.length === 1, `首次应加载一次，实际 ${loads.length} 次`);
-
-        // 再查一次：命中缓存，不得重新加载
-        await dispatchTool('kb', { action: 'status' });
-        assert(loads.length === 1, `命中缓存时不该重新加载，实际 ${loads.length} 次`);
-
-        // 用户换了知识库路径 → 面板调用 resetKbCache
-        resetKbCache();
-        await dispatchTool('kb', { action: 'status' });
-        assert(loads.length === 2,
-            `失效后必须重新加载，实际 ${loads.length} 次（缓存没被丢掉）`);
-    });
-
-    /**
-     * 加载在途时换路径：旧结果回来**不得盖住**新索引，且作废的在途 Promise
-     * 不得被下一次调用复用。
-     *
-     * 令牌比对的全部意义就在这里。不做这一步的话，第二次加载会因为
-     * "已经有在途 Promise"而复用旧路径那次，表现是"改了路径，搜索还是旧库的内容"，
-     * 刷新也修不好 —— 因为缓存已经被旧结果写死了。
-     */
-    await check('加载在途时换路径：旧结果不覆盖新索引', async () => {
-        let release;
-        const gate = new Promise((r) => { release = r; });
-        let calls = 0;
-        const loads = [];
-        const bridge = {
-            load: async () => {
-                calls += 1;
-                loads.push(calls);
-                if (calls === 1) await gate;
-                return { files: [], boardIndexes: {} };
-            },
-            read: async () => ({ content: '' }),
-        };
-        const { dispatchTool, resetKbCache } = buildDispatch(
-            { intercept: [], request: [], headers: [], cookies: [], local: {}, session: {} },
-            [], null, bridge,
-        );
-
-        // 第一次加载卡在途
-        const pending = dispatchTool('kb', { action: 'status' });
-
-        // 用户在此期间换了路径
-        resetKbCache();
-
-        release();
-        await pending;
-
-        // 失效之后必须能重新加载，而不是复用那次已经作废的在途 Promise
-        await dispatchTool('kb', { action: 'status' });
-        assert(loads.length === 2,
-            `换路径后应重新加载，实际 ${loads.length} 次（复用了作废的在途 Promise）`);
-    });
 
     await check('输出协议：无围栏直接贴 JSON，且 tool/final 互斥', async () => {
         const src = fs.readFileSync(SRC_PATH, 'utf8');

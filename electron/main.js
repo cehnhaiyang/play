@@ -1,8 +1,7 @@
 const { app, BrowserWindow, ipcMain, shell, webContents, dialog } = require('electron');
 const { probeGallery, downloadGallery, saveGalleryImages, fetchGalleryPages, normalizeGid, galleryTaskKey, galleryKeyMatches, GALLERY_CHANNELS, fetchChannelList, buildChannelListResult, channelListUrl, deriveListPageUrl, isCloudflareChallengePage, isCloudflareErrorPage, setUserAgent: pushUserAgentToSite } = require('./acgmhoService');
 const { fetchHtmlWithRealBrowser } = require('./externalBrowserSolver');
-const { getSettings, saveProxyPort, saveKbRoot, saveAiConfig, testAiConnection } = require('./settings');
-const { loadKbSource, readKbArticle, kbStatus } = require('./kbService');
+const { getSettings, saveProxyPort, saveAiConfig, testAiConnection } = require('./settings');
 const { detectEdgeProfiles, importEdgeData } = require('./edgeImportService');
 const {
     setupBrowserSession, setupBrowserIpc, attachBrowserInput, attachGuestExtras, guardWebviewAttach,
@@ -1588,7 +1587,6 @@ let galleryHandlersReady = false;
 let downloadHandlersReady = false;
 let torrentHandlersReady = false;
 let settingsHandlersReady = false;
-let kbHandlersReady = false;
 let edgeImportHandlersReady = false;
 
 // 搜索限流冷却：站点对搜索接口限流（实测约 10 次连续请求触发，超限返回
@@ -3319,7 +3317,6 @@ function createWindow() {
     setupTorrentHandlers();
     setupTorrentFileHandlers();
     setupSettingsHandlers();
-    setupKbHandlers();
     setupEdgeImportHandlers();
     // 浏览器外壳能力的 IPC（下载记录 / 下载操作）。窗口 getter 用闭包注入，
     // 不让 browserService 反向 require main.js —— 那会形成循环依赖，
@@ -3427,15 +3424,13 @@ function setupSettingsHandlers() {
     settingsHandlersReady = true;
 
     ipcMain.handle('settings-get', async () => {
-        const { proxyPort, ai, kbRoot } = getSettings();
+        const { proxyPort, ai } = getSettings();
         return {
             success: true,
             proxyPort,
             applied: getAcgmhoProxy() || '',
             proxyProtocol: getAcgmhoProxyProtocol() || '',
             ai,
-            kbRoot,
-            kb: kbStatus(kbRoot),
         };
     });
 
@@ -3460,34 +3455,6 @@ function setupSettingsHandlers() {
     // 传 null 表示这次不下发思考参数（服务商不需要思考，或用户选了「不思考」）
     ipcMain.handle('settings-test-ai-config', async (_event, value, reasoningEffort) => {
         return testAiConnection(value, reasoningEffort);
-    });
-}
-
-/**
- * 知识库 IPC。
- *
- * 主进程这一侧**只搬字节**：解析 front-matter、评分、切片全在渲染层的
- * services/KbService（纯 TS，可单测）。这里返回的东西就是磁盘上的原文，
- * 不做任何加工 —— 加工逻辑一旦分居两侧，两边迟早会漂移。
- */
-function setupKbHandlers() {
-    if (kbHandlersReady) return;
-    kbHandlersReady = true;
-
-    // 整库一次读完（248 个文件 / 约 3 MB）。渲染层把它长期驻留，
-    // 之后每次检索都在本地算，不再往返 IPC。
-    ipcMain.handle('kb-load', async () => loadKbSource(getSettings().kbRoot));
-
-    ipcMain.handle('kb-read', async (_event, relativePath) => {
-        return readKbArticle(getSettings().kbRoot, relativePath);
-    });
-
-    ipcMain.handle('kb-status', async () => kbStatus(getSettings().kbRoot));
-
-    // 保存路径后立刻回报新状态，界面不用再发一次 kb-status
-    ipcMain.handle('kb-set-root', async (_event, value) => {
-        const res = saveKbRoot(value);
-        return { ...res, status: kbStatus(getSettings().kbRoot) };
     });
 }
 

@@ -82,19 +82,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
         /** 暂停 / 继续 / 取消 / 在文件夹中显示 / 打开 / 从列表移除 */
         downloadAction: (id, action) => ipcRenderer.invoke('browser-download-action', { id, action }),
     },
-    // --- 知识库（open-reverselab 的 Markdown 文章） ---
-    // 主进程只负责把文件读出来；解析、检索、切片全在渲染层的 services/KbService，
-    // 所以这里是纯粹的字节搬运，没有任何业务判断。
-    kb: {
-        /** 整库一次读完（约 3MB）。渲染层长期驻留，之后检索不再往返 IPC */
-        load: () => ipcRenderer.invoke('kb-load'),
-        /** 读单篇正文。路径是 kb 根下的相对路径，形如 ctf-website/techniques/xx/yy.md */
-        read: (path) => ipcRenderer.invoke('kb-read', path),
-        /** 轻量状态：根目录 / 篇数 / 是否就绪 */
-        status: () => ipcRenderer.invoke('kb-status'),
-        /** 保存 kb 根目录，返回里带新的 status，界面不用再问一次 */
-        setRoot: (value) => ipcRenderer.invoke('kb-set-root', value),
-    },
     // --- Edge 数据导入（收藏夹 / 历史 / 图标 / 自动填充 / Cookie） ---
     // 两步：detect 只读文件大小与条目数（快、不会被锁影响），import 才开 SQLite
     // 与解密。Cookie 走纯离线解密（APPB → SYSTEM DPAPI → 主密钥，不启动 Edge），

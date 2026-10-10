@@ -62,9 +62,6 @@ const main = async () => {
   console.log('\n=== 规则草稿同步 ===');
   const draftOk = require('./draft.test.js').run();
 
-  console.log('\n=== 知识库 ===');
-  const kbOk = require('./kb.test.js').run();
-
   console.log('\n=== 浏览器外壳 ===');
   const browserOk = require('./browser.test.js').run();
 
@@ -80,7 +77,7 @@ const main = async () => {
   const edgeAsyncOk = await edgeMod.runAsync();
 
   if (!engineOk || !compatOk || !aibookOk || !aiproviderOk || !searchSyncOk || !searchAsyncOk
-    || !mainStaticOk || !tamperOk || !agentToolsOk || !draftOk || !kbOk || !browserOk
+    || !mainStaticOk || !tamperOk || !agentToolsOk || !draftOk || !browserOk
     || !snifferOk || !logsOk || !edgeOk || !edgeAsyncOk) {
     process.exitCode = 1;
     console.log('\n存在失败用例。');

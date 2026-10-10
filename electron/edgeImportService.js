@@ -8,7 +8,7 @@
  * ============================================================================
  *
  * 要读 Edge 的 SQLite 库与 JSON 文件，还要调 Win32 API 解 APPB 密钥 ——
- * 渲染层 nodeIntegration 关着，没有 fs、没有 child_process。边界与 kbService 一致：
+ * 渲染层 nodeIntegration 关着，没有 fs、没有 child_process。
  * 这里只负责「把数据取出来」，合并进书签树、去重、UI 呈现全在渲染层。
  *
  * 依赖只有 Node 内置：`node:sqlite`（Node 22.5+，Electron 44 的 Node 24 自带）

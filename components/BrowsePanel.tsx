@@ -78,16 +78,13 @@ import type {
     EdgeImportResult,
     EdgeAccountEntry,
     HeaderRule,
-    KbEntry,
-    KbSearchHit,
-    KbStatus,
     MergeStats,
     NavigationError,
     TamperRule,
     TamperState,
     WebviewElement,
 } from '../meta';
-import { getAppWindow, getElectronAPI } from '../meta';
+import { getElectronAPI } from '../meta';
 import {
     buildCookieData,
     collectDroppedRules,
@@ -109,10 +106,6 @@ import {
     flattenUrls,
     isDescendant,
 } from '../services/BookmarkService';
-import {
-    buildKbIndex,
-    searchKb,
-} from '../services/KbService';
 
 /**
  * 浏览器面板。
@@ -3979,201 +3972,10 @@ const ScriptList: React.FC<{
     );
 };
 
-/**
- * 知识库面板。
- *
- * 这是给**人**看的浏览入口 —— Agent 走的是 kb 工具，不经过这里。
- * 存在的理由是排查："模型说查不到"到底是没有这篇文章、还是路径配错了、
- * 还是检索词没命中。这三件事在这一个页面上就能分辨。
- *
- * 状态与取数全在主进程（kbService），这里只展示 + 提交路径。
- */
-const KbTab: React.FC<{ onIndexReset: () => void }> = ({ onIndexReset }) => {
-    const [status, setStatus] = useState<KbStatus | null>(null);
-    const [query, setQuery] = useState('');
-    const [hits, setHits] = useState<KbSearchHit[] | null>(null);
-    const [preview, setPreview] = useState<{ path: string; text: string } | null>(null);
-    const [draftRoot, setDraftRoot] = useState('');
-    const [saveMsg, setSaveMsg] = useState('');
-    const [busy, setBusy] = useState(false);
-
-    // 索引缓存与 Agent 那份相互独立：面板按需重建，不跟 Agent 的缓存共享，
-    // 否则"面板改了路径"与"Agent 还在用旧索引"会打架
-    const indexRef = useRef<KbEntry[] | null>(null);
-
-    const refresh = useCallback(async () => {
-        const api = getAppWindow().electronAPI?.kb;
-        if (!api) return;
-        const next = await api.status();
-        setStatus(next);
-        setDraftRoot(next.root || '');
-        // 路径变了就必须丢掉索引：否则搜索还在用旧库
-        indexRef.current = null;
-    }, []);
-
-    useEffect(() => { void refresh(); }, [refresh]);
-
-    const ensureIndex = useCallback(async (): Promise<KbEntry[]> => {
-        if (indexRef.current) return indexRef.current;
-        const api = getAppWindow().electronAPI?.kb;
-        if (!api) return [];
-        const payload = await api.load();
-        const built = buildKbIndex(payload?.files || [], payload?.boardIndexes || {});
-        indexRef.current = built;
-        return built;
-    }, []);
-
-    const runSearch = useCallback(async () => {
-        if (!query.trim()) return;
-        setBusy(true);
-        try {
-            const entries = await ensureIndex();
-            setHits(searchKb(entries, query, 20));
-            setPreview(null);
-        } finally {
-            setBusy(false);
-        }
-    }, [query, ensureIndex]);
-
-    const openArticle = useCallback(async (path: string) => {
-        const api = getAppWindow().electronAPI?.kb;
-        if (!api) return;
-        const payload = await api.read(path);
-        setPreview({ path, text: payload?.content || payload?.error || '(空)' });
-    }, []);
-
-    const applyRoot = useCallback(async () => {
-        const api = getAppWindow().electronAPI?.kb;
-        if (!api) return;
-        const res = await api.setRoot(draftRoot);
-        setSaveMsg(res.message || '');
-        setStatus(res.status);
-        indexRef.current = null;
-        // Agent 那份索引是独立缓存：只清面板自己这份的话，界面显示新库、
-        // 模型继续查旧库，两边都看不出异常（见 useAgent 的 resetKbCache）
-        onIndexReset();
-        setHits(null);
-        setPreview(null);
-    }, [draftRoot, onIndexReset]);
-
-    return (
-        <div className="space-y-2.5">
-            {/* 状态条：篇数与根目录。未就绪时明说原因，不显示"0 篇" —— 那会被读成库是空的 */}
-            <div className={`rounded-xl border px-2.5 py-2 ${status?.ready ? 'border-emerald-500/25 bg-emerald-950/25' : 'border-amber-500/25 bg-amber-950/25'}`}>
-                <div className="flex items-center gap-1.5">
-                    <BookOpen className={`h-3 w-3 shrink-0 ${status?.ready ? 'text-emerald-400' : 'text-amber-400'}`} />
-                    <span className={`text-[11px] font-bold ${status?.ready ? 'text-emerald-200' : 'text-amber-200'}`}>
-                        {status?.ready ? `已接入 · ${status.articles} 篇` : '未接入'}
-                    </span>
-                </div>
-                {status?.ready ? (
-                    <p className="mt-1 break-all font-mono text-[9px] leading-relaxed text-slate-500">{status.root}</p>
-                ) : (
-                    <p className="mt-1 text-[10px] leading-relaxed text-amber-200/80">
-                        {status?.error || '正在检查…'}
-                    </p>
-                )}
-            </div>
-
-            {/* 检索 */}
-            <div className="flex items-center gap-1.5">
-                <input
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                    onKeyDown={(event) => { if (event.key === 'Enter') void runSearch(); }}
-                    placeholder="例如：付费墙 内容提取 / jwt 签名"
-                    className="min-w-0 flex-1 rounded-lg border border-white/10 bg-slate-950/70 px-2 py-1.5 text-[11px] text-slate-200 outline-none transition placeholder:text-slate-600 focus:border-indigo-400/40"
-                />
-                <button
-                    onClick={() => void runSearch()}
-                    disabled={busy || !query.trim()}
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-white/10 text-slate-300 transition hover:bg-white/15 disabled:opacity-40"
-                    title="检索"
-                >
-                    {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Search className="h-3 w-3" />}
-                </button>
-            </div>
-
-            {/* 结果 */}
-            {hits && (
-                hits.length === 0 ? (
-                    <p className="px-1 text-[10px] leading-relaxed text-slate-500">
-                        没有匹配。换个更完整的说法试试 —— 单个字符查不出东西。
-                    </p>
-                ) : (
-                    <div className="space-y-1.5">
-                        {hits.map((hit) => (
-                            <button
-                                key={hit.path}
-                                onClick={() => void openArticle(hit.path)}
-                                className={`w-full rounded-lg border px-2 py-1.5 text-left transition ${preview?.path === hit.path
-                                    ? 'border-indigo-400/40 bg-indigo-500/10'
-                                    : 'border-white/8 bg-white/[0.03] hover:bg-white/[0.06]'
-                                    }`}
-                            >
-                                <div className="flex items-start gap-1.5">
-                                    <span className="mt-0.5 shrink-0 rounded bg-white/8 px-1 font-mono text-[9px] text-slate-400">{hit.score}</span>
-                                    <span className="min-w-0 flex-1 text-[11px] font-bold leading-snug text-slate-200">{hit.title}</span>
-                                </div>
-                                <p className="mt-0.5 break-all font-mono text-[9px] text-slate-600">{hit.path}</p>
-                                {hit.summary && (
-                                    <p className="mt-1 line-clamp-2 text-[10px] leading-relaxed text-slate-500">{hit.summary}</p>
-                                )}
-                            </button>
-                        ))}
-                    </div>
-                )
-            )}
-
-            {/* 预览 */}
-            {preview && (
-                <div className="rounded-lg border border-white/10 bg-slate-950">
-                    <div className="flex items-center gap-1.5 border-b border-white/8 px-2 py-1.5">
-                        <span className="min-w-0 flex-1 break-all font-mono text-[9px] text-slate-500">{preview.path}</span>
-                        <button
-                            onClick={() => setPreview(null)}
-                            className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-slate-600 transition hover:text-slate-300"
-                            title="关闭"
-                        >
-                            <X className="h-3 w-3" />
-                        </button>
-                    </div>
-                    <pre className="custom-scrollbar max-h-64 overflow-auto whitespace-pre-wrap p-2 font-mono text-[10px] leading-relaxed text-slate-400">
-                        {preview.text}
-                    </pre>
-                </div>
-            )}
-
-            {/* 路径配置 */}
-            <div className="rounded-xl border border-white/8 bg-white/[0.02] p-2.5">
-                <p className="text-[10px] font-bold text-slate-400">知识库路径</p>
-                <p className="mt-1 text-[9px] leading-relaxed text-slate-600">
-                    留空则自动查找项目下以 open-reverselab 开头的目录。打包版需要手填绝对路径。
-                </p>
-                <input
-                    value={draftRoot}
-                    onChange={(event) => setDraftRoot(event.target.value)}
-                    placeholder="D:\\path\\to\\open-reverselab\\kb"
-                    className="mt-1.5 w-full rounded-lg border border-white/10 bg-slate-950/70 px-2 py-1.5 font-mono text-[10px] text-slate-300 outline-none transition placeholder:text-slate-700 focus:border-indigo-400/40"
-                />
-                <div className="mt-1.5 flex items-center gap-1.5">
-                    <button
-                        onClick={() => void applyRoot()}
-                        className="rounded-lg bg-white/10 px-2.5 py-1 text-[10px] font-bold text-slate-200 transition hover:bg-white/15"
-                    >
-                        保存并重新检查
-                    </button>
-                    {saveMsg && <span className="min-w-0 flex-1 break-all text-[9px] text-slate-500">{saveMsg}</span>}
-                </div>
-            </div>
-        </div>
-    );
-};
-
 /* ========================================================================== */
 /*                            Agent：侧边栏外壳                                 */
 /* ========================================================================== */
-type AgentTab = 'chat' | 'rules' | 'headers' | 'storage' | 'jwt' | 'scripts' | 'kb';
+type AgentTab = 'chat' | 'rules' | 'headers' | 'storage' | 'jwt' | 'scripts';
 
 const AGENT_TABS: { id: AgentTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
     { id: 'chat', label: '对话', icon: Bot },
@@ -4182,7 +3984,6 @@ const AGENT_TABS: { id: AgentTab; label: string; icon: React.ComponentType<{ cla
     { id: 'storage', label: '存储', icon: Globe },
     { id: 'jwt', label: 'JWT', icon: KeyRound },
     { id: 'scripts', label: '脚本', icon: Code },
-    { id: 'kb', label: '知识库', icon: BookOpen },
 ];
 
 const SIDEBAR_MIN = 320;
@@ -5160,7 +4961,6 @@ const AgentSidebar: React.FC<{
                             {activeTab === 'scripts' && (
                                 <ScriptList scripts={scripts} onRemove={actions.removeScript} onToggle={actions.toggleScript} onRun={actions.runScriptNow} runDisabled={busy} />
                             )}
-                            {activeTab === 'kb' && <KbTab onIndexReset={actions.resetKbCache} />}
                         </div>
                     )}
                 </div>

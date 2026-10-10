@@ -1506,10 +1506,6 @@ export interface AppSettingsSnapshot {
     proxyProtocol?: string;
     /** AI 服务配置（OpenAI 兼容协议） */
     ai: AiConfig;
-    /** 知识库根目录（'' 表示按默认位置查找） */
-    kbRoot: string;
-    /** 知识库当前可用状态，随设置一起回传，省掉界面一次额外往返 */
-    kb: KbStatus;
     message?: string;
 }
 
@@ -1528,152 +1524,6 @@ export interface SaveAiConfigResult {
     /** 归一化后真正落盘的配置；校验失败时回传当前生效的旧配置 */
     ai: AiConfig;
     message?: string;
-}
-
-/**
- * 知识库当前状态。
- *
- * `ready` 为 false 时其余字段无意义 —— 界面据此显示"未接入"而不是"0 篇"，
- * 后者会被读成"库是空的"，而实际是路径没找到。
- */
-export interface KbStatus {
-    ready: boolean;
-    /** 实际生效的知识库根目录（绝对路径）；未就绪时为空串 */
-    root: string;
-    /** 文章篇数（只数 `<board>/techniques/**.md`，README 不算） */
-    articles: number;
-    /** 全部文章正文合计字节 */
-    bytes: number;
-    /** 未就绪时的原因，直接可展示给用户 */
-    error?: string;
-}
-
-/** 保存知识库路径的返回：status 是保存后的现查结果 */
-export interface SaveKbRootResult {
-    success: boolean;
-    kbRoot: string;
-    status: KbStatus;
-    message?: string;
-}
-
-/**
- * 一份待索引的原始文件。主进程原样搬字节，解析在渲染层做。
- */
-export interface KbSourceFile {
-    /** kb 根目录下的相对路径，'/' 分隔 */
-    path: string;
-    content: string;
-}
-
-/**
- * 仓库自带 kb-index.json 的形状。只取我们用得到的两个字段：
- * 这份索引不作为唯一真相（它有实测缺口），只当作**一路加权信号**。
- */
-export interface KbBoardIndex {
-    entries?: { id?: string; signals?: string[]; files?: string[] }[];
-}
-
-/** 索引里的一条文章 */
-export interface KbEntry {
-    board: string;
-    path: string;
-    id: string;
-    title: string;
-    summary: string;
-    category: string;
-    /** front-matter 的 signals —— 多为**检测指纹**（如 `script[src*="tinypass.com"]`） */
-    signals: string[];
-    keywords: string[];
-    tags: string[];
-    /** kb-index.json 的 signals —— 多为**路由关键词**，与上面那组语义不同，两组都要 */
-    indexSignals: string[];
-}
-
-/** 一次检索命中的一条 */
-export interface KbSearchHit {
-    path: string;
-    board: string;
-    title: string;
-    summary: string;
-    score: number;
-    /** 命中的词，供模型判断"为什么这条被选出来" */
-    matched: string[];
-}
-
-/** 正文里的一个标题，供大纲与按节切片使用 */
-export interface KbHeading {
-    level: number;
-    title: string;
-    /** 在正文里的字符偏移 */
-    start: number;
-    end: number;
-}
-
-/** 切片后回给调用方的一篇正文 */
-export interface KbReadResult {
-    path: string;
-    title: string;
-    section?: string;
-    outline: { level: number; title: string }[];
-    content: string;
-    bytes: number;
-    truncated: boolean;
-    notice?: string;
-}
-
-/** 主进程 status() 的返回 */
-export interface KbStatusPayload {
-    ready: boolean;
-    root: string;
-    articles: number;
-    bytes: number;
-    error?: string;
-}
-
-/** 解析出的 front-matter：值是标量或内联数组，其余形态一律不收 */
-export type KbFrontMatter = Record<string, string | string[]>;
-
-/** 主进程 kb.read() 的返回 */
-export interface KbReadPayload {
-    path?: string;
-    content?: string;
-    error?: string;
-}
-
-/** 主进程 kb.load() 的返回 */
-export interface KbLoadPayload {
-    root: string;
-    files: KbSourceFile[];
-    boardIndexes: Record<string, KbBoardIndex>;
-    /** 因超限或读失败被跳过的文件数 */
-    skipped?: number;
-    error?: string;
-}
-
-/**
- * 知识库的取数桥：渲染层唯一需要主进程配合的两个动作。
- *
- * `load` 一次读完整个库（约 3MB），渲染层长期驻留索引，之后检索不再往返 IPC；
- * `read` 按需取单篇正文。解析 / 检索 / 切片全在 services/KbService（纯 TS，可单测），
- * 主进程只搬字节 —— 所以这里没有第三条"顺便算一下"的方法。
- */
-export interface KbBridge {
-    load: () => Promise<KbLoadPayload>;
-    read: (path: string) => Promise<KbReadPayload>;
-}
-
-/**
- * Electron 注入到渲染层的知识库 API。
- *
- * 比取数桥多两条：状态查询与换路径（面板用得上，Agent 用不上）。
- * 形状上**显式声明为 KbBridge 的超集**，这样 `electronAPI.kb` 能直接当桥传给
- * useAgent —— 少了这层关系，App 那侧就只能靠断言或另写一份形状压过去。
- */
-export interface ElectronKbAPI extends KbBridge {
-    /** 轻量状态：根目录 / 篇数 / 是否就绪 */
-    status: () => Promise<KbStatus>;
-    /** 保存 kb 根目录，返回里带新的 status */
-    setRoot: (value: string) => Promise<SaveKbRootResult>;
 }
 
 /**
@@ -2001,8 +1851,6 @@ export interface ElectronAPI {
     acgmho?: ElectronAcgmhoAPI;
     /** 应用设置 API (可选模块) */
     settings?: ElectronSettingsAPI;
-    /** 知识库 API (可选模块) */
-    kb?: ElectronKbAPI;
     /** 浏览器外壳 API (可选模块) */
     browser?: ElectronBrowserAPI;
     /** Edge 数据导入 API (可选模块) */
@@ -2762,14 +2610,6 @@ export interface AgentDeps {
      * 迟早会不一致。
      */
     tamper: TamperState;
-    /**
-     * 知识库取数桥。
-     *
-     * 与 tamper 同一手法：Agent 不自己 require 主进程、也不碰 window，由 App 把
-     * preload 暴露的 kb API 注进来，测试可以直接喂一个假桥。
-     * 可空 —— 桥缺失时 kb 工具回结构化错误而不是崩，那是加载故障不是运行环境。
-     */
-    kb?: KbBridge;
 }
 
 export interface AgentState {
@@ -2837,13 +2677,6 @@ export interface AgentState {
          * 界面只会从 COMPACT_RATIOS 里选，这里是防手写调用传错。
          */
         setCompactRatio: (ratio: number) => void;
-        /**
-         * 丢弃知识库索引缓存。
-         *
-         * 面板改了知识库路径后必须调用：Agent 这份索引是独立缓存，
-         * 只清面板自己那份的话，界面显示新库、模型继续查旧库 —— 两边都看不出异常。
-         */
-        resetKbCache: () => void;
         /**
          * 手动执行一条已保存脚本（脚本页的"运行"按钮）。
          *

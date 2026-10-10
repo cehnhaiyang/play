@@ -12,18 +12,10 @@ import type {
     AiChatMessage,
     AiUsage,
     HeaderRule,
-    KbEntry,
     TamperRule,
     WebviewElement,
 } from '../meta';
 import { chat, estimatePromptTokens } from '../services/AiService';
-import {
-    buildKbIndex,
-    normalizeRel,
-    readKbArticle,
-    searchKb,
-    KB_SEARCH_LIMIT,
-} from '../services/KbService';
 import {
     buildCookieKeys,
     collectDroppedRules,
@@ -41,17 +33,16 @@ import {
  * useAgent — Agent 工作空间（在已登录的页面里执行脚本）
  * ============================================================================
  *
- * 形状是**代码执行器**，不是点击驱动器。七个工具：js（跑脚本）、script_store
+ * 形状是**代码执行器**，不是点击驱动器。六个工具：js（跑脚本）、script_store
  * （脚本的存取，action 分 list/save/update/delete）、navigate、tamper、storage、
- * tokens、kb，全小写严格匹配。
+ * tokens，全小写严格匹配。
  *
  * 点击、输入、取数、翻页全部塌缩成 js 里的一行代码，依据是上下文经济学：
  * 每次观察都要序列化进模型上下文，DOM 快照动辄数万 token，而脚本返回值可截断。
  *
  * tamper / storage 是**用户手动面板能力的开放**，不是 js 的替代：规则必须在
  * 引擎层生效（钩子装在页面主世界，脚本只影响自己那一次调用），Cookie 必须走原生
- * API（HttpOnly 在渲染进程里读不到）。kb 只读本地文章、不碰页面，检索本身在
- * services/KbService（纯 TS，可单测），这里只做派发与缓存。
+ * API（HttpOnly 在渲染进程里读不到）。
  *
  * 由此免费拿到三样 IDE 里 fetch 补不上的东西：会话 cookie、页面自身的 JS 函数
  * （签名参数往往由混淆代码生成）、真实 TLS 栈。这也是本功能存在的理由。
@@ -521,16 +512,9 @@ const SYSTEM_PROMPT = `
    - 改写并写回: {"action": "rewrite", "token": "...", "changes": {"key": val}, "area": "local", "key": "find返回的key"}
    注：改写 Payload 会使原始服务端签名失效。
 
-7. kb —— 逆向工程离线知识库（遇复杂对抗、通用攻击模式时先查再做）
-   args:
-   - 检索: {"action": "search", "query": "自然语言短语(如: JWT未授权 绕过)"}（回最多 ${KB_SEARCH_LIMIT} 条）
-   - 阅读: {"action": "read", "path": "文章相对路径", "section": "可选，章节子串"}
-   - 目录状态: {"action": "status"}
-   注：不确定从哪下手时先 search "攻击网"（Web 攻击决策图，一次看清可走的路）；若 read 返回超长大纲，必须带 section 字段再次精准读取。媒体流/m3u8/静态资源无需查库。
-
 ## 执行准则与硬约束
 1. 广度优先单步拉取：一次脚本内查清相关字段，禁止拆成多次调用只为获取少量数据；DOM 提取必须做截断（如 slice(0, 50)）。
-2. 试错熔断：相同思路/错误连续失败 2 次必须更换策略（检查选择器 -> 换用网络拦截 -> 检索知识库）。
+2. 试错熔断：相同思路/错误连续失败 2 次必须更换策略（检查选择器 -> 换用网络拦截 -> 换用 storage 直读底层数据）。
 3. 失败只是这一步的结果，不是任务的终点：工具返回以「[工具 X 执行失败]」开头时读错误信息修正参数或换路继续，不要原样重试，更不要把它当成结论收尾；除非已穷尽可行路径，否则继续调用工具。
 4. 结论必须由证据支撑：提出任何鉴权机制、加密方式、字段逻辑的推断，必须伴随工具返回的具体物理证据（字段值/响应码/堆栈）。
 5. 交付标准：
@@ -774,7 +758,7 @@ const parseToolResult = (result: string): Record<string, unknown> | null => {
  *
  * js 另有专属通道 __agentError（见 buildScriptSource）：页面业务数据里出现
  * `{error:"..."}` 是成功的数据，不是工具失败。js 的成败判据见
- * isJsErrorResult，这里保留对 error 的判断是给 tamper/storage/tokens/kb
+ * isJsErrorResult，这里保留对 error 的判断是给 tamper/storage/tokens
  * 这些"错误只能由我们构造"的工具用的。
  */
 const isErrorResult = (result: string): boolean => {
@@ -1064,44 +1048,6 @@ export const useAgent = (deps: AgentDeps): AgentState => {
     // 混用两次渲染的切片会让"读到的旧规则"与"写入的新规则"打架。
     const tamperRef = useRef(deps.tamper);
     useEffect(() => { tamperRef.current = deps.tamper; }, [deps.tamper]);
-
-    /**
-     * 知识库桥镜像。
-     *
-     * 与 tamperRef 同一理由：dispatchTool 的依赖数组里没有 deps.kb（它由 preload
-     * 暴露，引用天然稳定），但派发发生在 await 之间，读镜像比赌闭包捕获的是哪一次
-     * 渲染可靠。
-     */
-    const kbBridgeRef = useRef(deps.kb);
-    useEffect(() => { kbBridgeRef.current = deps.kb; }, [deps.kb]);
-
-    /**
-     * 知识库索引缓存。
-     *
-     * 整库约 3MB 正文，解析一次要遍历全部 front-matter。缓存**存在性**而不是内容：
-     * `entries` 为 null 表示还没读过，空数组表示读过但库里一篇文章都没有 ——
-     * 后者不能当"没读过"再读一遍。同时缓存一个在途 Promise：模型可能一步里连发两次
-     * search，没有它就会并发读两遍整库。
-     *
-     * `generation` 是**失效令牌**。面板改知识库路径时只丢得掉面板自己那份索引，
-     * 而 Agent 这份是独立缓存 —— 只丢一边的话，面板显示新库、模型继续查旧库，
-     * 两边都看不出任何异常。resetKbCache 自增令牌并清空缓存，在途的那次加载
-     * 回来时令牌已经变了，结果被丢弃而不是盖住新索引。
-     */
-    const kbCacheRef = useRef<{
-        entries: KbEntry[] | null;
-        inflight: Promise<KbEntry[]> | null;
-        generation: number;
-    }>({ entries: null, inflight: null, generation: 0 });
-
-    /** 丢弃知识库索引缓存。改了知识库路径就必须调用，否则模型一直查旧库 */
-    const resetKbCache = useCallback(() => {
-        const cache = kbCacheRef.current;
-        cache.entries = null;
-        // 在途的那次也要放掉：留着它，下一次调用会拿到旧路径的结果
-        cache.inflight = null;
-        cache.generation += 1;
-    }, []);
 
     // 停止标志。不能靠 state：循环体在 await 之间读它，state 更新不会及时可见
     const stoppedRef = useRef(false);
@@ -1799,128 +1745,6 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                 });
             }
 
-            case 'kb': {
-                const bridge = kbBridgeRef.current;
-                if (!bridge) {
-                    return JSON.stringify({
-                        error: '知识库不可用：当前不在 Electron 环境里，没有取数通道。',
-                    });
-                }
-
-                const action = asString(args.action) || 'search';
-
-                /**
-                 * 取索引，必要时读一次整库。
-                 *
-                 * 失败不缓存：路径配错时用户会去改设置，缓存住错误就再也读不到新路径。
-                 * 成功才写进 entries —— 空库是合法状态，必须与"没读过"区分开。
-                 *
-                 * 加载期间用**令牌**比对：面板改了路径会调 resetKbCache，那时在途的
-                 * 这次加载拿的还是旧路径。不比对的话它回来会把新索引盖掉，
-                 * 表现是"改了路径，搜索还是旧库的内容"，且刷新也修不好。
-                 */
-                const getEntries = async (): Promise<KbEntry[]> => {
-                    const cache = kbCacheRef.current;
-                    if (cache.entries) return cache.entries;
-                    if (cache.inflight) return cache.inflight;
-
-                    const generation = cache.generation;
-                    const task = (async () => {
-                        const payload = await bridge.load();
-                        if (payload?.error) throw new Error(payload.error);
-                        const built = buildKbIndex(payload?.files || [], payload?.boardIndexes || {});
-                        // 令牌变了说明路径在这期间被改过，这份结果已经过期
-                        if (kbCacheRef.current.generation === generation) {
-                            kbCacheRef.current.entries = built;
-                        }
-                        return built;
-                    })();
-
-                    cache.inflight = task;
-                    try {
-                        return await task;
-                    } finally {
-                        // 无论成败都清掉在途标记：失败后要允许下一次重试。
-                        // 只清自己那一份 —— 被 reset 掉之后这里再写就是把新状态覆盖了。
-                        if (kbCacheRef.current.generation === generation) {
-                            kbCacheRef.current.inflight = null;
-                        }
-                    }
-                };
-
-                if (action === 'status') {
-                    try {
-                        const entries = await getEntries();
-                        const boards: Record<string, number> = {};
-                        for (const entry of entries) {
-                            boards[entry.board] = (boards[entry.board] || 0) + 1;
-                        }
-                        return JSON.stringify({ ready: true, articles: entries.length, boards });
-                    } catch (e) {
-                        return JSON.stringify({ error: errorText(e) });
-                    }
-                }
-
-                if (action === 'search') {
-                    const query = asString(args.query);
-                    if (!query.trim()) return JSON.stringify({ error: '缺少 query' });
-
-                    try {
-                        const entries = await getEntries();
-                        const hits = searchKb(entries, query);
-                        if (hits.length === 0) {
-                            // 无命中不是错误，但要给出下一步 —— 否则模型会原地重试同一个词
-                            return JSON.stringify({
-                                query,
-                                hits: [],
-                                notice: '没有匹配。换个说法：用更完整的自然短语，'
-                                    + '或直接说页面现象（如「接口返回 401 未授权」「付费墙遮挡正文」）。'
-                                    + '若这属于视频嗅探 / m3u8 / 防盗链一类，本库不覆盖，请直接用 S 探测页面。',
-                            });
-                        }
-                        return JSON.stringify({ query, hits });
-                    } catch (e) {
-                        return JSON.stringify({ error: errorText(e) });
-                    }
-                }
-
-                if (action === 'read') {
-                    const target = asString(args.path);
-                    if (!target) return JSON.stringify({ error: '缺少 path' });
-
-                    try {
-                        const entries = await getEntries();
-                        // 路径按归一化后的形式比对：模型可能原样回传 search 给的 path，
-                        // 也可能自己拼一个带 './' 或反斜杠的
-                        const normalized = normalizeRel(target);
-                        const entry = entries.find((item) => item.path === normalized);
-                        if (!entry) {
-                            return JSON.stringify({
-                                error: `知识库里没有这篇文章：${target}。`
-                                    + 'path 要用 search 返回的那个，形如 ctf-website/techniques/…/xx.md。',
-                            });
-                        }
-
-                        const payload = await bridge.read(entry.path);
-                        if (payload?.error) return JSON.stringify({ error: payload.error });
-                        if (typeof payload?.content !== 'string') {
-                            return JSON.stringify({ error: `读不到正文：${entry.path}` });
-                        }
-
-                        const result = readKbArticle(entry, payload.content, {
-                            section: asString(args.section),
-                        });
-                        return JSON.stringify(result);
-                    } catch (e) {
-                        return JSON.stringify({ error: errorText(e) });
-                    }
-                }
-
-                return JSON.stringify({
-                    error: unknownActionError(action, ['search', 'read', 'status']),
-                });
-            }
-
             default:
                 return JSON.stringify({ error: `未知工具：${String(tool)}` });
         }
@@ -2085,7 +1909,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
                 transcript.push({ role: 'assistant', content: reply });
 
                 const call = extractJsonObject(reply);
-                // 工具名全小写严格匹配（js / script_store / navigate / tamper / storage / tokens / kb），
+                // 工具名全小写严格匹配（js / script_store / navigate / tamper / storage / tokens），
                 // 写错会落到"未知工具"。不归一：归一等于把"拼写检查"这道关口拆掉，
                 // 写错名字是最便宜的笔误，就该在第一步暴露，而不是猜着执行。
                 const tool = call?.tool as AgentToolName | undefined;
@@ -2381,8 +2205,8 @@ export const useAgent = (deps: AgentDeps): AgentState => {
 
     const actions = useMemo(() => ({
         send, stop, clear, compact, setCompactRatio, runScriptNow, removeScript, toggleScript,
-        removeMessage, rewindTo, resetKbCache,
-    }), [send, stop, clear, compact, setCompactRatio, runScriptNow, removeScript, toggleScript, removeMessage, rewindTo, resetKbCache]);
+        removeMessage, rewindTo,
+    }), [send, stop, clear, compact, setCompactRatio, runScriptNow, removeScript, toggleScript, removeMessage, rewindTo]);
 
     /**
      * 会话用量与两个闸门判据。

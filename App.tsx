@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { usePlay, useBrowse, useAgent } from './hooks';
 import { BrowsePanel, PlayPanel, Floating, AudioPanel, GalleryPanel, TorrentPanel } from './components';
-import { FoundLink, MediaType, getAppWindow } from './meta';
+import { FoundLink, MediaType } from './meta';
 import { getMediaType } from './const';
 
 type ViewMode = 'sniffer' | 'player' | 'audio' | 'gallery' | 'torrent';
@@ -17,14 +17,10 @@ const PlayerLayout: React.FC = () => {
   // 都靠 interactions 的 dom-ready 广播拿到页面，不各自持有 webview 引用。
   // 同时把 tamper 整个传进去 —— Agent 的三组新工具（tamper / storage /
   // tokens）做的正是篡改面板里那些事，规则真值由 useTamper 持有，这里不复制。
-  //
-  // kb 同理：preload 暴露的取数桥原样注入，Agent 不自己碰 window。
-  // 桥缺失时 kb 工具回结构化错误而不是崩 —— 那是加载故障，不是"另一种运行环境"。
   const agent = useAgent({
     getActiveWebview: interactions.getActiveWebview,
     onPageReady: interactions.onPageReady,
     tamper,
-    kb: getAppWindow().electronAPI?.kb,
   });
 
   // "持续嗅探"开关打开时，一次 URL 变化扫三轮（立即 + 1.5s + 3.5s），
