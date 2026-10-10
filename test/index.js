@@ -71,9 +71,12 @@ const main = async () => {
   console.log('\n=== 桥契约 ===');
   const bridgeOk = require('./bridge.test.js').run();
 
+  console.log('\n=== 插件嗅探分类 ===');
+  const extSnifferOk = require('./extsniffer.test.js').run();
+
   if (!engineOk || !compatOk || !aibookOk || !aiproviderOk || !searchSyncOk || !searchAsyncOk
     || !mainStaticOk || !tamperOk || !agentToolsOk || !draftOk
-    || !snifferOk || !logsOk || !bridgeOk) {
+    || !snifferOk || !logsOk || !bridgeOk || !extSnifferOk) {
     process.exitCode = 1;
     console.log('\n存在失败用例。');
   } else {

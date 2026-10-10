@@ -20,6 +20,7 @@
     "tabs",
     "scripting",
     "webRequest",
+    "webNavigation",
     "cookies",
     "downloads",
     "nativeMessaging"

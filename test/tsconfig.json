@@ -24,6 +24,7 @@
     "../services/LogService.ts",
     "../services/SearchService.ts",
     "../const.ts",
-    "../meta/**/*.ts"
+    "../meta/**/*.ts",
+    "../extension/src/shared/classify.ts"
   ]
 }
