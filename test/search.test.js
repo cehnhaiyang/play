@@ -13,7 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = './build';
+const ROOT = './build/app/renderer';
 const FIXTURES = path.join(__dirname, 'fixtures');
 
 // 归一化工具、引擎、注册表与全部 provider 都在同一个模块里

@@ -4,7 +4,7 @@
  *
  * 这一套盯的是**拆分过程中最容易悄悄坏掉的东西**：某个功能归谁做。
  *
- * 判据是"归属表（meta/bridge.ts）与主进程真实的 IPC 注册逐条对得上"：
+ * 判据是"归属表（shared/meta/bridge.ts）与主进程真实的 IPC 注册逐条对得上"：
  *
  *   1. 主进程注册了 handler，表里没有 → 有人加了端点没归类。
  *      这正是拆分期的典型事故：新端点随手写在 main.js 里，
@@ -24,7 +24,7 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const ELECTRON_DIR = path.join(ROOT, 'electron');
+const ELECTRON_DIR = path.join(ROOT, 'app', 'main');
 const EXTENSION_SRC = path.join(ROOT, 'extension', 'src');
 
 let pass = 0;
@@ -57,7 +57,7 @@ const run = () => {
     pass = 0;
     fails.length = 0;
 
-    const bridge = require('./build/meta/bridge');
+    const bridge = require('./build/shared/meta/bridge');
 
     /** 主进程真实注册的全部 handler 通道名 */
     const registeredHandlers = new Set();
@@ -78,7 +78,7 @@ const run = () => {
         const unclassified = [...registeredHandlers].filter((name) => !(name in bridge.BRIDGE_ENDPOINTS));
         eq(unclassified.length, 0,
             `这些通道在主进程注册了但归属表里没有：${unclassified.join('、')}。`
-            + '请在 meta/bridge.ts 的 BRIDGE_ENDPOINTS 里归类。');
+            + '请在 shared/meta/bridge.ts 的 BRIDGE_ENDPOINTS 里归类。');
     });
 
     check('端点表里 app/split 路由都有真实 handler（无悬空目标）', () => {
@@ -164,7 +164,7 @@ const run = () => {
     check('MediaRequestContext 携带复现浏览器请求所需的四要素', () => {
         // 这四个字段不是可选优化：<video src> 无法附加请求头，
         // 缺了它们，防盗链站点上"浏览器能播、应用 403"无解。
-        const src = fs.readFileSync(path.join(ROOT, 'meta', 'bridge.ts'), 'utf8');
+        const src = fs.readFileSync(path.join(ROOT, 'shared', 'meta', 'bridge.ts'), 'utf8');
         const block = src.slice(src.indexOf('export interface MediaRequestContext'));
         const body = block.slice(0, block.indexOf('}'));
         for (const field of ['url', 'referer', 'userAgent', 'cookie']) {
@@ -176,7 +176,7 @@ const run = () => {
     check('旧的 DownloadMediaParams 仍带 referer（迁移期不能先丢）', () => {
         // 桥接落地前，应用侧仍走 DownloadMediaParams。若这里先被删掉，
         // 迁移中间态就会出现"下载 403 且无从修"的窗口。
-        const src = fs.readFileSync(path.join(ROOT, 'meta', 'interface.ts'), 'utf8');
+        const src = fs.readFileSync(path.join(ROOT, 'shared', 'meta', 'interface.ts'), 'utf8');
         const block = src.slice(src.indexOf('export interface DownloadMediaParams'));
         const body = block.slice(0, block.indexOf('}'));
         assert(/\breferer\??:/.test(body), 'DownloadMediaParams 丢了 referer');

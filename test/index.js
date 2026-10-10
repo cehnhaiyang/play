@@ -2,7 +2,7 @@
 /**
  * SPG 引擎测试入口。
  *
- * 先调用 tsc 把引擎（services/AudioService.ts + meta）编译成 CommonJS 到 build/，
+ * 先调用 tsc 把引擎（app/renderer/services/AudioService.ts + meta）编译成 CommonJS 到 build/，
  * 再用 Web Audio 模拟层在 Node 里跑真实的解析/调度/合成流程。
  *
  * 为什么不用浏览器跑：这些 bug（时间点倒流、自动化越界、总时长漏算）

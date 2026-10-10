@@ -8,7 +8,7 @@
  *   2. 每个 (地址, 模型, 档位) 组合实际下发什么，取值必须是确定的——
  *      这里错一次，就是线上给某个模型塞了一个它会拒绝（或会被带偏）的参数。
  *
- * 必须 require 编译产物里的同一份源码（build/services/AiService.js），
+ * 必须 require 编译产物里的同一份源码（build/shared/ai/AiService.js），
  * 而不是拿源码正则去猜，理由同 aibook.test.js。
  */
 const assert = require('assert');
@@ -31,7 +31,7 @@ const check = (name, fn) => {
 };
 
 const run = () => {
-  const aiService = require(path.join(BUILD, 'services', 'AiService.js'));
+  const aiService = require(path.join(BUILD, 'shared', 'ai', 'AiService.js'));
   const { AI_PROVIDERS, DEFAULT_AI_CONFIG, resolveReasoningEffort, findAiModelPreset, findAiProvider, getModelPresets } = aiService;
 
   const byId = (id) => AI_PROVIDERS.find((p) => p.id === id);

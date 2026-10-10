@@ -10,7 +10,7 @@
  */
 const { MockBaseContext, MockOfflineAudioContext } = require('./mockAudio');
 
-const ROOT = './build';
+const ROOT = './build/app/renderer';
 const {
   SPGParser, SPGError, EventScheduler, AudioSynthesizer,
   parseDuration, getMidi, midiToFreq,
@@ -1794,9 +1794,13 @@ const path = require('path');
 /**
  * 提示词写在 TS 模板字符串里，源码中的反引号是转义的（\`），
  * 直接对原始文本做正则匹配会全部落空。这里先把转义还原成提示词的真实内容。
+ *
+ * 读的是 SpgAiService.ts 而不是 AiService.ts：SPG 的语法文档与生成/修复函数
+ * 已按功能归属切到应用侧（AiService 只留通用的补全与解析，否则插件侧会
+ * 因为名字表依赖把整个音频引擎拖进 bundle）。
  */
 const aiSource = fs.readFileSync(
-  path.join(__dirname, '..', 'services', 'AiService.ts'), 'utf8'
+  path.join(__dirname, '..', 'app', 'renderer', 'services', 'SpgAiService.ts'), 'utf8'
 ).replace(/\\`/g, '`').replace(/\\\$/g, '$').replace(/\\\\/g, '\\');
 
 check('提示词里出现的所有指令名都被引擎支持', () => {

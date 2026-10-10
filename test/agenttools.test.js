@@ -22,7 +22,7 @@ const ROOT = path.join(__dirname, '..');
  * 可用 AGENT_SRC 覆盖 —— 变异测试靠它指向一份**改坏的副本**，
  * 从而在不碰产品文件的前提下验证断言真的能失败。
  */
-const SRC_PATH = process.env.AGENT_SRC || path.join(ROOT, 'hooks', 'useAgent.ts');
+const SRC_PATH = process.env.AGENT_SRC || path.join(ROOT, 'app', 'renderer', 'hooks', 'useAgent.ts');
 /**
  * 源码统一成 LF 再切块。
  *
@@ -55,11 +55,11 @@ const grabBlock = (marker, endMarker) => {
 const strip = (ts) => require('module').stripTypeScriptTypes(ts, { mode: 'strip' });
 
 /**
- * useAgent 从 const 导入的三个 JWT 函数。
- * 直接用**编译产物**（build/const.js），不重写副本 ——
+ * useAgent 从 shared/core 导入的三个 JWT 函数。
+ * 直接用**编译产物**（build/shared/core/index.js），不重写副本 ——
  * 否则这里测的是我对 JWT 的理解，而不是产品实现。
  */
-const CONST = require('./build/const.js');
+const CONST = require('./build/shared/core/index.js');
 
 /**
  * 抽 keepReasoning 求值（含它依赖的 truncateBytes / byteLength）。
@@ -170,7 +170,7 @@ const buildAgentHarness = (options = {}) => {
      * 以及让 chat 桩的估算回落与产品同源 —— 自己重写一份估算，
      * 测的就是"我对估算的理解"而不是产品实现。
      */
-    const AI = require('./build/services/AiService.js');
+    const AI = require('./build/shared/ai/AiService.js');
     // 本轮里已经发起过几次 chat。每一轮（每次 send）开始时归零 ——
     // 用它实现"每轮先调一次工具、再收尾"，而不是按全局调用序号算：
     // 后者会让第 2 轮之后再也拿不到工具调用，造不出"轮内有工具消息"的场景。
@@ -239,7 +239,7 @@ const buildAgentHarness = (options = {}) => {
         saveJSON: (k, v) => { store[k] = v; return true; },
     };
 
-    const CONST = require('./build/const.js');
+    const CONST = require('./build/shared/core/index.js');
     const fakeWindow = { setTimeout: () => 1, clearTimeout: () => {} };
 
     // 去掉 import（类型导入 strip 后已消失）与 export；
@@ -326,7 +326,7 @@ const buildAgentHarness = (options = {}) => {
         },
     });
 
-    // estimatePromptTokens 用**编译产物**（build/services/AiService.js），
+    // estimatePromptTokens 用**编译产物**（build/shared/ai/AiService.js），
     // 与产品同源：hook 拿它算上下文占用，测试自己重写一份就测不到真实口径了
     const factory = makeAgent(ReactProxy, { chat, estimatePromptTokens: AI.estimatePromptTokens }, CONST, persist, fakeWindow, TextEncoder);
 

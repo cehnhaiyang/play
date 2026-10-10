@@ -27,6 +27,7 @@
     "noEmit": true
   },
   "exclude": [
-    "extension"
+    "extension",
+    "app/main"
   ]
 }

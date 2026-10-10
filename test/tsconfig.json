@@ -17,12 +17,13 @@
     "isolatedModules": false
   },
   "include": [
-    "../services/AudioService.ts",
-    "../services/AiService.ts",
-    "../services/LogService.ts",
-    "../services/SearchService.ts",
-    "../const.ts",
-    "../meta/**/*.ts",
+    "../app/renderer/app/renderer/services/AudioService.ts",
+    "../app/renderer/services/SpgAiService.ts",
+    "../app/renderer/services/LogService.ts",
+    "../app/renderer/services/SearchService.ts",
+    "../shared/ai/AiService.ts",
+    "../shared/core/**/*.ts",
+    "../shared/meta/**/*.ts",
     "../extension/src/shared/classify.ts"
   ]
 }

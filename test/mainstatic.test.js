@@ -21,7 +21,7 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const ELECTRON_DIR = path.join(ROOT, 'electron');
+const ELECTRON_DIR = path.join(ROOT, 'app', 'main');
 
 /** 类方法简写等已知误报，不属于"未声明的自由标识符" */
 const KNOWN_METHOD_SHORTHANDS = new Set([
@@ -264,8 +264,8 @@ function run() {
     // 2) 任何进程都不许再出现硬编码 UA 字面量
     const uaLiteral = /(["'`])Mozilla\/5\.0[^"'`\n]*Chrome\/\d/;
     const scannedIdentityFiles = {
-        'electron/main.js': mainSrc,
-        'electron/acgmhoService.js': fs.readFileSync(path.join(ELECTRON_DIR, 'acgmhoService.js'), 'utf8'),
+        'app/main/main.js': mainSrc,
+        'app/main/acgmhoService.js': fs.readFileSync(path.join(ELECTRON_DIR, 'acgmhoService.js'), 'utf8'),
     };
     for (const [name, src] of Object.entries(scannedIdentityFiles)) {
         const m = src.match(uaLiteral);
@@ -276,7 +276,7 @@ function run() {
     //    （main.js 的 setUserAgent 只是把值推给站点模块，不动浏览器，所以不算）
     {
         const m = mainSrc.match(/\.\s*setUserAgent\s*\(/);
-        if (m) identityProblems.push(`electron/main.js 仍在覆写浏览器 UA：${m[0]}（UA 与 UA-CH 会分家）`);
+        if (m) identityProblems.push(`app/main/main.js 仍在覆写浏览器 UA：${m[0]}（UA 与 UA-CH 会分家）`);
     }
 
     // 4) 不许再删 Client Hints
@@ -309,7 +309,7 @@ function run() {
      * （document 类与 aibook/gallery 从不推送），缺项不算漂移，分类不同才算。
      */
     checks += 1;
-    const constSrc = fs.readFileSync(path.join(ROOT, 'const.ts'), 'utf8');
+    const constSrc = fs.readFileSync(path.join(ROOT, 'shared', 'core', 'media.ts'), 'utf8');
     const extTable = constSrc.slice(
         constSrc.indexOf('export const MEDIA_EXTENSIONS'),
         constSrc.indexOf('};', constSrc.indexOf('export const MEDIA_EXTENSIONS')));
@@ -401,7 +401,7 @@ function run() {
      * electron 39/44、vite 7/8。这里静态盯住，改 package.json 时必须同步改 index.html。
      */
     checks += 1;
-    const htmlSrc = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+    const htmlSrc = fs.readFileSync(path.join(ROOT, 'app', 'renderer', 'index.html'), 'utf8');
     const mapBlock = htmlSrc.slice(
         htmlSrc.indexOf('<script type="importmap">'),
         htmlSrc.indexOf('</script>', htmlSrc.indexOf('<script type="importmap">')));
@@ -449,8 +449,10 @@ function run() {
      */
     checks += 1;
     const parserSrc = fs.readFileSync(
-        path.join(ROOT, 'services', 'AudioService.ts'), 'utf8');
-    const aiSrc = fs.readFileSync(path.join(ROOT, 'services', 'AiService.ts'), 'utf8');
+        path.join(ROOT, 'app', 'renderer', 'services', 'AudioService.ts'), 'utf8');
+    // SPG 的语法文档（含「可用效果器」清单）已按功能归属切到 SpgAiService.ts ——
+    // 它需要 AudioService 的名字表，留在 AiService 里会把整个音频引擎拖进插件 bundle。
+    const aiSrc = fs.readFileSync(path.join(ROOT, 'app', 'renderer', 'services', 'SpgAiService.ts'), 'utf8');
 
     const effectNamesBlock = parserSrc.match(/const EFFECT_NAMES[^=]*=\s*\[([\s\S]*?)\]/);
     const parserEffects = effectNamesBlock
@@ -488,9 +490,9 @@ function run() {
      * 这里直接把两份实现拉出来对拍，任何输入都不许分叉。
      */
     checks += 1;
-    const svc = require(path.join(ROOT, 'electron', 'acgmhoService.js'));
+    const svc = require(path.join(ROOT, 'app', 'main', 'acgmhoService.js'));
     const gallerySrc = fs.readFileSync(
-        path.join(ROOT, 'components', 'GalleryPanel.tsx'), 'utf8');
+        path.join(ROOT, 'app', 'renderer', 'components', 'GalleryPanel.tsx'), 'utf8');
 
     // 从源码里抠出 rangeIncludesPage 的实现（它是组件内私有函数，无法 import）。
     //
@@ -569,8 +571,8 @@ function run() {
      */
     checks += 1;
     const settingsSrc = fs.readFileSync(path.join(ELECTRON_DIR, 'settings.js'), 'utf8');
-    const floatingSrc = fs.readFileSync(path.join(ROOT, 'components', 'Floating.tsx'), 'utf8');
-    const aiSvcSrc = fs.readFileSync(path.join(ROOT, 'services', 'AiService.ts'), 'utf8');
+    const floatingSrc = fs.readFileSync(path.join(ROOT, 'app', 'renderer', 'components', 'Floating.tsx'), 'utf8');
+    const aiSvcSrc = fs.readFileSync(path.join(ROOT, 'shared', 'ai', 'AiService.ts'), 'utf8');
 
     const effortsBlock = settingsSrc.match(/REASONING_EFFORTS\s*=\s*\[([^\]]*)\]/);
     const settingsEfforts = effortsBlock
@@ -616,7 +618,7 @@ function run() {
         }
     }
     // 设置面板必须拿 AiService 的三档；手抄一份清单就等于把"两边分叉"的坑重新埋回去
-    if (!/EFFORT_OPTIONS[,}\s]/.test(floatingSrc) || !/from '\.\.\/services\/AiService'/.test(floatingSrc)) {
+    if (!/EFFORT_OPTIONS[,}\s]/.test(floatingSrc) || !/from '[^']*shared\/ai\/AiService'/.test(floatingSrc)) {
         effortProblems.push('Floating.tsx 没有从 AiService 取 EFFORT_OPTIONS，档位可能又成了手抄清单');
     }
     if (/const EFFORT_OPTIONS/.test(floatingSrc)) {

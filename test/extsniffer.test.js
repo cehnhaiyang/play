@@ -37,8 +37,8 @@ const run = () => {
     fails.length = 0;
 
     const C = require('./build/extension/src/shared/classify.js');
-    const CONST = require('./build/const.js');
-    const MAIN_SRC = fs.readFileSync(path.join(ROOT, 'electron', 'main.js'), 'utf8');
+    const CONST = require('./build/shared/core/index.js');
+    const MAIN_SRC = fs.readFileSync(path.join(ROOT, 'app', 'main', 'main.js'), 'utf8');
 
     const classify = (url, contentType, documentUrl) =>
         C.classifyResponse({ url, contentType: contentType || '', documentUrl });
@@ -274,19 +274,19 @@ const run = () => {
         }
     });
 
-    check('分片正则与 const.ts 的源码字符串一致', () => {
-        // 插件用 const.ts 的源码字符串构造正则，main.js 是逐字复制的一份。
+    check('分片正则与 shared/core 的源码字符串一致', () => {
+        // 插件用 shared/core/media.ts 的源码字符串构造正则，main.js 是逐字复制的一份。
         // 这里确认插件侧真的用了共享源码（不是自己又写了一遍）。
         const src = fs.readFileSync(
             path.join(ROOT, 'extension', 'src', 'shared', 'classify.ts'), 'utf8');
         assert(src.includes('HLS_SEGMENT_RE_SOURCE'), 'classify.ts 必须 import 共享的分片正则源码');
         assert(!/\(\?:\^\|\/\)\(?:segment\|seg\|chunk/.test(src),
-            'classify.ts 自己抄了一份分片正则 —— 应该 import const.ts 的那份');
-        assert(typeof CONST.HLS_SEGMENT_RE_SOURCE === 'string', 'const.ts 应导出正则源码字符串');
+            'classify.ts 自己抄了一份分片正则 —— 应该 import shared/core 的那份');
+        assert(typeof CONST.HLS_SEGMENT_RE_SOURCE === 'string', 'shared/core 应导出正则源码字符串');
     });
 
     /* ====================================================================== */
-    /* 8. 与 const.ts 的判据同口径                                              */
+    /* 8. 与 shared/core 的判据同口径                                          */
     /* ====================================================================== */
 
     check('分类结果与 getMediaType 对同一地址结论一致', () => {
@@ -302,6 +302,97 @@ const run = () => {
             eq(classify(url, '')?.type, expected, `${url} 的嗅探分类`);
             eq(CONST.getMediaType(url, undefined, url), expected, `${url} 的 getMediaType 分类`);
         }
+    });
+
+    /* ====================================================================== */
+    /* 9. shared/core 的宿主无关性（service worker 能安全 import）              */
+    /* ====================================================================== */
+
+    check('shared/core 索引里没有碰宿主全局的模块', () => {
+        /*
+         * 这是整个 shared/ 分层存在的理由，必须被钉住。
+         *
+         * 插件 service worker **没有 DOM**：`document` / `window` / `localStorage`
+         * 全都不存在。而 shared/core 会被 service worker import ——
+         * 一旦某个模块在**求值期**（模块顶层，而非函数体内）碰这些全局，
+         * service worker 装上就崩，且崩在模块顶层、没有任何指向性错误信息，
+         * 表现为"插件整个没反应"。TypeScript 拦不住这种错（它只看类型）。
+         *
+         * 判据分两层：
+         *  1. 索引文件本身不得导出已知需要 DOM 的模块（gallery 拖着 JSZip）；
+         *  2. 被导出的每个模块，其**模块顶层**不得出现宿主全局。
+         */
+        const indexPath = path.join(ROOT, 'shared', 'core', 'index.ts');
+        const indexSrc = fs.readFileSync(indexPath, 'utf8');
+        assert(!/from '\.\/gallery'/.test(indexSrc),
+            'shared/core/index.ts 导出了 gallery —— 它拖着 JSZip，会进 service worker bundle');
+
+        // 取出索引导出的模块名，逐个检查它们的模块顶层
+        const exported = [...indexSrc.matchAll(/^export \* from '\.\/([\w-]+)';/gm)].map((m) => m[1]);
+        assert(exported.length >= 10, `索引导出的模块太少（${exported.length}），正则可能失配了`);
+
+        const HOST_GLOBALS = /\b(localStorage|sessionStorage|document|window|navigator|FileReader|AudioContext)\b/;
+        const offenders = [];
+        for (const name of exported) {
+            const file = path.join(ROOT, 'shared', 'core', `${name}.ts`);
+            if (!fs.existsSync(file)) continue;
+            const src = fs.readFileSync(file, 'utf8');
+            /*
+             * 只看**模块顶层**：从文件头到第一个函数/箭头函数体之前。
+             * 简化判据：把「顶层语句」近似成"不缩进的行"（模块顶层的 import、
+             * const 声明、export 都从第 0 列开始，而函数体内部一律有缩进）。
+             * 这个近似对本仓库的排版成立，且失败方向是"报多了"而非"漏报"。
+             */
+            const topLevel = src.split('\n').filter((line) => /^[^\s]/.test(line)).join('\n');
+            // import 行本身不算（类型导入会被擦除，值导入由打包器处理）
+            const withoutImports = topLevel.split('\n')
+                .filter((line) => !/^import\b/.test(line)).join('\n');
+            const hit = withoutImports.match(HOST_GLOBALS);
+            if (hit) offenders.push(`${name}.ts 的模块顶层出现 ${hit[1]}`);
+        }
+        eq(offenders.length, 0, offenders.join('；'));
+    });
+
+    check('shared/core 能在无 DOM 的沙箱里被完整求值', () => {
+        /*
+         * 上一条是文本判据（近似），这一条是**真跑**：
+         * 把编译产物在一个屏蔽了 DOM 全局的沙箱里 require 一遍。
+         * 文本判据可能因为排版变化误报，这一条不会 —— 它测的就是
+         * "service worker 里 import 会不会当场炸"。
+         *
+         * 用 node:vm 造一个干净上下文：只给 CommonJS 需要的最小宿主
+         * （module/exports/require），**不给** document/window/localStorage。
+         * 任何模块顶层的宿主访问都会在这里抛 ReferenceError。
+         */
+        const vm = require('vm');
+        const built = path.join(__dirname, 'build', 'shared', 'core', 'index.js');
+        assert(fs.existsSync(built), '找不到 shared/core 的编译产物');
+
+        const sandbox = { module: { exports: {} }, exports: {}, console, TextEncoder, TextDecoder, URL, atob, btoa };
+        sandbox.exports = sandbox.module.exports;
+        sandbox.require = (id) => {
+            // 编译产物内部互相 require 时，继续在同一个沙箱里求值
+            const resolved = require.resolve(id, { paths: [path.dirname(built)] });
+            const code = fs.readFileSync(resolved, 'utf8');
+            const sub = { module: { exports: {} }, exports: {}, console, TextEncoder, TextDecoder, URL, atob, btoa };
+            sub.exports = sub.module.exports;
+            sub.require = sandbox.require;
+            vm.createContext(sub);
+            vm.runInContext(code, sub, { filename: resolved });
+            return sub.module.exports;
+        };
+
+        vm.createContext(sandbox);
+        const code = fs.readFileSync(built, 'utf8');
+        vm.runInContext(code, sandbox, { filename: built });
+
+        const core = sandbox.module.exports;
+        // 求值成功还不够：核心导出必须真的可用，否则"没崩"可能只是空模块
+        assert(typeof core.getMediaType === 'function', '沙箱里拿不到 getMediaType');
+        assert(typeof core.MEDIA_EXTENSIONS === 'object', '沙箱里拿不到 MEDIA_EXTENSIONS');
+        assert(typeof core.buildCookieKeys === 'function', '沙箱里拿不到 buildCookieKeys');
+        eq(core.getMediaType('https://a.com/x.m3u8', undefined, 'https://a.com/x.m3u8'), 'stream',
+            '无 DOM 沙箱里 getMediaType 结论不对');
     });
 
     if (fails.length > 0) {

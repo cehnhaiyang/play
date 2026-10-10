@@ -9,15 +9,15 @@
  *
  * ## 后缀表是**派生**的，不是抄的
  *
- * 应用侧的 `electron/main.js` 里那张表是**手抄副本**（主进程不能 import TS），
- * 由 `test/sniffer.test.js` 盯着不漂移。插件没有这个限制 —— 它和应用共用
- * 同一个 `const.ts`，所以这里直接从 `MEDIA_EXTENSIONS` 派生。
+ * 应用侧的 `app/main/main.js` 里那张表是**手抄副本**（主进程不能 import TS），
+ * 由 `test/mainstatic.test.js` 盯着不漂移。插件没有这个限制 —— 它和应用共用
+ * 同一个 `shared/core/media.ts`，所以这里直接从 `MEDIA_EXTENSIONS` 派生。
  *
  * 这不只是省事：手抄副本的历史事故是 `.avif` 只进了其中一份，同一个文件
  * 走两条路径结论不同。派生之后"新增后缀要改几处"这个问题从根上消失了。
  */
-import { HLS_SEGMENT_RE_SOURCE, MEDIA_EXTENSIONS, isAcgUrl } from '../../../const';
-import type { MediaType } from '../../../meta';
+import { HLS_SEGMENT_RE_SOURCE, MEDIA_EXTENSIONS, isAcgUrl } from '../../../shared/core';
+import type { MediaType } from '../../../shared/meta';
 
 /**
  * 表里有、但**不进嗅探列表**的后缀。
@@ -52,7 +52,7 @@ export const IMAGE_EXTS = extsOfType('image');
  * 两张表而不是一张：`ogg` 在主类型下含义不同 —— video/ogg 是 `.ogv`、
  * audio/ogg 是 `.ogg`。合成一张必然把其中一个映射错。
  *
- * ⚠️ 这是 `electron/main.js` 同名表的**第二份**。迁移期由
+ * ⚠️ 这是 `app/main/main.js` 同名表的**第二份**。迁移期由
  * `test/extsniffer.test.js` 逐条比对两边，避免"插件判 mkv、应用判 matroska"。
  * 主进程那份随自建浏览器外壳一起删除后，这里就是唯一一份。
  */
@@ -175,7 +175,7 @@ export interface ClassifyInput {
 /**
  * 判定一条响应是不是可下载的媒体。不是则返回 null。
  *
- * 三级判据，与 `electron/main.js` 的嗅探回调同序：
+ * 三级判据，与 `app/main/main.js` 的嗅探回调同序：
  *   1. content-type（最可信，服务器直接说了是什么）
  *   2. URL 路径后缀
  *   3. 查询参数里藏着的后缀

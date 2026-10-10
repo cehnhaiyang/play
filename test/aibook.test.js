@@ -28,12 +28,12 @@ const check = (name, fn) => {
 };
 
 const run = () => {
-  const aiService = require(path.join(BUILD, 'services', 'AiService.js'));
-  // .aibook 格式与图片编解码在根目录 const.ts（与 .gallery 格式段并列）。
+  const aiService = require(path.join(BUILD, 'shared', 'ai', 'AiService.js'));
+  // .aibook 格式与图片编解码在 shared/core/aibook.ts（与 .gallery 格式段并列）。
   // 必须 require 编译产物里的**同一份源码**：曾经它指向一个早已不存在的
   // 陈旧 build 产物，clean 重建后套件直接 MODULE_NOT_FOUND；
   // 更要紧的是，靠陈旧产物运行时，这 30 项断言测的不是产品代码。
-  const constMod = require(path.join(BUILD, 'const.js'));
+  const constMod = require(path.join(BUILD, 'shared', 'core', 'index.js'));
 
   const { parseStoryJson } = aiService;
   const {

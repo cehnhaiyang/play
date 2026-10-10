@@ -2,7 +2,7 @@
     "name": "video",
     "private": true,
     "version": "1.0.0",
-    "main": "electron/main.js",
+    "main": "app/main/main.js",
     "scripts": {
         "dev": "vite",
         "build": "vite build",
@@ -13,7 +13,8 @@
         "ext:build": "vite build --config extension/vite.config.mts && node test/manifest.test.js",
         "ext:dev": "vite build --config extension/vite.config.mts --watch",
         "ext:check": "node test/manifest.test.js",
-        "ext:typecheck": "tsc --noEmit -p extension/tsconfig.json"
+        "ext:typecheck": "tsc --noEmit -p extension/tsconfig.json",
+        "typecheck": "tsc --noEmit && tsc --noEmit -p extension/tsconfig.json"
     },
     "dependencies": {
         "@tailwindcss/postcss": "^4.3.3",
@@ -50,7 +51,7 @@
         ],
         "files": [
             "dist/**/*",
-            "electron/**/*",
+            "app/main/**/*",
             "node_modules/ffmpeg-static/**/*"
         ],
         "directories": {

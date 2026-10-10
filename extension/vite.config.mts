@@ -37,13 +37,17 @@ export default defineConfig({
     modulePreload: false,
     target: 'chrome116',
     /*
-     * const.ts 顶层 `import JSZip from 'jszip'`（供 .gallery 打包用）。
-     * 插件只取它的纯常量与纯函数，用不到 JSZip，但那个顶层 import 是
+     * `shared/core/gallery.ts` 顶层 `import JSZip from 'jszip'`（供 .gallery 打包用）。
+     * 插件只取 shared/core 的纯常量与纯函数，用不到 JSZip，但那个顶层 import 是
      * **有副作用的 UMD 包装**，打包器不敢删 —— 结果是 103KB 的
      * zip 库连同它的 document/MutationObserver polyfill 被塞进
      * service worker（一个没有 DOM、且每次唤醒都要重新求值的环境）。
      *
-     * 声明 jszip 无副作用，让 tree-shaking 在"没人用它的导出"时丢掉整包。
+     * 两道防线，都要留着：
+     *  1. shared/core 的索引**不导出** gallery（要按具体路径 import），
+     *     正常写法下它根本进不了依赖图；
+     *  2. 这里声明 jszip 无副作用，兜住"有人误引了具体路径"的情况。
+     *
      * 这不是把它 stub 掉：一旦真有代码用到 JSZip，它的导出会被保留，
      * 只是不再无条件进包。
      */

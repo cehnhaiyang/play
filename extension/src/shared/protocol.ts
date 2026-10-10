@@ -1,7 +1,7 @@
 /**
  * 插件内部的消息协议（侧边栏 ↔ service worker）。
  *
- * 与 `meta/bridge.ts` 的 `BridgeRequest` **不是一回事**，刻意分开：
+ * 与 `shared/shared/meta/bridge.ts` 的 `BridgeRequest` **不是一回事**，刻意分开：
  *
  *   · 这里走 `chrome.runtime.sendMessage`，同进程内，消息不会被序列化截断，
  *     也没有 native messaging 的 1MB 上限；
@@ -11,12 +11,12 @@
  * 混用一套类型会让"这个字段能不能放"变成看运气 —— 在插件内部随手塞一张
  * base64 图片没问题，同样的代码走桥就会静默失败。
  */
-import type { MediaType } from '../../../meta';
+import type { MediaType } from '../../../shared/meta';
 
 /**
  * 一条嗅探结果。
  *
- * 形状与 `meta/interface.ts` 的 `FoundLink` 对齐（`source` 固定 'network'），
+ * 形状与 `shared/meta/interface.ts` 的 `FoundLink` 对齐（`source` 固定 'network'），
  * 这样将来交给播放器时不需要再转一次。
  */
 export interface SniffedMedia {
