@@ -23,8 +23,8 @@ import type { MediaType } from '../../../meta';
  * 表里有、但**不进嗅探列表**的后缀。
  *
  * `.aibook` 在 `MEDIA_EXTENSIONS` 里属 image（导入时没被识别成绘本的兜底展示），
- * 但它是本应用的归档格式，不是网页上的媒体资源。与 `hooks/useBrowse.ts` 的
- * `SNIFF_EXCLUDED_EXTS` 同口径。
+ * 但它是本应用的归档格式，不是网页上的媒体资源。应用侧嗅探已有同口径的排除表，
+ * 这里保持一致：同一个地址在两边不该得出不同结论。
  */
 const SNIFF_EXCLUDED_EXTS = new Set(['aibook']);
 

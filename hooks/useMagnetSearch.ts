@@ -30,8 +30,8 @@ import { search as runSearch, sitesFor } from '../services/SearchService';
  * 代理配在 Chromium 会话上，因此自动生效，不需要 IPC 中转。
  * 只有「把 .torrent 落到磁盘」需要主进程（文件系统权限）。
  *
- * 命名说明：不叫 useSearch，因为 useBrowse 里的地址栏搜索引擎选择器
- * （google/bing/duckduckgo）已经占用了那个名字，与此处无关。
+ * 命名说明：不叫 useSearch，因为"地址栏搜索引擎选择器"
+ * （google/bing/duckduckgo）历史上占用了那个名字，与此处无关。
  */
 
 const DEFAULT_QUERY: MagnetSearchState = {

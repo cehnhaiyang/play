@@ -250,7 +250,6 @@ function run() {
      */
     checks += 1;
     const mainSrc = fs.readFileSync(path.join(ELECTRON_DIR, 'main.js'), 'utf8');
-    const browseSrc = fs.readFileSync(path.join(ROOT, 'components', 'BrowsePanel.tsx'), 'utf8');
     const identityProblems = [];
 
     // 1) 不许凭 process.versions 拼一个"看起来像 Chrome 稳定版"的 UA。
@@ -267,27 +266,17 @@ function run() {
     const scannedIdentityFiles = {
         'electron/main.js': mainSrc,
         'electron/acgmhoService.js': fs.readFileSync(path.join(ELECTRON_DIR, 'acgmhoService.js'), 'utf8'),
-        // 外部浏览器模块也在扫描范围内：它是后来人最容易顺手加 UA 覆写的地方
-        'electron/externalBrowserSolver.js': fs.existsSync(path.join(ELECTRON_DIR, 'externalBrowserSolver.js'))
-            ? fs.readFileSync(path.join(ELECTRON_DIR, 'externalBrowserSolver.js'), 'utf8') : '',
-        'components/BrowsePanel.tsx': browseSrc,
     };
     for (const [name, src] of Object.entries(scannedIdentityFiles)) {
         const m = src.match(uaLiteral);
         if (m) identityProblems.push(`${name} 里有硬编码 UA 字面量：${m[0].slice(0, 72)}…`);
     }
 
-    // 3) 全仓库不许再有"对 session/webContents 覆写 UA"这一类调用
+    // 3) 主进程不许"对 session/webContents 覆写 UA"
     //    （main.js 的 setUserAgent 只是把值推给站点模块，不动浏览器，所以不算）
-    const overrideFiles = {
-        'electron/main.js': mainSrc,
-        'electron/browserService.js': fs.existsSync(path.join(ELECTRON_DIR, 'browserService.js'))
-            ? fs.readFileSync(path.join(ELECTRON_DIR, 'browserService.js'), 'utf8') : '',
-        'components/BrowsePanel.tsx': browseSrc,
-    };
-    for (const [name, src] of Object.entries(overrideFiles)) {
-        const m = src.match(/\.\s*setUserAgent\s*\(/);
-        if (m) identityProblems.push(`${name} 仍在覆写浏览器 UA：${m[0]}（UA 与 UA-CH 会分家）`);
+    {
+        const m = mainSrc.match(/\.\s*setUserAgent\s*\(/);
+        if (m) identityProblems.push(`electron/main.js 仍在覆写浏览器 UA：${m[0]}（UA 与 UA-CH 会分家）`);
     }
 
     // 4) 不许再删 Client Hints
@@ -295,47 +284,9 @@ function run() {
         identityProblems.push('main.js 仍在删 sec-ch-ua*（删 CH = 谎报浏览器，Google/CF 都判伪造）');
     }
 
-    // 5) 渲染层不许再自带 UA
-    if (/useragent\s*=/i.test(browseSrc)) {
-        identityProblems.push('BrowsePanel.tsx 的 <webview> 仍写了 useragent 属性（UA 会有第二个来源）');
-    }
-
-    // 6) Node 直抓的 UA 必须来自浏览器会话实际值，而不是再算一份
+    // 5) Node 直抓的 UA 必须来自浏览器会话实际值，而不是再算一份
     if (!/setUserAgent\(session\.defaultSession\.getUserAgent\(\)\)/.test(mainSrc)) {
         identityProblems.push('main.js 应把会话实际 UA 推给站点模块（cf_clearance 与 UA 绑定）');
-    }
-
-    /**
-     * 7) 外部真实浏览器模块不许伪造身份、不许绑死代理端口。
-     *
-     * 这个模块的全部价值在于"它就是台干净的真浏览器"：
-     *   · 传 --user-agent 或 CDP 的 userAgentMetadata 等于把伪造搬进唯一可信的那一环
-     *     （实测 Electron 侧 userAgentMetadata 四种形状全部 Invalid parameters，
-     *      改不动才是对的 —— 见 electron/externalBrowserSolver.js 顶部数据）；
-     *   · 写死某个代理端口会把"站点没放行"和"用户的代理没开"混成一件事，
-     *       端口只能从会话已生效的那条路问出来（proxyServerForExternalBrowser）。
-     */
-    const extSrc = scannedIdentityFiles['electron/externalBrowserSolver.js'] || '';
-    // 只看代码骨架：这个模块的注释里记着"哪些做法已被实测否掉"，
-    // 直接对原文匹配会让注释把检查点着（自己解释自己的历史 = 永远修不掉的假故障）。
-    const extCode = stripLiterals(extSrc);
-    if (extSrc && /--user-agent|userAgentMetadata/.test(extCode)) {
-        identityProblems.push('外部浏览器模块开始伪造 UA/UA-CH 了（它的可信度就是靠不伪造）');
-    }
-    if (extSrc && /127\.0\.0\.1:\d{2,5}/.test(extCode)) {
-        identityProblems.push('外部浏览器模块写死了代理端点（有代理才用，没有就跟随系统）');
-    }
-
-    /**
-     * 8) 调试端口必须是"分配出来的具体值"，不能交回浏览器自己选。
-     *
-     * 实测（其余参数完全一致、两轮交替采样）：--remote-debugging-port=0 两次都卡满 78s
-     * 未放行，固定端口两次都 14s 放行 —— 这个开关比前面任何一条参数都关键，
-     * 所以只认 allocateDebugPort 这一条路（模板串里的字面量在 extCode 里不可见，
-     * 因此这里查的是"还在不在用分配函数"，改成写死 0 就是把它拆掉了）。
-     */
-    if (extSrc && !/=\s*await allocateDebugPort\(\)/.test(extCode)) {
-        identityProblems.push('外部浏览器模块不再自己分配具体调试端口了（实测端口 0 过不了验证）');
     }
 
     if (identityProblems.length > 0) {
@@ -392,23 +343,33 @@ function run() {
     }
 
     /**
-     * webRequest 监听器的注册范围必须对称。
+     * webRequest 监听器必须挂到应用真正会用到的每一个 session 上。
      *
      * Electron 的 webRequest **每个 session 每个事件只保留最后一个监听器**
      * （官方文档："Only the last attached listener will be used"），
      * 所以"挂到哪些 session"必须显式覆盖，不能靠重复注册叠加。
      *
-     * 实测事故：嗅探（setupSniffer）在 did-attach-webview 里按 webview 的 session
-     * 补挂，而请求头改写只在 createWindow 里挂了主窗口那一个 ——
-     * 一旦 webview 带 partition（独立 session），UA / 防盗链 Referer 就全都不生效。
+     * 自建浏览器外壳（含 <webview>）拆除后，应用只剩主窗口一个 session，
+     * 原先那组"did-attach-webview 里补挂"的断言随之失效 —— 它守的是
+     * 一个已经不存在的结构。现在守的是剩下这条：
+     *
+     *   · webviewTag 必须关掉。外壳没了却还开着它，等于给渲染层留一个
+     *     能加载任意远程页面的口子，而没有任何地方需要 —— 而且一旦有人
+     *     真用起来，上面那条"每个 session 只留最后一个监听器"的坑会立刻复现；
+     *   · 主窗口的 session 必须两样都挂上（嗅探 + 请求头改写），
+     *     且请求头改写要带幂等记账：将来若再加第二个 session，
+     *     重复注册会把先注册的顶掉，而不是叠加。
      */
     checks += 1;
     const coverageProblems = [];
-    if (!/did-attach-webview[\s\S]{0,400}?setupSniffer\(webContents\.session\)/.test(mainSrc)) {
-        coverageProblems.push('did-attach-webview 里没有为 webview 的 session 挂 setupSniffer');
+    if (/webviewTag:\s*true/.test(mainSrc)) {
+        coverageProblems.push('webviewTag 仍开着：浏览器外壳已拆，应用里不该再能嵌入远程页面');
     }
-    if (!/did-attach-webview[\s\S]{0,400}?applyRequestHeaderRules\(webContents\.session\)/.test(mainSrc)) {
-        coverageProblems.push('did-attach-webview 里没有为 webview 的 session 挂请求头改写');
+    if (!/applyRequestHeaderRules\(mainWindow\.webContents\.session\)/.test(mainSrc)) {
+        coverageProblems.push('主窗口 session 没有挂请求头改写（防盗链 Referer 会全部失效）');
+    }
+    if (!/setupSniffer\(session\.defaultSession\)/.test(mainSrc)) {
+        coverageProblems.push('默认 session 没有挂 setupSniffer');
     }
     // 幂等记账必须**真的被用上**：只断言 `new WeakSet()` 存在是空断言 ——
     // 把 has/add 两行删掉、留下声明，一样能通过。三条都要查。
@@ -423,7 +384,7 @@ function run() {
     }
     if (coverageProblems.length > 0) {
         failed += 1;
-        console.log('  FAIL  webRequest 注册范围不对称：');
+        console.log('  FAIL  webRequest 注册范围不完整：');
         for (const p of coverageProblems) console.log(`          ${p}`);
     }
 

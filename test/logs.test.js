@@ -134,10 +134,10 @@ const run = () => {
 
     check('契约：悬浮球有运行日志面板（元信息 + 顺序 + 常驻）', () => {
         const floatingSrc = fs.readFileSync(path.join(ROOT, 'components', 'Floating.tsx'), 'utf8');
-        assert(/type FloatingPanelType = 'sniff' \| 'settings' \| 'logs';/.test(floatingSrc),
+        assert(/type FloatingPanelType = 'settings' \| 'logs';/.test(floatingSrc),
             'FloatingPanelType 没有加 logs');
         assert(/logs: \{\s*\n?\s*label: '运行日志'/.test(floatingSrc), 'PANEL_META 里没有运行日志');
-        assert(/'sniff', 'settings', 'logs'/.test(floatingSrc), 'PANEL_ORDER 里没有 logs');
+        assert(/'settings', 'logs'/.test(floatingSrc), 'PANEL_ORDER 里没有 logs');
         assert(/logs: logsNode,/.test(floatingSrc), 'panels 表里没有挂 logsNode');
         assert(floatingSrc.includes('Object.keys(PANEL_META)'), '面板落盘校验丢了 —— 存量值会打开空白页');
     });

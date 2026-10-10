@@ -183,14 +183,51 @@ const run = () => {
     });
 
     /* ====================================================================== */
-    /* 6. 规模哨兵：端点数量变化必须是有意的                                    */
+    /* 6. 迁移进度哨兵：extension 路由的应用侧 handler 只减不增                  */
     /* ====================================================================== */
 
-    check('端点总数与主进程注册数一致（规模哨兵）', () => {
-        const tableCount = Object.keys(bridge.BRIDGE_ENDPOINTS).length;
-        eq(tableCount, registeredHandlers.size,
-            `归属表 ${tableCount} 条 vs 主进程注册 ${registeredHandlers.size} 个。`
-            + '数量不等说明有端点只存在于一边。');
+    /**
+     * 原先这里断言的是"归属表条数 == 主进程注册数"。
+     *
+     * 那条等式在拆外壳之前成立纯属巧合：它两边比的不是一回事 ——
+     * 左边含 11 个 extension 路由的端点，右边是应用侧 handler，
+     * 只是因为那时应用还替插件持有全部 handler，数量才撞上。
+     * browserService.js 一删（带走 browser-downloads / browser-download-action
+     * 两个 handler），等式就塌了 —— 而塌掉的是等式，不是产品。
+     *
+     * 现在改成真正要守的那条纪律：**extension 路由的端点，应用侧只许减不许增**。
+     * 增 = 有人把已经归给插件的功能又在应用里实现了一遍（拆分倒退）；
+     * 减完没从名单里划掉 = 名单变成一句过期的话，下次没人信它。
+     */
+    const STILL_IN_APP = [
+        'get-cookies',
+        'set-cookie',
+        'remove-cookie',
+        'sniffer-set-enabled',
+        'acgmho-probe',
+        'acgmho-channels',
+        'acgmho-channel-list',
+        'acgmho-fetch-pages',
+        'acgmho-cancel-fetch-pages',
+    ];
+
+    check('extension 路由的端点不得新增应用侧 handler', () => {
+        const allowed = new Set(STILL_IN_APP);
+        const extra = Object.entries(bridge.BRIDGE_ENDPOINTS)
+            .filter(([name, meta]) => meta.route === 'extension'
+                && registeredHandlers.has(name)
+                && !allowed.has(name))
+            .map(([name]) => name);
+        eq(extra.length, 0,
+            `这些端点归给插件，应用侧却又注册了 handler：${extra.join('、')}。`
+            + '拆分方向是应用把能力交出去，不是收回来。');
+    });
+
+    check('已迁完的端点要从 STILL_IN_APP 名单里划掉', () => {
+        const stale = STILL_IN_APP.filter((name) => !registeredHandlers.has(name));
+        eq(stale.length, 0,
+            `这些端点应用侧已经没有 handler 了，请从 STILL_IN_APP 里删掉：${stale.join('、')}。`
+            + '名单留着过期条目，下次就没人拿它当判据了。');
     });
 
     if (fails.length > 0) {

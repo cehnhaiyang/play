@@ -111,7 +111,7 @@ export const saveStr = (key: string, value: string, ns = ''): boolean => {
 /**
  * 后缀 → 媒体类型的**唯一真值**（按扩展名判定的路径都从这里派生）。
  *
- * 派生方：getMediaType 的查表、嗅探扫描清单（useBrowse 的 CATEGORIES）、
+ * 派生方：getMediaType 的查表、插件嗅探扫描清单（extension/src/shared/classify.ts）、
  * 画廊页码识别（本文件的 IMAGE_EXTENSIONS）、主进程的嗅探后缀表（派生副本）。
  * 曾经这几处各写一份，结果 `.avif` 只进了主进程嗅探表 ——
  * 页内嗅探扫到它归为 other 后直接丢弃，同一个文件走两条路径结论不同。
@@ -422,8 +422,8 @@ export const revokeVideoFile = (videoFile: VideoFile): void => {
  *   紧接着 revoke 有概率拿到已回收的 URL。留一拍再释放更稳，
  *   5 秒对用户无感（文件此时早已落盘）。
  *
- * Electron 下这次下载会被 session 的 will-download 接管，落进下载目录并
- * 出现在下载列表里（见 electron/browserService.js 的 beginDownload）。
+ * Electron 下这次下载走渲染层自己的 blob URL，不经过主进程的下载拦截
+ * （浏览器外壳拆除后，应用里已经没有 will-download 接管了）。
  */
 export const downloadBlob = (blob: Blob, fileName: string): void => {
     const url = URL.createObjectURL(blob);
@@ -709,7 +709,7 @@ export const isLinkFromPage = (
  *  - 纯数字文件名（8 位以上，如时间戳命名）。
  * 判据前先剥掉扩展名，否则 `index.m3u8` 这类会被当成"有内容"。
  *
- * **新增与更新两条路径必须共用这一个判据**（useBrowse 的 addLinks）。
+ * **新增与更新两条路径必须共用这一个判据**（插件侧 sniff 的 addLinks）。
  * 原先它们各写一份：新增用这套较全的，更新只看 `startsWith('Media_')` ——
  * 于是标题为文件名（`index.m3u8`，入库时页面标题还没拿到）的条目
  * 永远升不了级，列表里一直挂着那个文件名。

@@ -34,7 +34,6 @@ import { generateStoryFromImages, toImageInput, AIBOOK_MAX_SOURCE_IMAGES, genera
 
 interface PlayPanelProps {
     player: UsePlayReturn;
-    onBackToBrowse: () => void;
     /**
      * 播放器是否在前台。
      *
@@ -1422,7 +1421,7 @@ const StoryReader: React.FC<StoryReaderProps> = ({ file, pages, onCacheAudio, on
     );
 };
 
-export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse, isVisible }) => {
+export const PlayPanel: React.FC<PlayPanelProps> = ({ player, isVisible }) => {
     const { state, playlist, videoRef, currentFile, mediaError, mediaWarning, pageInfo, methods } = player;
 
     // 纯视频全屏容器：隔离左侧播放列表
@@ -2477,9 +2476,6 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse, is
                 <div className="p-3.5 border-b border-white/8 flex flex-col gap-2.5">
                     <div className="flex items-center justify-between gap-2">
                         <div className="flex items-center gap-1.5 min-w-0">
-                            <IconButton label="返回嗅探浏览" size="sm" onClick={onBackToBrowse}>
-                                <ArrowLeft className="w-4 h-4" />
-                            </IconButton>
                             <h2 className="text-sm font-bold text-white flex items-center gap-1.5 min-w-0">
                                 <ListMusic className="w-4 h-4 text-indigo-400 shrink-0" />
                                 <span className="truncate">播放列表</span>

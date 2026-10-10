@@ -1,10 +1,6 @@
 const { app, BrowserWindow, ipcMain, shell, webContents, dialog } = require('electron');
 const { probeGallery, downloadGallery, saveGalleryImages, fetchGalleryPages, normalizeGid, galleryTaskKey, galleryKeyMatches, GALLERY_CHANNELS, fetchChannelList, buildChannelListResult, channelListUrl, deriveListPageUrl, isCloudflareChallengePage, isCloudflareErrorPage, setUserAgent: pushUserAgentToSite } = require('./acgmhoService');
-const { fetchHtmlWithRealBrowser } = require('./externalBrowserSolver');
 const { getSettings, saveProxyPort, saveAiConfig, testAiConnection } = require('./settings');
-const {
-    setupBrowserSession, setupBrowserIpc, attachBrowserInput, attachGuestExtras, guardWebviewAttach,
-} = require('./browserService');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
@@ -1722,68 +1718,17 @@ function parseProxyAddressForChromium(value) {
     return { host, port, protocol };
 }
 
-// 浏览器兜底串行化：Cloudflare 对并发挑战敏感，同时只过一个，后到的排队。
-let browserSearchTail = Promise.resolve();
-function loadSearchPageViaBrowser(url) {
-    const run = browserSearchTail.then(() => loadSearchPageViaBrowserOnce(url));
-    // 链不断：某次失败不影响排队中的下一次
-    browserSearchTail = run.catch(() => { });
-    return run;
-}
-
-// 全文搜索被 Cloudflare 挑战拦下时的兜底：用本机真实浏览器静默取回渲染好的 HTML。
-//
-// 为什么只有这一条路（实测数据见 electron/externalBrowserSolver.js 顶部）：
-// 挑战放不放行取决于客户端身份是否自洽，而 Electron 内核的 UA-CH 品牌列表里
-// 没有 "Google Chrome"（UA 字符串却自称 Chrome/152.0.7977.130），window.chrome
-// 是空对象，私有状态令牌 /pat/ 拿 401。这三条在 Electron 内部无法补齐：
-// CDP 的 userAgentMetadata 四种参数形状全部 Invalid parameters，也就是说
-// 没有任何接口能改 UA-CH。所以应用内窗口过验证实测 120s/90s/71s 三连败，
-// 那条退路已经连同 challengeSolver.js 一起删掉了 —— 没有真实浏览器就直接报错，
-// 不再用一个必然失败的可见窗口把"站点没放行"和"这台机器没装浏览器"混成一件事。
-//
-// 取回内容这条路不改写任何 UA：浏览器的身份由它自己给，把 Chrome 的 UA 抄给
-// Node 直抓只会制造新的不一致（cf_clearance 与 UA 绑定，两边都对不上）。
-
-/**
- * 外部浏览器要用的代理，直接问当前会话已经生效的那条路。
+/*
+ * Cloudflare 兜底已整条移除（连同 electron/externalBrowserSolver.js）。
  *
- * 不重读设置、不解析端口字符串、更不写死某个端口：会话怎么出网，浏览器就怎么出网，
- * 否则会出现"应用里通了、取内容的浏览器没通"这种两边配置不一致的坑。
- * @returns {Promise<string>} 形如 http://127.0.0.1:10810；直连时返回空串（跟随系统/TUN）
+ * 原先这里在直抓被挑战拦下时，会拉起本机真实浏览器静默取回渲染好的 HTML。
+ * 拆分之后这条路没有存在意义了：搜索页由**浏览器插件**去取 ——
+ * 它就在那个浏览器里，会话、代理、UA-CH、cf_clearance 全是原生的，
+ * 根本不会遇到"应用内窗口过不了挑战"这个问题。
+ *
+ * 应用侧只保留直抓（带会话 cookie 与代理）；直抓被拦下就如实报错，
+ * 由插件那边补上这次请求。
  */
-async function proxyServerForExternalBrowser(url) {
-    const { session } = require('electron');
-    let resolved = '';
-    try {
-        resolved = await session.defaultSession.resolveProxy(url);
-    } catch (_e) {
-        return '';
-    }
-    // resolveProxy 可能回一串候选："PROXY a:1; SOCKS5 b:2"，取第一个可用的
-    for (const piece of String(resolved || '').split(';')) {
-        const [kind, hostPort] = String(piece).trim().split(/\s+/);
-        if (!hostPort || /direct/i.test(kind || '')) continue;
-        const proto = /socks/i.test(kind || '') ? 'socks5' : 'http';
-        return `${proto}://${hostPort}`;
-    }
-    return '';
-}
-
-async function loadSearchPageViaBrowserOnce(url) {
-    const log = (msg) => {
-        console.log('[cf-auto]', msg);
-        flowLog('[solver]', msg);
-    };
-    // 没装 Chrome/Edge 时 fetchHtmlWithRealBrowser 自己抛"本机没有安装 Chrome 或 Edge…"，
-    // 这里不再包一层：失败原因由那个模块给，避免同一个错误有两个来源。
-    const proxyServer = await proxyServerForExternalBrowser(url);
-    const { html, finalUrl } = await fetchHtmlWithRealBrowser({
-        url, isChallengePage: isCloudflareChallengePage, isErrorPage: isCloudflareErrorPage,
-        log, proxyServer,
-    });
-    return { html, finalUrl };
-}
 
 function setupGalleryHandlers() {
     if (galleryHandlersReady) return;
@@ -1836,47 +1781,17 @@ function setupGalleryHandlers() {
             flowLog('direct ok ms=', Date.now() - directStartedAt, 'items=', (listResult.items || []).length);
             return { success: true, ...listResult };
         } catch (error) {
-            // 直抓被挑战拦下或网络层失败（代理环境直连必挂 ETIMEDOUT/ECONNRESET）→
-            // 真浏览器窗口加载同一 URL：过了挑战就返回结果（clearance 同时进会话，
-            // 之后直抓恢复）；过不了就如实报"验证未通过"，不再把挑战页当结果解析成 0 条。
+            // 直抓被挑战拦下或网络层失败（代理环境直连必挂 ETIMEDOUT/ECONNRESET）。
+            //
+            // 原先这里会拉起本机真实浏览器再试一次；拆分之后不做了 ——
+            // 搜索页本来就该由浏览器插件去取（它就在浏览器里，会话与身份都是原生的）。
+            // 应用侧如实报错，让插件那边补上这次请求。
             const message = (error && error.message) || '列表加载失败';
             if (isSearch && /过于频繁/.test(message)) {
                 searchCooldownUntil = Date.now() + SEARCH_RATE_LIMIT_COOLDOWN_MS;
             }
-            const netOrChallenge = /验证|挑战|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EPIPE|socket hang up|Timeout fetching/i.test(message);
-            flowLog('direct fail:', message, '| netOrChallenge=', netOrChallenge);
-            if (isSearch && netOrChallenge) {
-                try {
-                    const page = Math.max(1, Number(opts.page) || 1);
-                    const url = page > 1 && opts.baseUrl
-                        ? deriveListPageUrl(opts.baseUrl, page)
-                        : channelListUrl('search', page, q);
-                    flowLog('fallback solver start', url);
-                    const { html, finalUrl } = await loadSearchPageViaBrowser(url);
-                    const built = buildChannelListResult({
-                        channelId: opts.channelId || 'search',
-                        page,
-                        query: q,
-                        html,
-                        finalUrl,
-                    });
-                    flowLog('fallback ok items=', built.items.length, 'htmlLen=', html.length, 'finalUrl=', finalUrl);
-                    return { success: true, ...built };
-                } catch (fallbackError) {
-                    console.error('acgmho-channel-list browser fallback failed:', fallbackError);
-                    flowLog('fallback fail:', (fallbackError && fallbackError.message) || 'unknown');
-                    // 兜底失败时透出兜底原因（如挑战未完成/网络阻断验证域名），
-                    // 比直抓阶段的 403 翻译更贴近实际发生了什么。
-                    return {
-                        success: false,
-                        message: (fallbackError && fallbackError.message) || message,
-                        items: [],
-                        hasMore: false,
-                    };
-                }
-            }
             console.error('acgmho-channel-list failed:', error);
-            flowLog('channel-list fail (no fallback):', message);
+            flowLog('channel-list fail:', message);
             return { success: false, message, items: [], hasMore: false };
         }
     });
@@ -3124,7 +3039,8 @@ function createWindow() {
             nodeIntegration: false,
             allowRunningInsecureContent: false,
             webSecurity: false,
-            webviewTag: true,
+            // webviewTag 已关：应用里不再有浏览器外壳，主窗口只是播放器界面。
+            // 留着它等于给渲染层开一个能加载任意远程页面的口子，而没有任何地方需要。
         },
     });
 
@@ -3143,10 +3059,15 @@ function createWindow() {
         mainWindow = null;
     });
 
-    // 弹窗洪水节流：页面里 `while(1) window.open(url)` 会无上限开新标签页
-    // （每个都带一个 webview），正常站点只会零星弹窗。同一来源 3 秒内开
-    // 第 9 个起直接拒掉 —— 阈值只拦机器，不拦人。两处 setWindowOpenHandler
-    // （主窗口 + guest）共用这一份记账。
+    /**
+     * 应用窗口里的 window.open 一律交给系统浏览器。
+     *
+     * 原先这里把 URL 发给渲染层、由自建外壳开新标签页 —— 外壳已经拆了。
+     * 现在主窗口只是播放器界面，它自己要弹的东西（比如"打开项目主页"）
+     * 本来就该用用户的默认浏览器打开，而不是在应用里再开一个窗口。
+     *
+     * 保留节流：万一渲染层出 bug 进了循环，不至于瞬间拉起几百个浏览器进程。
+     */
     const popupOpenTimes = new WeakMap();
     const allowPopupOpen = (source) => {
         const now = Date.now();
@@ -3162,32 +3083,29 @@ function createWindow() {
     };
 
     mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-        if (!allowPopupOpen(mainWindow.webContents)) return { action: 'deny' };
-        mainWindow.webContents.send('navigate-to-url', url);
+        if (allowPopupOpen(mainWindow.webContents) && /^https?:\/\//i.test(url)) {
+            void shell.openExternal(url);
+        }
         return { action: 'deny' };
     });
 
     const filter = { urls: ['*://*/*'] };
 
     /**
-     * 请求头改写：补防盗链 Referer；顺带把该 session 的 UA 对齐内核。
+     * 请求头改写：给防盗链域名补 Referer。
      *
-     * 抽成具名函数是因为它必须挂到**每一个**会用到的 session 上，
-     * 而不只是主窗口那个：
+     * 当前只挂主窗口这一个 session —— 自建浏览器外壳（含 webview）已拆除，
+     * 应用里不再有别的 session 会去请求这些站点。
      *
-     *  - Electron 的 webRequest **每个 session 每个事件只保留最后一个监听器**
-     *    （官方文档："Only the last attached listener will be used"）。
-     *    所以重复注册不是"叠加"而是"替换"，不能靠多调几次来覆盖多个 session。
-     *  - `<webview>` 默认继承宿主窗口的 session，但一旦将来有人给 webview 加
-     *    partition（独立 session），主窗口那次注册就管不到它了 ——
-     *    表现为防盗链 403，而且 partition session 的 UA 会退回 Electron 默认值
-     *    （自带 `Electron/` token），
-     *    而嗅探（setupSniffer）**有**覆盖多 session 的守卫，两者不对称。
+     * 但仍保留幂等记账，理由是 Electron 的一条硬约束：
+     * webRequest **每个 session 每个事件只保留最后一个监听器**
+     * （官方文档："Only the last attached listener will be used"）。
+     * 也就是说重复注册不是"叠加"而是"替换"。将来若再加一个 session
+     * （或者外壳以别的形式回来），没有这道守卫就会把先注册的悄悄顶掉，
+     * 表现为"某个域名的防盗链 Referer 时有时无"，极难定位。
      *
-     * 用 WeakSet 记账：同一个 session 只注册一次，避免后注册的把先注册的顶掉。
-     *
-     * 定义放在 did-attach-webview 注册**之前**：那里会引用它。
-     * 事件回调不会同步触发，所以放后面其实也不会 TDZ，但那样读起来要额外推一遍时序。
+     * 这里**不碰 UA 与 sec-ch-ua\***，也不覆写任何 session 的 UA：
+     * UA 与 Client Hints 全部交回 Chromium 自己发，天然同源。
      */
     const headerRewriteSessions = new WeakSet();
     const applyRequestHeaderRules = (sess) => {
@@ -3200,11 +3118,9 @@ function createWindow() {
             try {
                 hostname = new URL(details.url).hostname;
             } catch (_error) { }
-            // 这里**不再碰 UA 与 sec-ch-ua\***，也不再覆写任何 session 的 UA。
-            // 原先把非白名单域的 UA 一刀切改成旧版 Chrome、并删掉三个 Client Hints，
+            // 原先这里对非白名单域把 UA 一刀切改成旧版 Chrome、并删掉三个 Client Hints，
             // 结果是"UA 声称 122 / sec-ch-ua 报内核 152 / navigator 又是第三个值"——
             // Google 据此判定"浏览器或应用可能不安全"，Cloudflare 把它当伪造流量。
-            // 现在 UA 与 Client Hints 全部交回 Chromium 自己发，天然同源。
 
             if (/(^|\.)bilivideo\.com$/i.test(hostname) || /(^|\.)hdslb\.com$/i.test(hostname)) {
                 requestHeaders.Referer = 'https://www.bilibili.com/';
@@ -3222,39 +3138,7 @@ function createWindow() {
         });
     };
 
-    mainWindow.webContents.on('did-attach-webview', (_event, webContents) => {
-        if (webContents.session) {
-            setupSniffer(webContents.session);
-            // 请求头规则同样要覆盖到这个 session：webview 若带 partition
-            // （独立 session），只挂主窗口那次注册就管不到它的请求 ——
-            // 表现为防盗链 403、UA 与渲染层不一致。WeakSet 记账保证幂等。
-            applyRequestHeaderRules(webContents.session);
-            // 浏览器能力同理：下载拦截与权限策略也按 session 生效。
-            // 漏了这一行，webview 一旦带 partition，网页下载会绕过记录、
-            // 权限会退回 Electron 的默认"全部允许"——两件事都不报错。
-            setupBrowserSession(webContents.session);
-        }
-
-        // 焦点在页面里时，只有 guest 能收到键盘事件（webview 是跨进程 OOPIF，
-        // 键盘/滚轮不冒泡到宿主页面）。浏览器级快捷键必须挂在这里，
-        // 否则用户一点进页面就全部静默失效。见 browserService 顶部注释。
-        attachGuestExtras(webContents);
-
-        webContents.setWindowOpenHandler(({ url }) => {
-            if (!allowPopupOpen(webContents)) return { action: 'deny' };
-            mainWindow.webContents.send('navigate-to-url', url);
-            return { action: 'deny' };
-        });
-    });
-
     applyRequestHeaderRules(mainWindow.webContents.session);
-    setupBrowserSession(mainWindow.webContents.session);
-
-    // 宿主窗口自己也要挂：焦点在地址栏或 Agent 输入框里时，
-    // 键盘事件落在宿主 webContents 上，只挂 guest 会让这些位置的快捷键失效。
-    // 两处都挂才是完整的 —— 这是本模块最容易漏的一处不对称。
-    attachBrowserInput(mainWindow.webContents);
-    guardWebviewAttach(mainWindow.webContents);
 
     const { session } = require('electron');
     setupSniffer(session.defaultSession);
@@ -3268,10 +3152,6 @@ function createWindow() {
     setupTorrentHandlers();
     setupTorrentFileHandlers();
     setupSettingsHandlers();
-    // 浏览器外壳能力的 IPC（下载记录 / 下载操作）。窗口 getter 用闭包注入，
-    // 不让 browserService 反向 require main.js —— 那会形成循环依赖，
-    // 而循环 require 只报 warning 不报错，症状是第一次用到才炸。
-    setupBrowserIpc(() => mainWindow);
 }
 
 /* -------------------------------------------------------------------------- */

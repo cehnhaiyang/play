@@ -20,8 +20,6 @@ const subscribe = (channel, callback) => {
 
 // 暴露 IPC 通信接口
 contextBridge.exposeInMainWorld('electronAPI', {
-    // 监听来自主进程的导航请求（新标签页链接），返回取消订阅函数
-    onNavigateToUrl: (callback) => subscribe('navigate-to-url', callback),
     // 监听网络嗅探结果
     onSniffedMedia: (callback) => subscribe('sniffed-media', callback),
     /** 打开/关闭主进程网络层嗅探推送（默认关闭，由"持续嗅探"开关控制） */
@@ -68,20 +66,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
         setAiConfig: (value) => ipcRenderer.invoke('settings-set-ai-config', value),
         testAiConfig: (value, reasoningEffort) => ipcRenderer.invoke('settings-test-ai-config', value, reasoningEffort),
     },
-    // --- 浏览器外壳能力（快捷键 / 右键菜单 / 网页下载 / 发声状态） ---
-    // 键盘与右键事件只有主进程收得到（webview 是跨进程 OOPIF，不冒泡到宿主
-    // 页面的 window），所以方向是**主进程 → 渲染层**：主进程判出是哪个浏览器
-    // 动作，发过来由渲染层执行。见 electron/browserService.js 顶部注释。
-    browser: {
-        /** 浏览器动作命令（新建标签、查找、缩放…）。返回取消订阅函数 */
-        onCommand: (callback) => subscribe('browser-command', callback),
-        /** 网页自身触发的下载：进度 / 完成 / 中断。返回取消订阅函数 */
-        onDownload: (callback) => subscribe('browser-download', callback),
-        /** 取当前全部下载记录（面板首次打开时补齐历史） */
-        downloads: () => ipcRenderer.invoke('browser-downloads'),
-        /** 暂停 / 继续 / 取消 / 在文件夹中显示 / 打开 / 从列表移除 */
-        downloadAction: (id, action) => ipcRenderer.invoke('browser-download-action', { id, action }),
-    },
+    // --- 浏览器外壳能力已整体移除 ---
+    // 快捷键 / 右键菜单 / 网页下载 / 发声状态原先由主进程判出动作再发给渲染层执行
+    // （webview 是跨进程 OOPIF，键盘与右键不冒泡到宿主页面）。
+    // 自建外壳拆除后这些没有宿主了：浏览器里的下载、快捷键、右键菜单
+    // 都由浏览器插件直接处理，不再经过应用。相关通道见 meta/bridge.ts 的 RETIRED_CHANNELS。
     // --- 种子文件获取（只有落盘需要主进程：文件系统权限） ---
     // 搜索不经过这里：搜索引擎完整地待在 services/SearchService，
     // 用渲染层 fetch 直接请求各站点，代理配在 Chromium 会话上、自动生效。

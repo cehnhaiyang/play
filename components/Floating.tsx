@@ -35,14 +35,10 @@ import {
     X,
     Zap,
 } from 'lucide-react';
-import { SNIFF_FILTER_OPTIONS } from '../hooks';
 import type {
     AiConfig,
     AiProviderPreset,
-    FoundLink,
     LogLevel,
-    MediaDownloadProgress,
-    SnifferState,
 } from '../meta';
 import { getElectronAPI } from '../meta';
 import { isLinkFromPage, loadJSON, requiresFfmpeg, saveJSON } from '../const';
@@ -68,37 +64,33 @@ import {
 } from '../services/LogService';
 
 /**
- * 悬浮球与它的三个面板。
+ * 悬浮球与它的两个面板。
  *
- * 这个文件是**一个整体**：悬浮球 + 资源嗅探 + 设置 + 运行日志。
- * 四块内容由同一个 keep-alive 策略管着（打开过就常驻内存，切页/关球只用
+ * 这个文件是**一个整体**：悬浮球 + 设置 + 运行日志。
+ * 三块内容由同一个 keep-alive 策略管着（打开过就常驻内存，切页/关球只用
  * `hidden` 藏，输入、滚动、已加载的列表原样保留）—— 拆成多个文件后，
  * 改一次这个策略要同时动好几处，漏一处就是"切个页搜索条件没了"。
  *
- * Agent 不在这里。它已迁到浏览器面板的右侧边栏（components/BrowsePanel.tsx）：
- * 它每一步都要落到 webview 上，而悬浮球在播放器/音频工坊里也常驻，
- * 那时没有可用页面，摆一个能打字却做不了事的对话框只会误导人。
- * 留在这里的三个面板都不依赖 webview。
- *
- * 磁力下载也不在这里。它已迁到浏览器全屏页（components/TorrentPanel）：
- * 搜索结果与任务表在小浮窗里翻得难受，与 ACG 画廊同概念走地址栏入口。
- *
- * 原 Floating/ 目录（index + SniffResults + 磁力面板 + SettingsFloating
- * + shared）全部合并到这里，唯独磁力面板搬去了 TorrentPanel。
+ * 资源嗅探与 Agent 已随自建浏览器外壳拆到浏览器插件（extension/）：
+ * 它们的前提是"应用里有浏览器"，那个前提已经不存在了。
  */
 
 /* ========================================================================== */
 /*                              常量与共享原子件                              */
 /* ========================================================================== */
 
-/** 悬浮球里剩下的面板。'agent' / 'tamper' / 'torrent' 是历史落盘值，见 readStoredPanel */
-type FloatingPanelType = 'sniff' | 'settings' | 'logs';
+/** 悬浮球里剩下的面板。'sniff' / 'agent' / 'tamper' / 'torrent' 是历史落盘值，见 readStoredPanel */
+type FloatingPanelType = 'settings' | 'logs';
 
+/**
+ * 悬浮球只承载**本机应用自己的**东西：设置（代理与 AI 配置）与运行日志。
+ * 画廊与磁力下载是另外两个全屏视图，这里只给入口。
+ */
 interface FloatingProps {
-    sniffer: SnifferState;
-    currentUrl: string;
-    onPlay: (link: FoundLink) => void;
-    onAiAnalyze: () => void;
+    /** 打开画廊（本机工具，与浏览器无关） */
+    onOpenGallery: () => void;
+    /** 打开磁力下载（本机工具，与浏览器无关） */
+    onOpenTorrent: () => void;
 }
 
 const PANEL_MARGIN = 12;
@@ -148,12 +140,6 @@ const PANEL_META: Record<
         hint: string;
     }
 > = {
-    sniff: {
-        label: '资源嗅探',
-        icon: Sparkles,
-        accent: 'from-indigo-500 via-violet-500 to-cyan-400',
-        hint: '自动侦测音视频、流媒体及直链资源',
-    },
     settings: {
         label: '设置',
         icon: Settings,
@@ -169,20 +155,13 @@ const PANEL_META: Record<
 };
 
 const clampPosition = (nextX: number, nextY: number) => ({
-    x: Math.max(12, Math.min(nextX, window.innerWidth - BALL_SIZE - 12)),
-    y: Math.max(12, Math.min(nextY, window.innerHeight - BALL_SIZE - 12)),
+    x: Math.min(Math.max(PANEL_MARGIN, nextX), Math.max(PANEL_MARGIN, window.innerWidth - BALL_SIZE - PANEL_MARGIN)),
+    y: Math.min(Math.max(PANEL_MARGIN, nextY), Math.max(PANEL_MARGIN, window.innerHeight - BALL_SIZE - PANEL_MARGIN)),
 });
 
 /** 导航顺序。写死而不是 Object.keys(PANEL_META)：顺序是设计决定，不该随对象字面量改动而变 */
-const PANEL_ORDER: FloatingPanelType[] = ['sniff', 'settings', 'logs'];
+const PANEL_ORDER: FloatingPanelType[] = ['settings', 'logs'];
 
-/**
- * 剪贴板写入。
- *
- * `navigator.clipboard.writeText()` 失败是走 **Promise reject**，不是同步 throw，
- * 所以 `try { writeText() } catch {}` 永远进不了 catch —— 剪贴板不可用时
- * 界面照样弹「已复制」，用户粘贴出来是空的。必须 await。
- */
 const copyText = async (text: string): Promise<boolean> => {
     try {
         await navigator.clipboard.writeText(text);
@@ -195,22 +174,19 @@ const copyText = async (text: string): Promise<boolean> => {
 /** 「已复制」这类一次性反馈：定时器随卸载一起清掉，避免卸载后仍写 state */
 const useTransientFlag = (ms: number) => {
     const [on, setOn] = useState(false);
-    const timer = useRef<number | null>(null);
+    const timerRef = useRef<number | null>(null);
 
-    const flash = useCallback(() => {
+    const trigger = useCallback(() => {
         setOn(true);
-        if (timer.current !== null) window.clearTimeout(timer.current);
-        timer.current = window.setTimeout(() => setOn(false), ms);
+        if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+        timerRef.current = window.setTimeout(() => setOn(false), ms);
     }, [ms]);
 
-    useEffect(
-        () => () => {
-            if (timer.current !== null) window.clearTimeout(timer.current);
-        },
-        []
-    );
+    useEffect(() => () => {
+        if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    }, []);
 
-    return [on, flash] as const;
+    return [on, trigger] as const;
 };
 
 const EmptyHint: React.FC<{ icon: React.ReactNode; title: string; children?: React.ReactNode }> = ({
@@ -226,523 +202,6 @@ const EmptyHint: React.FC<{ icon: React.ReactNode; title: string; children?: Rea
         {children}
     </div>
 );
-
-/* ========================================================================== */
-/*                              资源嗅探                                       */
-/* ========================================================================== */
-
-interface SnifferResultsProps {
-    sniffer: SnifferState;
-    onPlay: (link: FoundLink) => void;
-    onAiAnalyze: () => void;
-    currentUrl: string;
-}
-
-/**
- * 筛选栏的可选项从 hooks 导入，不在这里另写一份。
- *
- * 界面这份原先写死一份字面量，而落盘校验读的是 CATEGORIES 的全部键 ——
- * 两份必然漂移：手改 localStorage 成 'gallery' 能通过校验，
- * 界面上却没有那个按钮，表现为"列表空了却看不出为什么"。
- */
-const SNIFF_FILTERS = SNIFF_FILTER_OPTIONS;
-
-const TYPE_ICONS: Record<string, React.ReactNode> = {
-    stream: <Radio className="h-4 w-4" />,
-    video: <Film className="h-4 w-4" />,
-    audio: <Music className="h-4 w-4" />,
-    image: <ImageIcon className="h-4 w-4" />,
-    document: <FileText className="h-4 w-4" />,
-};
-
-const TYPE_TONES: Record<string, string> = {
-    stream: 'border-orange-300/20 bg-orange-500/12 text-orange-200',
-    video: 'border-sky-300/20 bg-sky-500/12 text-sky-200',
-    audio: 'border-pink-300/20 bg-pink-500/12 text-pink-200',
-    image: 'border-emerald-300/20 bg-emerald-500/12 text-emerald-200',
-    document: 'border-cyan-300/20 bg-cyan-500/12 text-cyan-200',
-};
-
-/** 资源来源徽章：AI 分析 / 网络捕获 / 页面抓取，文案与配色一一对应 */
-const SOURCE_BADGES: Record<string, { label: string; className: string; icon?: React.ReactNode }> = {
-    ai: {
-        label: 'AI 深度分析',
-        className: 'border-fuchsia-400/30 bg-fuchsia-500/10 text-fuchsia-200',
-        icon: <Sparkles className="h-2.5 w-2.5" />,
-    },
-    network: { label: '网络捕获', className: 'border-cyan-400/30 bg-cyan-500/10 text-cyan-200' },
-    local: { label: '页面抓取', className: 'border-emerald-400/30 bg-emerald-500/10 text-emerald-200' },
-};
-
-/** 秒 → mm:ss / h:mm:ss */
-const fmtClock = (seconds: number): string => {
-    if (!Number.isFinite(seconds) || seconds <= 0) return '0:00';
-    const total = Math.floor(seconds);
-    const h = Math.floor(total / 3600);
-    const m = Math.floor((total % 3600) / 60);
-    const s = total % 60;
-    const pad = (v: number) => String(v).padStart(2, '0');
-    return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
-};
-
-/**
- * 进度摘要：优先给百分比，拿不到总长时退化成已下载字节数。
- *
- * 不编造百分比 —— 直链文件没有 Content-Length、或 ffmpeg 还没打印出
- * Duration 时，percent 就是 null，这里如实显示"已下载 X MB"。
- */
-const describeProgress = (p: MediaDownloadProgress): string => {
-    const parts: string[] = [];
-    if (p.percent !== null) {
-        parts.push(`${p.percent}%`);
-        if (p.totalSeconds > 0) {
-            parts.push(`${fmtClock(p.processedSeconds)} / ${fmtClock(p.totalSeconds)}`);
-        }
-    } else if (p.receivedBytes > 0) {
-        parts.push(`已下载 ${formatBytes(p.receivedBytes)}`);
-    } else {
-        parts.push('正在连接…');
-    }
-    if (p.receivedBytes > 0 && p.totalBytes > 0) {
-        parts.push(`${formatBytes(p.receivedBytes)} / ${formatBytes(p.totalBytes)}`);
-    }
-    if (p.speed > 0) parts.push(`${p.speed.toFixed(1)}x`);
-    if (p.skippedSegments > 0) parts.push(`已跳过 ${p.skippedSegments} 段`);
-    return parts.join(' · ');
-};
-
-const SniffCard = React.memo(function SniffCard({
-    index,
-    link,
-    isDownloading,
-    progress,
-    canDownload,
-    downloadHint,
-    onDownload,
-    onPlay,
-    onCancel,
-}: {
-    index: number;
-    link: FoundLink;
-    isDownloading: boolean;
-    /** 仅当这条正在下载时非 null */
-    progress: MediaDownloadProgress | null;
-    canDownload: boolean;
-    downloadHint: string;
-    onDownload: (link: FoundLink) => void;
-    onPlay: (link: FoundLink) => void;
-    onCancel: () => void;
-}) {
-    const [copied, flashCopied] = useTransientFlag(1500);
-
-    const handleCopy = useCallback(async () => {
-        if (await copyText(link.url)) flashCopied();
-    }, [link.url, flashCopied]);
-
-    const source = SOURCE_BADGES[link.source] || null;
-
-    return (
-        <div
-            className={`group relative rounded-2xl p-3.5 transition-colors ${SURFACE_SUNKEN} hover:border-indigo-400/40 hover:bg-white/[0.06]`}
-        >
-            <div className="flex items-start gap-3">
-                <div
-                    className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border ${TYPE_TONES[link.type] || 'border-white/10 bg-white/[0.06] text-slate-300'
-                        }`}
-                >
-                    {TYPE_ICONS[link.type] || <FileQuestion className="h-4 w-4" />}
-                </div>
-
-                <div className="min-w-0 flex-1">
-                    <div className="flex items-center justify-between gap-2">
-                        <div className="truncate text-sm font-semibold text-slate-100" title={link.title}>
-                            {link.title || '未命名资源'}
-                        </div>
-                        <button
-                            onClick={() => void handleCopy()}
-                            className={`inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-0.5 text-[10px] text-slate-400 transition ${SURFACE_RAISED} ${SURFACE_HOVER} hover:text-white ${FOCUS_RING}`}
-                            title="复制资源链接"
-                            aria-label="复制资源链接"
-                        >
-                            {copied ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
-                            <span>{copied ? '已复制' : '复制'}</span>
-                        </button>
-                    </div>
-
-                    <div className="mt-1 flex items-center gap-1 truncate font-mono text-[10px] text-slate-400">
-                        <span className="rounded border border-white/10 bg-white/[0.08] px-1 font-bold uppercase text-slate-300">
-                            {link.ext || 'UNK'}
-                        </span>
-                        <span className="flex-1 truncate" title={link.url}>
-                            {link.url}
-                        </span>
-                    </div>
-
-                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                        {source && (
-                            <span
-                                className={`flex items-center gap-1 rounded border px-1.5 py-0.5 text-[9px] font-bold ${source.className}`}
-                            >
-                                {source.icon}
-                                {source.label}
-                            </span>
-                        )}
-                        {/* 徽章同样按 requiresFfmpeg 判：只看 type 会让
-                            "ext=flv 但 type=video"的条目既没有徽章、又被主进程走 ffmpeg */}
-                        {requiresFfmpeg(link.type, link.ext) && (
-                            <span
-                                className={`rounded border px-1.5 py-0.5 text-[9px] font-bold ${canDownload
-                                    ? 'border-indigo-400/30 bg-indigo-500/10 text-indigo-200'
-                                    : 'border-white/10 bg-white/[0.06] text-slate-400'
-                                    }`}
-                            >
-                                {canDownload ? 'ffmpeg 下载' : 'ffmpeg 不可用'}
-                            </span>
-                        )}
-                        {link.referer && (
-                            <span
-                                className="flex items-center gap-1 rounded border border-white/10 bg-white/[0.06] px-1.5 py-0.5 text-[9px] text-slate-400"
-                                title={link.referer}
-                            >
-                                <Globe className="h-2.5 w-2.5" />
-                                防盗链参数已捕获
-                            </span>
-                        )}
-                    </div>
-                </div>
-            </div>
-
-            <div className="mt-3 flex items-center justify-between border-t border-white/[0.06] pt-2">
-                <span className="pl-1 font-mono text-[10px] text-slate-500">#{index + 1}</span>
-                <div className="flex gap-2">
-                    {isDownloading ? (
-                        /* 下载中：按钮位置换成进度 + 取消。
-                           进度条宽度用 percent，拿不到百分比时走不定态条纹 —— 不假装有进度 */
-                        <div className="flex items-center gap-2">
-                            <div className="flex w-32 flex-col gap-1">
-                                <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
-                                    {progress?.percent !== null && progress?.percent !== undefined ? (
-                                        <div
-                                            className="h-full rounded-full bg-gradient-to-r from-indigo-400 to-cyan-400 transition-[width] duration-300"
-                                            style={{ width: `${progress.percent}%` }}
-                                        />
-                                    ) : (
-                                        <div className="bp-indeterminate h-full w-1/3 rounded-full bg-gradient-to-r from-indigo-400 to-cyan-400" />
-                                    )}
-                                </div>
-                                <span className="truncate text-[10px] text-slate-400" title={progress ? describeProgress(progress) : ''}>
-                                    {progress ? describeProgress(progress) : '正在启动…'}
-                                </span>
-                            </div>
-                            <button
-                                onClick={onCancel}
-                                className={`${BTN_GHOST} hover:border-rose-500/30 hover:bg-rose-500/10 hover:text-rose-300`}
-                                title="取消下载并删除未完成的文件"
-                            >
-                                <X className="h-3.5 w-3.5" />
-                                <span>取消</span>
-                            </button>
-                        </div>
-                    ) : (
-                        <button onClick={() => onDownload(link)} disabled={!canDownload} className={BTN_GHOST} title={downloadHint}>
-                            <Download className="h-3.5 w-3.5" />
-                            <span>下载</span>
-                        </button>
-                    )}
-                    <button onClick={() => onPlay(link)} className={BTN_PRIMARY}>
-                        <Play className="h-3 w-3 fill-current" />
-                        {link.type === 'image' ? '查看' : '播放'}
-                    </button>
-                </div>
-            </div>
-        </div>
-    );
-});
-
-const SniffResults: React.FC<SnifferResultsProps> = ({ sniffer, onPlay, onAiAnalyze, currentUrl }) => {
-    const {
-        filteredLinks,
-        foundLinks,
-        filterType,
-        scopeFilter,
-        sniffEnabled,
-        isAnalyzing,
-        statusMessage,
-        downloadingUrl,
-        downloadProgress,
-        downloadCapabilities,
-        actions,
-    } = sniffer;
-
-    // 只依赖 actions.download 本身（useBrowse 里是 memo 过的稳定引用），
-    // 依赖整个 actions 会让 SniffCard 的 memo 每轮都失效
-    const download = actions.download;
-    const cancelDownload = actions.cancelDownload;
-    const handleDownload = useCallback((link: FoundLink) => void download(link), [download]);
-    const handleCancel = useCallback(() => void cancelDownload(), [cancelDownload]);
-
-    const currentPageLinksCount = useMemo(
-        () => foundLinks.filter((link) => isLinkFromPage(link, currentUrl)).length,
-        [foundLinks, currentUrl]
-    );
-
-    const canClear = filteredLinks.length > 0;
-    const ffmpegAvailable = downloadCapabilities.ffmpegAvailable;
-
-    // 状态栏要显示"正在下载哪一个"。下载中那条可能已被筛掉/清空，
-    // 所以从全量列表里找，找不到就退回显示主机名。
-    const currentDownloadTitle = useMemo(() => {
-        if (!downloadingUrl) return '';
-        const hit = foundLinks.find((l) => l.url === downloadingUrl);
-        if (hit?.title) return hit.title;
-        try {
-            return new URL(downloadingUrl).pathname.split('/').pop() || downloadingUrl;
-        } catch {
-            return downloadingUrl;
-        }
-    }, [downloadingUrl, foundLinks]);
-
-    return (
-        <div className="flex h-full min-h-0 flex-col">
-            {/* 工具条。标题与副标题由外壳统一给出，这里只说本页独有的动态信息 */}
-            <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-3">
-                <p className="text-xs text-slate-400">
-                    {isAnalyzing
-                        ? '正在全面扫描页面与网络请求…'
-                        : `已捕获 ${foundLinks.length} 项资源 · 当前页 ${currentPageLinksCount} 项`}
-                </p>
-
-                <div className="flex items-center gap-2">
-                    {/* 持续嗅探总开关：打开 = 切页自动三轮扫描 + 主进程网络层持续推送；
-                        关闭 = 两者全停。手动"重新扫描"是一次性的，不受开关影响 */}
-                    <button
-                        onClick={() => actions.setSniffEnabled(!sniffEnabled)}
-                        className={`${BTN_GHOST} ${sniffEnabled ? 'border-emerald-400/40 text-emerald-300' : ''}`}
-                        title={sniffEnabled ? '关闭持续嗅探：切页不再自动扫描，主进程也不再推送' : '打开持续嗅探：切页自动扫描，主进程持续推送新资源'}
-                        aria-pressed={sniffEnabled}
-                    >
-                        {sniffEnabled ? <ToggleRight className="h-3.5 w-3.5 text-emerald-400" /> : <ToggleLeft className="h-3.5 w-3.5" />}
-                        <span>持续嗅探</span>
-                    </button>
-                    <button
-                        onClick={() => actions.scan(currentUrl)}
-                        disabled={isAnalyzing}
-                        className={BTN_GHOST}
-                        title="刷新当前页面嗅探扫描"
-                    >
-                        <RefreshCw className={`h-3.5 w-3.5 ${isAnalyzing ? 'animate-spin text-indigo-400' : ''}`} />
-                        <span>重新扫描</span>
-                    </button>
-                    <button
-                        onClick={() => (scopeFilter === 'current' ? actions.clearCurrentPage(currentUrl) : actions.clear())}
-                        disabled={!canClear}
-                        className={`${BTN_GHOST} hover:border-rose-500/30 hover:bg-rose-500/10 hover:text-rose-300`}
-                        title={scopeFilter === 'current' ? '清空当前页面嗅探列表' : '清空所有嗅探列表'}
-                    >
-                        <Trash2 className="h-3.5 w-3.5" />
-                        <span>{scopeFilter === 'current' ? '清空当前' : '清空全部'}</span>
-                    </button>
-                </div>
-            </div>
-
-            {/* AI 深度嗅探引导 */}
-            {currentUrl && (
-                <div className="mt-3 flex shrink-0 items-center justify-between gap-3 rounded-2xl border border-indigo-400/15 bg-gradient-to-r from-indigo-500/10 via-fuchsia-500/5 to-transparent px-3.5 py-2.5">
-                    <div className="text-xs text-indigo-200">
-                        加密媒体或复杂 SPA？可调取 AI 进行 DOM 与深层网络结构挖掘。
-                    </div>
-                    <button
-                        onClick={onAiAnalyze}
-                        disabled={isAnalyzing}
-                        className={`inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-indigo-300/30 bg-indigo-500/20 px-3 py-1.5 text-xs font-bold text-indigo-100 transition hover:border-indigo-300/50 hover:bg-indigo-500/30 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 ${FOCUS_RING}`}
-                    >
-                        <Sparkles className="h-3.5 w-3.5 text-cyan-300" />
-                        AI 深度嗅探
-                    </button>
-                </div>
-            )}
-
-            {/* 筛选条：分类 + 页面范围 */}
-            <div className="mt-3 flex shrink-0 flex-wrap items-center justify-between gap-2">
-                <div className={`flex items-center gap-1 overflow-x-auto rounded-2xl p-1 scrollbar-thin ${SURFACE_SUNKEN}`}>
-                    <span className="pl-1.5 pr-1 text-slate-500">
-                        <ListFilter className="h-3.5 w-3.5" />
-                    </span>
-                    {SNIFF_FILTERS.map((item) => (
-                        <button
-                            key={item.value}
-                            onClick={() => actions.setFilterType(item.value)}
-                            className={`whitespace-nowrap rounded-xl px-2.5 py-1 text-xs font-medium transition ${FOCUS_RING} ${filterType === item.value
-                                ? 'bg-indigo-500 text-white shadow-sm'
-                                : 'text-slate-300 hover:bg-white/[0.12] hover:text-white'
-                                }`}
-                        >
-                            {item.label}
-                        </button>
-                    ))}
-                </div>
-
-                <div className="flex shrink-0 items-center rounded-xl border border-white/10 bg-black/20 p-0.5">
-                    {(
-                        [
-                            { value: 'all', label: '全部历史' },
-                            { value: 'current', label: '仅当前页' },
-                        ] as const
-                    ).map((option) => (
-                        <button
-                            key={option.value}
-                            onClick={() => actions.setScopeFilter(option.value)}
-                            className={`rounded-lg px-2 py-0.5 text-[11px] font-medium transition ${FOCUS_RING} ${scopeFilter === option.value ? 'bg-white/[0.12] text-white' : 'text-slate-400 hover:text-slate-200'
-                                }`}
-                        >
-                            {option.label}
-                        </button>
-                    ))}
-                </div>
-            </div>
-
-            {filterType === 'stream' && (
-                <div
-                    className={`mt-2.5 shrink-0 rounded-xl border px-3.5 py-1.5 text-[11px] ${ffmpegAvailable
-                        ? 'border-emerald-400/15 bg-emerald-500/10 text-emerald-200'
-                        : 'border-amber-400/15 bg-amber-500/10 text-amber-200'
-                        }`}
-                >
-                    {downloadCapabilities.ffmpegMessage}
-                </div>
-            )}
-
-            <div className="custom-scrollbar mt-3 flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-1">
-                {filteredLinks.length === 0 ? (
-                    <EmptyHint icon={<FileQuestion className="h-6 w-6" />} title="暂未嗅探到符合条件的媒体资源">
-                        <div className="flex items-center gap-2 text-xs">
-                            <button onClick={() => actions.scan(currentUrl)} className={`text-indigo-400 hover:underline ${FOCUS_RING}`}>
-                                重新扫描当前页
-                            </button>
-                            {filterType !== 'all' && (
-                                <>
-                                    <span className="text-slate-600">·</span>
-                                    <button
-                                        onClick={() => actions.setFilterType('all')}
-                                        className={`text-indigo-400 hover:underline ${FOCUS_RING}`}
-                                    >
-                                        查看全部资源
-                                    </button>
-                                </>
-                            )}
-                        </div>
-                    </EmptyHint>
-                ) : (
-                    filteredLinks.map((link, index) => {
-                        // 判据与主进程、与 useBrowse 的 download 同源（const.ts 的 requiresFfmpeg）：
-                        // 只看 type 会漏掉"ext=flv 但 type=video"这类 AI 提取产物，
-                        // 界面按钮照常可点、主进程却会走 ffmpeg，点下去才报错。
-                        const needsFfmpeg = requiresFfmpeg(link.type, link.ext);
-                        const canDownload = !needsFfmpeg || ffmpegAvailable;
-                        const downloadHint =
-                            needsFfmpeg
-                                ? ffmpegAvailable
-                                    ? '使用 ffmpeg 下载流媒体资源'
-                                    : downloadCapabilities.ffmpegMessage
-                                : '下载资源';
-
-                        return (
-                            <SniffCard
-                                // 不用 index：addLinks 已按 url 去重，url 天然唯一；
-                                // 带上 index 后每次筛选/排序都会让所有卡片重挂载，copied 状态和滚动位置一起丢
-                                key={link.url}
-                                index={index}
-                                link={link}
-                                isDownloading={downloadingUrl === link.url}
-                                // 只把属于这条的进度传下去：否则同时下载多条时每条都会画同一条进度
-                                progress={downloadingUrl === link.url ? downloadProgress : null}
-                                canDownload={canDownload}
-                                downloadHint={downloadHint}
-                                onDownload={handleDownload}
-                                onPlay={onPlay}
-                                onCancel={handleCancel}
-                            />
-                        );
-                    })
-                )}
-            </div>
-
-            {/*
-        状态栏。下载进行中时它升级成**进度条 + 明细**，这是用户唯一能确认
-        "到底下到哪了、是死是活"的地方：此前它只显示一句一次性设置的静态文案
-        （"正在使用 ffmpeg 下载流媒体..."），从开始到结束都不变，
-        既看不出进度，也分不清"还在下"和"已经卡死"。
-
-        进度条与卡片上的那条同源（downloadProgress），但这里额外给出
-        文件名、百分比、已下字节、速度、跳过段数 —— 卡片放不下这些。
-      */}
-            {downloadingUrl ? (
-                <div className={`mt-3 shrink-0 rounded-2xl px-3.5 py-2.5 ${SURFACE_SUNKEN}`}>
-                    <div className="flex items-center justify-between gap-3">
-                        <span className="flex min-w-0 items-center gap-2 text-[11px] text-slate-300">
-                            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-indigo-400" />
-                            <span className="truncate" title={downloadingUrl}>
-                                正在下载 {currentDownloadTitle}
-                            </span>
-                        </span>
-                        <button
-                            onClick={handleCancel}
-                            className={`shrink-0 rounded-lg px-2 py-0.5 text-[11px] text-slate-400 transition hover:bg-rose-500/10 hover:text-rose-300 ${FOCUS_RING}`}
-                        >
-                            取消
-                        </button>
-                    </div>
-
-                    <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
-                        {downloadProgress?.percent !== null && downloadProgress?.percent !== undefined ? (
-                            <div
-                                className="h-full rounded-full bg-gradient-to-r from-indigo-400 to-cyan-400 transition-[width] duration-300"
-                                style={{ width: `${downloadProgress.percent}%` }}
-                            />
-                        ) : (
-                            <div className="bp-indeterminate h-full w-1/3 rounded-full bg-gradient-to-r from-indigo-400 to-cyan-400" />
-                        )}
-                    </div>
-
-                    <div className="mt-1.5 flex flex-wrap items-center gap-x-3 text-[11px] text-slate-400">
-                        {downloadProgress ? (
-                            <>
-                                {downloadProgress.percent !== null && (
-                                    <span className="font-semibold text-slate-200">{downloadProgress.percent}%</span>
-                                )}
-                                {downloadProgress.totalSeconds > 0 && (
-                                    <span>
-                                        {fmtClock(downloadProgress.processedSeconds)} / {fmtClock(downloadProgress.totalSeconds)}
-                                    </span>
-                                )}
-                                {downloadProgress.receivedBytes > 0 && <span>{formatBytes(downloadProgress.receivedBytes)}</span>}
-                                {downloadProgress.speed > 0 && <span>{downloadProgress.speed.toFixed(1)}x</span>}
-                                {downloadProgress.skippedSegments > 0 && (
-                                    <span className="text-amber-400">已跳过 {downloadProgress.skippedSegments} 段</span>
-                                )}
-                            </>
-                        ) : (
-                            <span>正在建立连接…</span>
-                        )}
-                    </div>
-                </div>
-            ) : (
-                statusMessage && (
-                    <div
-                        className={`mt-3 shrink-0 rounded-2xl px-4 py-2 text-center text-[11px] ${/失败|错误|无法|取消/.test(statusMessage)
-                            ? 'border border-rose-500/25 bg-rose-500/10 text-rose-300'
-                            : /跳过|缺失/.test(statusMessage)
-                                ? 'border border-amber-500/25 bg-amber-500/10 text-amber-300'
-                                : `text-slate-400 ${SURFACE_SUNKEN}`
-                            }`}
-                    >
-                        <p className="break-words">{statusMessage}</p>
-                    </div>
-                )
-            )}
-        </div>
-    );
-};
 
 /* ========================================================================== */
 /*                              设置                                           */
@@ -1531,7 +990,7 @@ const LogsFloating: React.FC<{ active: boolean }> = ({ active }) => {
 /*                              悬浮球外壳                                     */
 /* ========================================================================== */
 
-export const Floating: React.FC<FloatingProps> = ({ sniffer, currentUrl, onPlay, onAiAnalyze }) => {
+export const Floating: React.FC<FloatingProps> = ({ onOpenGallery, onOpenTorrent }) => {
     const [isOpen, setIsOpen] = useState(false);
     // 悬浮球位置落盘：退出 App 重进也在上次的位置
     const [position, setPosition] = useState(() => {
@@ -1550,15 +1009,15 @@ export const Floating: React.FC<FloatingProps> = ({ sniffer, currentUrl, onPlay,
     /**
      * 读回上次停留的面板。
      *
-     * 存量用户落盘的可能是 'agent' / 'tamper'（那时它们还在悬浮球里），
-     * 或 'torrent'（磁力下载已迁到浏览器全屏页 TorrentPanel）。
-     * 这三个键已不在 PANEL_META 里，不映射的话打开就是空白页 —— 回落成 'sniff'。
+     * 存量用户落盘的可能是 'agent' / 'tamper' / 'sniff' / 'torrent'
+     * （那时它们还在悬浮球里）。这些键已不在 PANEL_META 里，
+     * 不映射的话打开就是空白页 —— 回落成 'settings'。
      */
     const readStoredPanel = useCallback((): FloatingPanelType => {
-        const saved = loadJSON<string>('panel', 'sniff');
-        if (saved === 'agent' || saved === 'tamper' || saved === 'torrent') return 'sniff';
+        const saved = loadJSON<string>('panel', 'settings');
+        if (saved === 'agent' || saved === 'tamper' || saved === 'sniff' || saved === 'torrent') return 'settings';
         const all = Object.keys(PANEL_META) as FloatingPanelType[];
-        return all.includes(saved as FloatingPanelType) ? (saved as FloatingPanelType) : 'sniff';
+        return all.includes(saved as FloatingPanelType) ? (saved as FloatingPanelType) : 'settings';
     }, []);
 
     const [activePanel, setActivePanel] = useState<FloatingPanelType>(readStoredPanel);
@@ -1566,7 +1025,7 @@ export const Floating: React.FC<FloatingProps> = ({ sniffer, currentUrl, onPlay,
     // 访问过的面板常驻内存：打开过一次就不再卸载，切页/关闭重开不丢输入、滚动与已加载数据
     const [visited, setVisited] = useState<Set<FloatingPanelType>>(() => {
         const initial = readStoredPanel();
-        return new Set<FloatingPanelType>(['sniff', initial]);
+        return new Set<FloatingPanelType>(['settings', initial]);
     });
 
     // 拖拽结束（非拖拽态的位置变更）即落盘，拖动过程中不写，避免每帧刷 localStorage
@@ -1586,7 +1045,6 @@ export const Floating: React.FC<FloatingProps> = ({ sniffer, currentUrl, onPlay,
 
     const activeMeta = PANEL_META[activePanel];
     const ActiveIcon = activeMeta.icon;
-    const linkCount = sniffer.foundLinks.length;
 
     // 动画控制：展开时微延时淡入内容，收起时先快速淡出内容；
     // 同时把当前页记入常驻集合（内容已挂载时重开就是单纯显示，打开不再卡顿）
@@ -1771,10 +1229,6 @@ export const Floating: React.FC<FloatingProps> = ({ sniffer, currentUrl, onPlay,
      * 元素引用不变时 React 会跳过整棵子树，与它是不是 hidden 无关。
      * settings 不吃 props，所以它的元素是真正一次性的。
      */
-    const sniffNode = useMemo(
-        () => <SniffResults sniffer={sniffer} onPlay={onPlay} onAiAnalyze={onAiAnalyze} currentUrl={currentUrl} />,
-        [sniffer, onPlay, onAiAnalyze, currentUrl]
-    );
     const settingsNode = useMemo(() => <SettingsFloating />, []);
     // logs 只吃 active：tab 切换时才变，拖球时引用稳定；同一类型同一位置，
     // 换引用只重渲染不重挂载，过滤条件/滚动位置照旧保留。
@@ -1784,11 +1238,10 @@ export const Floating: React.FC<FloatingProps> = ({ sniffer, currentUrl, onPlay,
     const panels = useMemo(
         () =>
             ({
-                sniff: sniffNode,
                 settings: settingsNode,
                 logs: logsNode,
             }) as Record<FloatingPanelType, React.ReactNode>,
-        [sniffNode, settingsNode, logsNode]
+        [settingsNode, logsNode]
     );
 
     return (
@@ -1816,13 +1269,7 @@ export const Floating: React.FC<FloatingProps> = ({ sniffer, currentUrl, onPlay,
                         className={`relative flex h-full w-full items-center justify-center transition-all duration-300 ${isIdle ? 'scale-95 opacity-80' : 'scale-100 opacity-100'
                             }`}
                     >
-                        {/* 1. 声纳扩散波纹（嗅探到资源时向外扩散动态光波） */}
-                        {linkCount > 0 && (
-                            <>
-                                <div className="animate-orb-sonar pointer-events-none absolute inset-0 rounded-full border border-cyan-400/50" />
-                                <div className="animate-orb-sonar-delayed pointer-events-none absolute inset-0 rounded-full border border-indigo-400/40" />
-                            </>
-                        )}
+                        {/* 1. 声纳扩散波纹已随嗅探面板移除：悬浮球不再有"新资源"这个信号源 */}
 
                         {/* 2. 外部流动呼吸光晕。
                 只让 scale 参与动画、opacity 留给 hover —— 此前关键帧同时补间 opacity，
@@ -1848,16 +1295,7 @@ export const Floating: React.FC<FloatingProps> = ({ sniffer, currentUrl, onPlay,
                                 <ActiveIcon className="h-6 w-6 stroke-[2.2]" />
                             </div>
 
-                            {/* 霓虹角标。key 用数量：每多嗅到一项就重挂一次，
-                  让弹跳动画重放一遍（动画本身是有限次的，不做永久运动） */}
-                            {linkCount > 0 && (
-                                <div
-                                    key={linkCount}
-                                    className="animate-orb-badge absolute -right-1 -top-1 z-20 flex h-5 min-w-[20px] items-center justify-center rounded-full border border-rose-300/50 bg-gradient-to-r from-rose-500 to-pink-500 px-1 text-[10px] font-black text-white shadow-[0_0_12px_rgba(244,63,94,0.7)]"
-                                >
-                                    {linkCount > 99 ? '99+' : linkCount}
-                                </div>
-                            )}
+                            {/* 霓虹角标已随嗅探面板移除（它显示的是未读嗅探数） */}
                         </div>
 
                         {/* 4. 悬停微型快捷 HUD */}
@@ -1869,19 +1307,8 @@ export const Floating: React.FC<FloatingProps> = ({ sniffer, currentUrl, onPlay,
                                 onClick={(e) => e.stopPropagation()}
                             >
                                 <div className="flex items-center gap-1.5 whitespace-nowrap rounded-xl border border-white/10 bg-white/[0.06] px-2.5 py-1 text-xs text-slate-300">
-                                    {linkCount > 0 ? (
-                                        <>
-                                            <Sparkles className="h-3.5 w-3.5 animate-pulse text-cyan-400" />
-                                            <span>
-                                                已嗅探 <strong className="font-bold text-white">{linkCount}</strong> 项
-                                            </span>
-                                        </>
-                                    ) : (
-                                        <>
-                                            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
-                                            <span>{activeMeta.label}</span>
-                                        </>
-                                    )}
+                                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+                                    <span>{activeMeta.label}</span>
                                 </div>
 
                                 <div className="flex items-center gap-1 border-l border-white/10 pl-1.5">
@@ -1889,7 +1316,6 @@ export const Floating: React.FC<FloatingProps> = ({ sniffer, currentUrl, onPlay,
                                         const meta = PANEL_META[key];
                                         const Icon = meta.icon;
                                         const isCurrent = key === activePanel;
-                                        const count = key === 'sniff' ? linkCount : 0;
 
                                         return (
                                             <button
@@ -1903,11 +1329,6 @@ export const Floating: React.FC<FloatingProps> = ({ sniffer, currentUrl, onPlay,
                                                 aria-label={`打开 ${meta.label}`}
                                             >
                                                 <Icon className="h-4 w-4" />
-                                                {count > 0 && (
-                                                    <span className="absolute -right-1 -top-1 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-rose-500 px-0.5 text-[8px] font-bold text-white">
-                                                        {count > 99 ? '99+' : count}
-                                                    </span>
-                                                )}
                                             </button>
                                         );
                                     })}
@@ -1968,7 +1389,6 @@ export const Floating: React.FC<FloatingProps> = ({ sniffer, currentUrl, onPlay,
                             const meta = PANEL_META[key];
                             const Icon = meta.icon;
                             const isActive = key === activePanel;
-                            const count = key === 'sniff' ? linkCount : 0;
 
                             return (
                                 <button
@@ -1989,11 +1409,6 @@ export const Floating: React.FC<FloatingProps> = ({ sniffer, currentUrl, onPlay,
                                         <Icon className="h-3.5 w-3.5" />
                                     </span>
                                     <span className="tracking-wide">{meta.label}</span>
-                                    {count > 0 && (
-                                        <span className="flex h-4 min-w-[18px] items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-bold text-white">
-                                            {count > 99 ? '99+' : count}
-                                        </span>
-                                    )}
                                 </button>
                             );
                         })}

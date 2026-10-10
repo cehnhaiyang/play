@@ -29,8 +29,8 @@ import { formatBytes } from '../services/SearchService';
  *
  * 从悬浮球里搬出来的（原 components/Floating.tsx 的 TorrentFloating 一家）。
  * 搬家原因：悬浮球面板是小浮窗，搜出来 150 条结果、任务进度表挤在里面翻得难受；
- * 它与 ACG 画廊 / 音频工坊 / 播放器同概念——都是浏览器地址栏一键进入的全屏页，
- * 所以入口也在地址栏那组导航按钮里（BrowsePanel），由 App 的 ViewMode 统一调度。
+ * 它与 ACG 画廊 / 音频工坊 / 播放器同概念——都是应用里的全屏页，
+ * 由 App 的 ViewMode 统一调度（入口在悬浮球的快捷 HUD 上）。
  *
  * 状态不靠 keep-alive：useMagnetSearch 把查询条件与结果落盘（search-query /
  * search-hits），任务挂载即从主进程拉全量——卸载重进回到上次那页，数据不丢。

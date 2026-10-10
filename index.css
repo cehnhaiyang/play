@@ -282,7 +282,7 @@
     background: rgba(255, 255, 255, 0.28);
 }
 
-/* BrowsePanel 此前把这两个类写在组件内的 <style> 里，播放器的横向标签条也要用，
+/* 这两个类原先写在各组件内的 <style> 里，播放器的横向标签条也要用，
    提到全局避免同一份规则存在两处。 */
 .scrollbar-hide::-webkit-scrollbar {
     display: none;

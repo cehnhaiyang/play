@@ -1,48 +1,26 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { usePlay, useBrowse, useAgent } from './hooks';
-import { BrowsePanel, PlayPanel, Floating, AudioPanel, GalleryPanel, TorrentPanel } from './components';
-import { FoundLink, MediaType } from './meta';
+import React, { useState, useCallback } from 'react';
+import { usePlay } from './hooks';
+import { PlayPanel, Floating, AudioPanel, GalleryPanel, TorrentPanel } from './components';
+import { MediaType } from './meta';
 import { getMediaType } from './const';
 
-type ViewMode = 'sniffer' | 'player' | 'audio' | 'gallery' | 'torrent';
+/**
+ * 应用主视图。
+ *
+ * **浏览器视图已移除**：标签页、地址栏、书签、嗅探这些随自建外壳一起拆掉，
+ * 由浏览器插件接管（extension/）。这里只剩"本机工具"那一半 ——
+ * 播放器、音频工坊、画廊、磁力下载。
+ *
+ * 视图切换仍用 fixed + transform 的叠加层而不是路由：切换要保持各组件的
+ * 挂载状态（播放进度、已加载的列表、输入内容），路由会卸载重建。
+ */
+type ViewMode = 'player' | 'audio' | 'gallery' | 'torrent';
 
 const PlayerLayout: React.FC = () => {
   const player = usePlay();
-  const browse = useBrowse();
 
-  const { tabs, sniffer, interactions, tamper } = browse;
-  const currentUrl = tabs.activeTab.url;
+  const [view, setView] = useState<ViewMode>('player');
 
-  // Agent 与篡改引擎共用同一条 webview 生命周期：
-  // 都靠 interactions 的 dom-ready 广播拿到页面，不各自持有 webview 引用。
-  // 同时把 tamper 整个传进去 —— Agent 的三组新工具（tamper / storage /
-  // tokens）做的正是篡改面板里那些事，规则真值由 useTamper 持有，这里不复制。
-  const agent = useAgent({
-    getActiveWebview: interactions.getActiveWebview,
-    onPageReady: interactions.onPageReady,
-    tamper,
-  });
-
-  // "持续嗅探"开关打开时，一次 URL 变化扫三轮（立即 + 1.5s + 3.5s），
-  // 等 SPA 把资源渲染出来。开关关闭时直接返回，切页什么都不做。
-  // 三轮共用一个 runId：用户快速切页时，上一页的迟到轮次会被丢弃，
-  // 不会把旧页资源写进当前列表、也不会抢走新轮次的加载态。
-  // 开关本身变化也会触发这里：打开开关 = 立刻给当前页来三轮。
-  const scanRunRef = useRef(0);
-  useEffect(() => {
-    if (!sniffer.sniffEnabled || !currentUrl) return;
-    scanRunRef.current += 1;
-    const runId = scanRunRef.current;
-    sniffer.actions.scan(currentUrl, runId);
-    const t1 = window.setTimeout(() => sniffer.actions.scan(currentUrl, runId), 1500);
-    const t2 = window.setTimeout(() => sniffer.actions.scan(currentUrl, runId), 3500);
-    return () => {
-      window.clearTimeout(t1);
-      window.clearTimeout(t2);
-    };
-  }, [currentUrl, sniffer.sniffEnabled, sniffer.actions.scan]);
-
-  const [view, setView] = useState<ViewMode>('sniffer');
   // 画廊懒挂载：GalleryPanel 首屏 effect 会预拉 latest 频道，常驻挂载等于每次启动都偷跑流量；
   // 且百张封面图常驻后台会持续占用解码与内存。首次进入时挂载，之后 keep-alive 保状态。
   const [galleryVisited, setGalleryVisited] = useState(false);
@@ -50,19 +28,13 @@ const PlayerLayout: React.FC = () => {
     setGalleryVisited(true);
     setView('gallery');
   }, []);
+
   // 磁力下载同画廊：首次进入挂载、之后 keep-alive 保状态。
-  // useMagnetSearch 的查询与结果自带落盘、任务挂载即从主进程拉全量，
-  // 但面板内的 tab / 站点折叠等纯 UI 状态靠常驻保留，切出去回来看下载进度不重置。
   const [torrentVisited, setTorrentVisited] = useState(false);
   const openTorrentView = useCallback(() => {
     setTorrentVisited(true);
     setView('torrent');
   }, []);
-
-  const handleSnifferPlay = useCallback((link: FoundLink) => {
-    player.methods.addStream(link.url, link.title, link.type);
-    setView('player');
-  }, [player.methods]);
 
   const handleBrowseGallery = useCallback(
     (gallery: { title: string; gid?: string; pages: { url: string; title: string; page?: number }[] }) => {
@@ -130,25 +102,10 @@ const PlayerLayout: React.FC = () => {
   return (
     <div className="h-full w-full bg-slate-950 text-slate-200 font-sans overflow-hidden">
       <div
-        className={`fixed inset-0 z-20 transition-all duration-300 ease-out ${view === 'sniffer' ? 'translate-x-0 opacity-100' : '-translate-x-[30%] opacity-0 pointer-events-none'
-          }`}
-      >
-        <BrowsePanel
-          isVisible={view === 'sniffer'}
-          onNavigateToPlayer={() => setView('player')}
-          onNavigateToAudio={() => setView('audio')}
-          onNavigateToGallery={openGalleryView}
-          onNavigateToTorrent={openTorrentView}
-          browse={browse}
-          agent={agent}
-        />
-      </div>
-
-      <div
         className={`fixed inset-0 z-50 transition-transform duration-300 ease-out will-change-transform bg-slate-950 ${view === 'audio' ? 'translate-y-0' : 'translate-y-full'
           }`}
       >
-        {view === 'audio' && <AudioPanel onBack={() => setView('sniffer')} />}
+        {view === 'audio' && <AudioPanel onBack={() => setView('player')} />}
       </div>
 
       <div
@@ -157,8 +114,7 @@ const PlayerLayout: React.FC = () => {
       >
         {galleryVisited && (
           <GalleryPanel
-            onBack={() => setView('sniffer')}
-            currentUrl={currentUrl}
+            onBack={() => setView('player')}
             onBrowseInPlayer={handleBrowseGallery}
             onPlayMediaStreams={handlePlayMediaStreams}
             onAppendToPlayer={handleAppendGalleryPages}
@@ -172,7 +128,7 @@ const PlayerLayout: React.FC = () => {
           }`}
       >
         {torrentVisited && (
-          <TorrentPanel onBack={() => setView('sniffer')} />
+          <TorrentPanel onBack={() => setView('player')} />
         )}
       </div>
 
@@ -180,18 +136,16 @@ const PlayerLayout: React.FC = () => {
         className={`fixed inset-0 z-30 flex flex-col transition-transform duration-300 ease-out will-change-transform bg-slate-950 ${view === 'player' ? 'translate-x-0' : 'translate-x-full'
           }`}
       >
-        <PlayPanel player={player} onBackToBrowse={() => setView('sniffer')} isVisible={view === 'player'} />
+        <PlayPanel player={player} isVisible={view === 'player'} />
       </div>
 
-      {/* 悬浮球常驻挂载：切到播放器/音频工坊时只 display:none 藏起来，不卸载。
-        之前这里 view !== 'sniffer' 直接不渲染，切一次视图球内全部状态清零。
-        Agent 不在这里 —— 它是浏览器面板的右侧边栏，与 webview 同生共死 */}
-      <div className={view === 'sniffer' ? 'fixed inset-0 z-50 pointer-events-none block' : 'hidden'}>
+      {/* 悬浮球常驻挂载：切到音频工坊/画廊时只 display:none 藏起来，不卸载。
+        之前这里 view !== 'player' 直接不渲染，切一次视图球内全部状态清零。
+        Agent 不在这里 —— 它随浏览器外壳迁到插件侧边栏 */}
+      <div className={view === 'player' ? 'fixed inset-0 z-50 pointer-events-none block' : 'hidden'}>
         <Floating
-          sniffer={sniffer}
-          currentUrl={currentUrl}
-          onPlay={handleSnifferPlay}
-          onAiAnalyze={() => sniffer.actions.analyzeWithAi(currentUrl)}
+          onOpenGallery={openGalleryView}
+          onOpenTorrent={openTorrentView}
         />
       </div>
     </div>

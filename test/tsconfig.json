@@ -19,8 +19,6 @@
   "include": [
     "../services/AudioService.ts",
     "../services/AiService.ts",
-    "../services/BookmarkService/**/*.ts",
-    "../services/BrowserService/**/*.ts",
     "../services/LogService.ts",
     "../services/SearchService.ts",
     "../const.ts",

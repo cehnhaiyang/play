@@ -566,7 +566,7 @@ export interface AgentMessage {
  * 保存下来的脚本。
  *
  * `urlPattern` 非空时，页面 dom-ready 且 URL 命中即自动执行 ——
- * 这一步复用 useBrowse 的 onPageReady 广播，不需要另挂监听。
+ * 这一步复用 AgentDeps.onPageReady 的广播，不需要另挂监听。
  */
 export interface AgentScript {
     id: string;

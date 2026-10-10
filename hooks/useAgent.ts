@@ -1039,7 +1039,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
     // 对话历史镜像。send() 要读**本轮开始之前**的历史来重建模型上下文，而它读不了
     // messages：send 开头的 appendMessage 只是排队了一次 setState，同一次渲染的闭包里
     // messages 仍是旧值 —— 依赖 messages 还会让 send 的身份每来一条消息就变一次，
-    // 把 BrowsePanel 里依赖它的 useCallback 全部击穿。
+    // 把消费它的那些 useCallback 全部击穿。
     const messagesRef = useRef(messages);
     useEffect(() => { messagesRef.current = messages; }, [messages]);
 
@@ -2182,7 +2182,7 @@ export const useAgent = (deps: AgentDeps): AgentState => {
 
     /* ------------------------------ 自动执行 ------------------------------ */
 
-    // 页面每次就绪 → 跑一遍命中的脚本。这一步直接复用 useBrowse 的广播，
+    // 页面每次就绪 → 跑一遍命中的脚本。这一步直接复用 deps.onPageReady 的广播，
     // 与篡改引擎共用同一条生命周期，不需要另挂 dom-ready 监听。
     // 并发由 execOn 内的串行队列消化：模型步骤与自动脚本不会交错读页面，
     // 这里不需要再判 busy 而跳过 —— 跳过会漏掉命中的自动化，而排队只是晚一点跑。

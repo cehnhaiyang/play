@@ -53,17 +53,8 @@ const main = async () => {
   console.log('\n=== 主进程静态自检 ===');
   const mainStaticOk = require('./mainstatic.test.js').run();
 
-  console.log('\n=== 篡改工具纯函数 ===');
-  const tamperOk = require('./tamper.test.js').run();
-
   console.log('\n=== Agent 工具派发 ===');
   const agentToolsOk = await require('./agenttools.test.js').run();
-
-  console.log('\n=== 规则草稿同步 ===');
-  const draftOk = require('./draft.test.js').run();
-
-  console.log('\n=== 嗅探引擎 ===');
-  const snifferOk = require('./sniffer.test.js').run();
 
   console.log('\n=== 运行日志 ===');
   const logsOk = require('./logs.test.js').run();
@@ -75,8 +66,8 @@ const main = async () => {
   const extSnifferOk = require('./extsniffer.test.js').run();
 
   if (!engineOk || !compatOk || !aibookOk || !aiproviderOk || !searchSyncOk || !searchAsyncOk
-    || !mainStaticOk || !tamperOk || !agentToolsOk || !draftOk
-    || !snifferOk || !logsOk || !bridgeOk || !extSnifferOk) {
+    || !mainStaticOk || !agentToolsOk
+    || !logsOk || !bridgeOk || !extSnifferOk) {
     process.exitCode = 1;
     console.log('\n存在失败用例。');
   } else {
