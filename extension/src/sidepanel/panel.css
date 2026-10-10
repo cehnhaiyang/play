@@ -1,0 +1,34 @@
+/* source(none) 关掉 Tailwind 的自动扫描：它按 **CWD** 推断扫描范围，从仓库根
+   调用 `npm run ext:build` 时会把整个项目扫进去（实测产物 7KB → 149KB），
+   而同一个命令在 extension/ 下跑又是另一个结果。下面显式声明唯一来源。 */
+@import "tailwindcss" source(none);
+
+@source "../";
+
+@layer base {
+    :root {
+        color-scheme: dark;
+    }
+
+    html,
+    body,
+    #root {
+        width: 100%;
+        height: 100%;
+    }
+
+    body {
+        margin: 0;
+        background: #020617;
+        color: #e2e8f0;
+        font-family:
+            "Segoe UI",
+            "PingFang SC",
+            "Microsoft YaHei",
+            sans-serif;
+    }
+
+    * {
+        box-sizing: border-box;
+    }
+}

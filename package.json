@@ -13,7 +13,10 @@
         "test:spg": "node test/index.js",
         "test:proxy-sync": "node scripts/proxy-sync-check.js",
         "test:ui": "concurrently -k -s first \"vite --port 5174 --strictPort\" \"wait-on tcp:5174 && electron scripts/ui-check.js\"",
-        "test:ui:only": "electron scripts/ui-check.js"
+        "test:ui:only": "electron scripts/ui-check.js",
+        "ext:build": "vite build --config extension/vite.config.mts",
+        "ext:dev": "vite build --config extension/vite.config.mts --watch",
+        "ext:typecheck": "tsc --noEmit -p extension/tsconfig.json"
     },
     "dependencies": {
         "@tailwindcss/postcss": "^4.3.3",
@@ -27,6 +30,7 @@
     },
     "devDependencies": {
         "@heroicons/react": "^2.2.0",
+        "@types/chrome": "^0.3.5",
         "@types/node": "^26.6.2",
         "@types/react": "^19.3.0",
         "@types/react-dom": "^19.3.0",
