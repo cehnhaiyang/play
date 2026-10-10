@@ -10,7 +10,6 @@ import React, {
 } from 'react';
 import {
     ArchiveBoxArrowDownIcon,
-    ArrowDownIcon,
     ArrowLeftIcon,
     ArrowUpTrayIcon,
     Bars3Icon,
@@ -31,10 +30,8 @@ import {
     StopIcon,
     TrashIcon,
     UserCircleIcon,
-    XMarkIcon,
 } from '@heroicons/react/24/solid';
 import {
-    ArrowDownTrayIcon,
     ArrowPathRoundedSquareIcon,
     ArrowUpTrayIcon as ArrowUpTrayOutlineIcon,
     ChartBarIcon,
@@ -55,7 +52,7 @@ import { useAudio } from '../hooks';
  * 原 AudioPanel/ 目录（index + ChatInterface + CodeEditor + Visualizer +
  * AudioToolbox）全部合并到这里，对话区所需的引擎能力由 AudioPanel 显式注入。
  *
- * 文件内分区：示波器 → 代码编辑器 → 对话区 → 音频实验室 → 面板外壳。
+ * 文件内分区：视觉令牌 → 示波器 → 代码编辑器 → 对话区 → 音频实验室 → 面板外壳。
  */
 
 type ViewState = 'dashboard' | 'workspace' | 'lab';
@@ -79,9 +76,10 @@ type AnalyzerResult = NonNullable<ReturnType<typeof useAudio>['state']['analyzer
 const SURFACE = 'rounded-2xl border border-white/8 bg-white/[0.03] backdrop-blur-sm';
 /** 可点击表面的悬停态 */
 const SURFACE_HOVER = 'transition-colors hover:border-white/16 hover:bg-white/[0.06]';
-/** 键盘焦点环：面板内所有可点元素共用，避免各处 focus 表现不一 */
-const FOCUS_RING =
-    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950';
+/** 键盘焦点环：面板内所有可点元素共用，避免各处 focus 表现不一。
+    不用 ring-offset —— 面板底色在 slate-950 / zinc-950 之间切换，
+    固定的 offset 颜色总会在其中一边露出色差。 */
+const FOCUS_RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/70';
 const BTN_BASE =
     'inline-flex items-center justify-center gap-1.5 rounded-lg text-xs font-semibold transition active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40';
 /** 主操作：新建、运行、导出这类"推进流程"的动作 */
@@ -90,6 +88,17 @@ const BTN_PRIMARY = `${BTN_BASE} ${FOCUS_RING} bg-gradient-to-r from-cyan-500 to
 const BTN_GHOST = `${BTN_BASE} ${FOCUS_RING} border border-white/10 bg-white/[0.04] text-zinc-300 hover:border-white/20 hover:bg-white/[0.08] hover:text-white`;
 /** 小标签：字段名、单位、分区标题共用 */
 const LABEL = 'text-[10px] font-bold uppercase tracking-wider text-zinc-500';
+
+/**
+ * 拖拽离开时判断"是不是真的离开了这个区域"。
+ *
+ * 裸写 onDragLeave={() => setDragging(false)} 会在指针移到区域内任意子元素上时
+ * 也触发（dragleave 按元素边界派发，进入子元素同样算离开父元素），
+ * 表现是高亮边框疯狂闪烁。relatedTarget 仍在本区域内就不算离开。
+ */
+const handleDragExit = (e: React.DragEvent, onLeave: () => void) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) onLeave();
+};
 
 /**
  * 相对时间。项目卡片此前显示 `toLocaleDateString()`，只到"天"，
@@ -159,7 +168,7 @@ const ProjectGlyph: React.FC<{ seed: string; bars?: number; className?: string }
     }, [seed, bars]);
 
     return (
-        <div className={`flex items-end gap-[2px] h-8 ${className}`} aria-hidden="true">
+        <div className={`flex items-end gap-[2px] ${className}`} aria-hidden="true">
             {heights.map((h, i) => (
                 <span
                     key={i}
@@ -1110,7 +1119,6 @@ const AnalyzerView: React.FC<AnalyzerProps> = ({ result, analyze }) => {
         const width = rect.width;
         const height = rect.height;
         const data = result.buffer.getChannelData(0);
-        const step = Math.ceil(data.length / width);
         const amp = height / 2;
 
         ctx.clearRect(0, 0, width, height);
@@ -1194,9 +1202,9 @@ const AnalyzerView: React.FC<AnalyzerProps> = ({ result, analyze }) => {
                     {/* Waveform */}
                     <div
                         onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-                        onDragLeave={() => setIsDragging(false)}
+                        onDragLeave={(e) => handleDragExit(e, () => setIsDragging(false))}
                         onDrop={handleDrop}
-                        className={`relative h-64 overflow-hidden rounded-xl border bg-[#0b0f14] transition-colors ${isDragging ? 'border-cyan-400/70 bg-cyan-500/5' : 'border-white/8'
+                        className={`relative h-64 overflow-hidden rounded-xl border bg-[#0b0f14] transition-colors ${isDragging ? 'border-cyan-400/70' : 'border-white/8'
                             }`}
                     >
                         <canvas ref={canvasRef} className="h-full w-full" />
@@ -1204,7 +1212,7 @@ const AnalyzerView: React.FC<AnalyzerProps> = ({ result, analyze }) => {
                             波形
                         </div>
                         {isDragging && (
-                            <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/50 text-sm font-bold text-cyan-300">
+                            <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/60 text-sm font-bold text-cyan-300">
                                 松开以分析这个文件
                             </div>
                         )}
@@ -1213,7 +1221,7 @@ const AnalyzerView: React.FC<AnalyzerProps> = ({ result, analyze }) => {
             ) : (
                 <label
                     onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-                    onDragLeave={() => setIsDragging(false)}
+                    onDragLeave={(e) => handleDragExit(e, () => setIsDragging(false))}
                     onDrop={handleDrop}
                     className={`flex h-64 cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed transition-colors ${isDragging
                         ? 'border-cyan-400/70 bg-cyan-500/[0.07] text-cyan-300'
@@ -1274,7 +1282,7 @@ const FixerView: React.FC<FixerProps> = ({ file, gain, isProcessing, setFile, se
                     <label className={`${LABEL} mb-2.5 block`}>输入文件</label>
                     <label
                         onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-                        onDragLeave={() => setIsDragging(false)}
+                        onDragLeave={(e) => handleDragExit(e, () => setIsDragging(false))}
                         onDrop={handleDrop}
                         className={`flex cursor-pointer items-center gap-3 rounded-xl border border-dashed px-4 py-3.5 transition-colors ${isDragging
                             ? 'border-cyan-400/70 bg-cyan-500/[0.07]'
@@ -1376,25 +1384,54 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
     const fileInputRef = useRef<HTMLInputElement>(null);
     const chatInterfaceRef = useRef<ChatInterfaceRef>(null);
 
+    // --- Workspace Logic ---
+
+    // 自动修复的最大尝试次数，防止模型反复给出同样错误的代码时无限循环
+    const MAX_AUTO_FIX = 3;
+    /**
+     * 自动修复尝试次数。
+     *
+     * 这个数此前存在两处：这里的 `fixAttemptRef`（异步逻辑读它）与 useAudio 的
+     * `autoFixCount`（界面读它），而只有后者会被 `audioActions.reset()` 清掉。
+     * 于是"A 项目卡在 3 次"之后切到 B 项目，界面显示"修复 0/3"、
+     * 内部却仍是 3 —— 下一次自动修复直接判定超限放弃，一次都不试。
+     *
+     * 现在两者只由 setFixAttempts 写入，工作区重置时一并归零。
+     * ref 仍是逻辑上的权威（异步回调里读 state 会拿到闭包旧值），
+     * state 仅用于触发重渲染。
+     */
+    const fixAttemptRef = useRef(0);
+
+    const setFixAttempts = useCallback((attempts: number) => {
+        fixAttemptRef.current = attempts;
+        audioActions.setAutoFixCount(attempts);
+    }, [audioActions]);
+
+    /** 工作区重置：引擎、报错、提示与修复计数必须一起归零，否则会互相矛盾 */
+    const resetWorkspace = useCallback(() => {
+        setFixAttempts(0);
+        audioActions.reset();
+    }, [audioActions, setFixAttempts]);
+
     // --- Handlers ---
 
     const handleCreateProject = useCallback(() => {
         audioActions.stop();
         audioActions.createProject();
         setView('workspace');
-        audioActions.reset();
+        resetWorkspace();
         if (window.innerWidth < 768) setIsSidebarOpen(false);
-    }, [audioActions]);
+    }, [audioActions, resetWorkspace]);
 
     const handleOpenProject = useCallback((id: string) => {
         if (activeProjectId === id && view === 'workspace') return;
 
-        audioActions.reset();
+        resetWorkspace();
         audioActions.setActiveProjectId(id);
         setView('workspace');
 
         if (window.innerWidth < 768) setIsSidebarOpen(false);
-    }, [activeProjectId, audioActions, view]);
+    }, [activeProjectId, audioActions, resetWorkspace, view]);
 
     const handleDeleteProject = useCallback((e: React.MouseEvent, id: string) => {
         e.stopPropagation();
@@ -1402,24 +1439,17 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
             audioActions.deleteProject(id);
             if (activeProjectId === id) {
                 audioActions.stop();
-                audioActions.reset();
+                resetWorkspace();
                 setView('dashboard');
             }
         }
-    }, [activeProjectId, audioActions]);
+    }, [activeProjectId, audioActions, resetWorkspace]);
 
     const handleSwitchToLab = useCallback(() => {
         audioActions.stop();
-        audioActions.reset();
+        resetWorkspace();
         setView('lab');
-    }, [audioActions]);
-
-    // --- Workspace Logic ---
-
-    // 自动修复的最大尝试次数，防止模型反复给出同样错误的代码时无限循环
-    const MAX_AUTO_FIX = 3;
-    // 用 ref 记录尝试次数：state 在这里会被闭包捕获成旧值，导致计数错乱
-    const fixAttemptRef = useRef(0);
+    }, [audioActions, resetWorkspace]);
 
     const handleCompileAndPlay = useCallback(async (
         sourceCode: string,
@@ -1429,7 +1459,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
         const result = await audioActions.compileAndPlay(sourceCode);
 
         if (result.success) {
-            fixAttemptRef.current = 0;
+            setFixAttempts(0);
             return;
         }
 
@@ -1440,14 +1470,13 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                 message: `${result.error.message}（已自动修复 ${MAX_AUTO_FIX} 次仍未通过，请手动检查代码）`,
                 line: result.error.line,
             });
-            fixAttemptRef.current = 0;
+            setFixAttempts(0);
             return;
         }
 
-        fixAttemptRef.current += 1;
-        audioActions.setAutoFixCount(fixAttemptRef.current);
+        setFixAttempts(fixAttemptRef.current + 1);
         chatInterfaceRef.current?.triggerFix(sourceCode, result.error.message);
-    }, [audioActions]);
+    }, [audioActions, setFixAttempts]);
 
     const handleCodeUpdate = useCallback((newCode: string) => {
         audioActions.updateActiveProject({ code: newCode });
@@ -1461,11 +1490,10 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
 
     const handleManualFix = useCallback(() => {
         if (parserError && chatInterfaceRef.current && activeProject) {
-            fixAttemptRef.current = 0;
-            audioActions.setAutoFixCount(1);
+            setFixAttempts(1);
             chatInterfaceRef.current.triggerFix(activeProject.code, parserError.message);
         }
-    }, [activeProject, audioActions, parserError]);
+    }, [activeProject, parserError, setFixAttempts]);
 
     const handleExportBundle = useCallback(() => {
         if (activeProject) {
@@ -1481,10 +1509,46 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
         audioActions.stop();
         audioActions.importProjectFromFile(file, () => {
             setView('workspace');
-            audioActions.reset();
+            resetWorkspace();
         });
         event.target.value = '';
-    }, [audioActions]);
+    }, [audioActions, resetWorkspace]);
+
+    /**
+     * 工作区快捷键。
+     *
+     * Ctrl/Cmd+Enter 运行是这类工具最通用的约定（VS Code、Jupyter 同款），
+     * 而此前运行只能靠鼠标点工具栏。Esc 退出当前工程回到概览，
+     * 与"返回浏览"按钮同义。
+     *
+     * 输入框 / 编辑器里不拦：Ctrl+Enter 在 textarea 中同样应该触发运行，
+     * 所以只对 Esc 做焦点判断 —— 在输入框按 Esc 的意图是"取消输入"，
+     * 不该把整个工程关掉。
+     */
+    useEffect(() => {
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (view !== 'workspace' || !activeProject) return;
+
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                handleCompileAndPlay(activeProject.code);
+                return;
+            }
+
+            if (e.key === 'Escape') {
+                const el = document.activeElement;
+                const typing =
+                    el instanceof HTMLInputElement ||
+                    el instanceof HTMLTextAreaElement ||
+                    (el instanceof HTMLElement && el.isContentEditable);
+                if (typing) return;
+                setView('dashboard');
+            }
+        };
+
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [view, activeProject, handleCompileAndPlay]);
 
     // --- Render Views ---
 
@@ -1570,10 +1634,9 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                         return (
                             <div
                                 key={project.id}
-                                onClick={() => handleOpenProject(project.id)}
                                 // 入场按索引错开，列表越长越像"依次落位"而不是整块闪出
                                 style={{ '--spg-delay': `${Math.min(index, 8) * 45}ms` } as React.CSSProperties}
-                                className={`spg-rise group relative flex h-[248px] cursor-pointer flex-col overflow-hidden rounded-2xl border bg-white/[0.03] p-5 transition-all hover:-translate-y-1 hover:border-cyan-400/40 hover:shadow-2xl hover:shadow-cyan-950/40 ${isActive ? 'border-cyan-400/40' : 'border-white/8'
+                                className={`spg-rise group relative flex h-[248px] flex-col overflow-hidden rounded-2xl border bg-white/[0.03] p-5 transition-all hover:-translate-y-1 hover:border-cyan-400/40 hover:shadow-2xl hover:shadow-cyan-950/40 focus-within:border-cyan-400/40 ${isActive ? 'border-cyan-400/40' : 'border-white/8'
                                     }`}
                             >
                                 <div className="mb-3 flex items-start justify-between gap-2">
@@ -1587,10 +1650,11 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                                                 进行中
                                             </span>
                                         )}
+                                        {/* z-20：压在下面那张铺满卡片的"打开"按钮之上，否则点不到 */}
                                         <button
                                             onClick={(e) => handleDeleteProject(e, project.id)}
                                             // 触屏没有 hover，删除键不能只在 hover 时出现（同 .tp-row-action 的教训）
-                                            className="rounded-lg p-1.5 text-zinc-600 opacity-100 transition hover:bg-rose-500/15 hover:text-rose-300 focus-visible:opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
+                                            className="relative z-20 rounded-lg p-1.5 text-zinc-600 opacity-100 transition hover:bg-rose-500/15 hover:text-rose-300 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
                                             title="删除项目"
                                         >
                                             <TrashIcon className="w-4 h-4" />
@@ -1598,12 +1662,19 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                                     </div>
                                 </div>
 
-                                <h3 className="truncate text-base font-bold text-zinc-100 transition-colors group-hover:text-cyan-200">
+                                {/* 铺满整张卡片的按钮：让卡片本身可以 Tab 到、回车打开。
+                                    用 after:absolute after:inset-0 而不是把整个卡片做成 button ——
+                                    卡片里还有删除按钮，button 嵌套 button 是非法 HTML。
+                                    指针光标由根节点的 .spg-root 统一补（见 index.css）。 */}
+                                <button
+                                    onClick={() => handleOpenProject(project.id)}
+                                    className={`${FOCUS_RING} truncate text-left text-base font-bold text-zinc-100 transition-colors after:absolute after:inset-0 after:content-[''] group-hover:text-cyan-200`}
+                                >
                                     {project.name}
-                                </h3>
+                                </button>
 
-                                <div className="mt-3 flex-1">
-                                    <ProjectGlyph seed={project.id} />
+                                <div className="mt-3 flex-1 min-h-0">
+                                    <ProjectGlyph seed={project.id} className="h-full max-h-16" />
                                 </div>
 
                                 {/* 源码摘要：让卡片自己说明"这是个什么曲子" */}
@@ -1758,63 +1829,80 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
     const renderWorkspace = () => {
         if (!activeProject) return null;
 
+        const isPlaying = appState === AppState.PLAYING;
+        const isExporting = appState === AppState.EXPORTING_AUDIO;
+        const summary = summarizeCode(activeProject.code);
+
         return (
             <div className="flex-1 flex flex-col min-w-0 bg-slate-950 h-full">
                 {/* Workspace Header */}
-                <header className="h-14 border-b border-zinc-800 bg-zinc-950/80 backdrop-blur-xl flex items-center px-4 justify-between shrink-0 z-10">
-                    <div className="flex items-center gap-3">
+                <header className="h-14 border-b border-white/8 bg-zinc-950/80 backdrop-blur-xl flex items-center px-4 justify-between gap-4 shrink-0 z-10">
+                    <div className="flex items-center gap-3 min-w-0">
                         <button
                             onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-                            className={`text-zinc-400 hover:text-white p-2 rounded-lg hover:bg-zinc-800 transition-colors ${!isSidebarOpen ? 'bg-zinc-800' : ''}`}
+                            title={isSidebarOpen ? '收起侧栏' : '展开侧栏'}
+                            className={`rounded-lg p-2 transition-colors ${FOCUS_RING} ${!isSidebarOpen ? 'bg-white/8 text-white' : 'text-zinc-400 hover:bg-white/8 hover:text-white'
+                                }`}
                         >
                             <Bars3Icon className="w-5 h-5" />
                         </button>
-                        <div className="h-6 w-px bg-zinc-800 mx-2"></div>
-                        <div className="group relative flex items-center gap-2">
+                        <div className="h-6 w-px bg-white/10" />
+                        <div className="group relative flex items-center gap-2 min-w-0">
                             <input
-                                className="bg-transparent border-b border-transparent hover:border-zinc-700 focus:border-cyan-500 focus:outline-none text-sm font-bold text-zinc-100 w-48 transition-all px-1"
+                                aria-label="项目名称"
+                                className="bg-transparent border-b border-transparent hover:border-white/15 focus:border-cyan-400 focus:outline-none text-sm font-bold text-zinc-100 w-48 transition-colors px-1"
                                 value={activeProject.name}
                                 onChange={(e) => audioActions.updateActiveProject({ name: e.target.value })}
                             />
-                            <PencilSquareIcon className="w-3.5 h-3.5 text-zinc-600 group-hover:text-zinc-400" />
+                            <PencilSquareIcon className="w-3.5 h-3.5 shrink-0 text-zinc-600 group-hover:text-zinc-400" />
                         </div>
                     </div>
 
-                    <div className="flex items-center gap-6">
+                    <div className="flex items-center gap-3 shrink-0">
+                        {/* 源码摘要：回答"这个工程现在是什么状态"，比只看运行状态更有信息量 */}
+                        <div className="hidden items-center gap-2 lg:flex">
+                            {summary.tempo !== null && (
+                                <span className="rounded-md border border-white/8 bg-white/[0.03] px-2 py-1 font-mono text-[10px] text-zinc-400">
+                                    {summary.tempo} BPM
+                                </span>
+                            )}
+                            <span className="rounded-md border border-white/8 bg-white/[0.03] px-2 py-1 font-mono text-[10px] text-zinc-400">
+                                {summary.lines} 行
+                            </span>
+                        </div>
+
                         {/* Status Indicators */}
                         {parserError ? (
-                            <div className="flex items-center gap-3 px-3 py-1.5 rounded-full bg-red-950/30 border border-red-900/50">
-                                <span className="text-xs text-red-400 flex items-center gap-1.5 font-mono font-medium" title={parserError.message}>
+                            <div className="flex items-center gap-2.5 px-3 py-1.5 rounded-full bg-rose-950/40 border border-rose-500/30">
+                                <span className="flex items-center gap-1.5 font-mono text-xs font-medium text-rose-300" title={parserError.message}>
                                     <span className="relative flex h-2 w-2">
-                                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
-                                        <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+                                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
+                                        <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500" />
                                     </span>
-                                    Error at line {parserError.line}
+                                    第 {parserError.line} 行出错
                                 </span>
                                 {autoFixCount > 0 && (
-                                    <span className="text-[10px] text-amber-400 font-mono" title="自动修复尝试次数">
+                                    <span className="font-mono text-[10px] text-amber-400" title="自动修复尝试次数">
                                         修复 {autoFixCount}/{MAX_AUTO_FIX}
                                     </span>
                                 )}
-                                <div className="h-4 w-px bg-red-900/50"></div>
+                                <div className="h-4 w-px bg-rose-500/30" />
                                 <button
                                     onClick={handleManualFix}
-                                    className="text-xs text-red-300 hover:text-white flex items-center gap-1 transition-colors uppercase tracking-wide font-bold"
+                                    className="flex items-center gap-1 text-xs font-bold text-rose-200 transition-colors hover:text-white"
                                 >
-                                    <SparklesIcon className="w-3 h-3" /> Auto Fix
+                                    <SparklesIcon className="w-3 h-3" /> 立即修复
                                 </button>
                             </div>
                         ) : (
-                            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border transition-all duration-300 ${appState === AppState.PLAYING
-                                ? 'bg-green-950/30 border-green-900/50'
-                                : 'bg-zinc-900 border-zinc-800'
+                            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border transition-colors ${isPlaying ? 'bg-emerald-950/40 border-emerald-500/30' : 'bg-white/[0.03] border-white/8'
                                 }`}>
                                 <span className="relative flex h-2 w-2">
-                                    {appState === AppState.PLAYING && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>}
-                                    <span className={`relative inline-flex rounded-full h-2 w-2 ${appState === AppState.PLAYING ? 'bg-green-500' : 'bg-zinc-600'}`}></span>
+                                    {isPlaying && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />}
+                                    <span className={`relative inline-flex rounded-full h-2 w-2 ${isPlaying ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
                                 </span>
-                                <span className={`text-xs font-mono font-medium ${appState === AppState.PLAYING ? 'text-green-400' : 'text-zinc-500'}`}>
-                                    {appState === AppState.PLAYING ? 'SYNTHESIZING' : 'READY'}
+                                <span className={`font-mono text-xs font-medium ${isPlaying ? 'text-emerald-300' : 'text-zinc-500'}`}>
+                                    {isPlaying ? '播放中' : '就绪'}
                                 </span>
                             </div>
                         )}
@@ -1822,48 +1910,49 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                         {/* 编译提示：代码能跑，但有些东西大概率不是作者本意 */}
                         {compileWarnings.length > 0 && (
                             <div
-                                className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-950/30 border border-amber-900/50 cursor-help"
+                                className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-950/40 border border-amber-500/30 cursor-help"
                                 title={compileWarnings.map((w) => `第 ${w.line} 行: ${w.message}`).join('\n')}
                             >
                                 <ExclamationTriangleIcon className="w-3.5 h-3.5 text-amber-400" />
-                                <span className="text-xs text-amber-300 font-medium">
+                                <span className="text-xs font-medium text-amber-300">
                                     {compileWarnings.length} 条提示
                                 </span>
                             </div>
                         )}
 
                         {/* Toolbar Actions */}
-                        <div className="flex items-center bg-zinc-900 p-1 rounded-xl border border-zinc-800 shadow-sm">
-                            {appState === AppState.PLAYING ? (
+                        <div className="flex items-center gap-1 rounded-xl border border-white/8 bg-white/[0.03] p-1">
+                            {isPlaying ? (
                                 <button
                                     onClick={audioActions.stop}
-                                    className="p-2 text-red-400 hover:text-red-300 hover:bg-zinc-800 rounded-lg transition-colors flex items-center gap-2 px-3"
+                                    className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold text-rose-300 transition-colors hover:bg-rose-500/15 hover:text-rose-200"
                                     title="停止"
                                 >
-                                    <StopIcon className="w-4 h-4" /> <span className="text-xs font-bold">STOP</span>
+                                    <StopIcon className="w-4 h-4" /> 停止
                                 </button>
                             ) : (
                                 <button
                                     onClick={() => handleCompileAndPlay(activeProject.code)}
-                                    disabled={appState === AppState.EXPORTING_AUDIO}
-                                    className="p-2 text-green-400 hover:text-green-300 hover:bg-zinc-800 rounded-lg transition-colors disabled:opacity-50 flex items-center gap-2 px-3"
-                                    title="运行"
+                                    disabled={isExporting}
+                                    className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold text-emerald-300 transition-colors hover:bg-emerald-500/15 hover:text-emerald-200 disabled:opacity-50"
+                                    title="编译并试听（Ctrl+Enter）"
                                 >
-                                    <PlayIcon className="w-4 h-4" /> <span className="text-xs font-bold">RUN</span>
+                                    <PlayIcon className="w-4 h-4" /> 运行
                                 </button>
                             )}
-                            <div className="w-px h-5 bg-zinc-700 mx-1"></div>
+                            <div className="w-px h-5 bg-white/10" />
                             <button
                                 onClick={handleExportBundle}
-                                disabled={appState === AppState.EXPORTING_AUDIO}
-                                className="p-2 text-cyan-400 hover:text-cyan-300 hover:bg-zinc-800 rounded-lg transition-colors disabled:opacity-50"
-                                title="导出"
+                                disabled={isExporting}
+                                title="导出工程包（.spg + WAV）"
+                                className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-cyan-300 transition-colors hover:bg-cyan-500/15 hover:text-cyan-200 disabled:opacity-50"
                             >
-                                {appState === AppState.EXPORTING_AUDIO ? (
-                                    <div className="w-4 h-4 border-2 border-white/30 border-t-cyan-400 rounded-full animate-spin" />
+                                {isExporting ? (
+                                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-cyan-300" />
                                 ) : (
                                     <ArchiveBoxArrowDownIcon className="w-4 h-4" />
                                 )}
+                                导出
                             </button>
                         </div>
                     </div>
@@ -1872,7 +1961,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                 {/* Split View Content */}
                 <div className="flex-1 flex overflow-hidden p-4 gap-4">
                     {/* Left: Chat */}
-                    <div className="w-[380px] shrink-0 flex flex-col rounded-xl overflow-hidden border border-zinc-800 bg-zinc-900/90 shadow-2xl backdrop-blur-sm">
+                    <div className="w-[380px] shrink-0 flex flex-col rounded-2xl overflow-hidden border border-white/8 bg-zinc-900/60 shadow-2xl shadow-black/40">
                         <ChatInterface
                             key={activeProject.id}
                             ref={chatInterfaceRef}
@@ -1890,19 +1979,31 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                     {/* Right: Visualizer & Code */}
                     <div className="flex-1 flex flex-col gap-4 min-w-0">
                         {/* Visualizer (Fixed Height) */}
-                        <div className="h-48 shrink-0 rounded-xl overflow-hidden border border-zinc-800 shadow-lg relative group">
-                            <div className="absolute top-2 left-3 z-10 text-[10px] font-mono text-cyan-500 opacity-50 uppercase tracking-widest">Oscilloscope View</div>
-                            <Visualizer analyser={analyser} isActive={appState === AppState.PLAYING} />
+                        <div className="h-44 shrink-0 rounded-2xl overflow-hidden border border-white/8 shadow-2xl shadow-black/40 relative group">
+                            <div className="absolute top-2.5 left-3 z-20 flex items-center gap-2 pointer-events-none">
+                                <span className={`${LABEL} font-mono text-cyan-400/80`}>示波器</span>
+                                {isPlaying && (
+                                    <span className="flex items-center gap-1 rounded border border-emerald-500/25 bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-bold text-emerald-300">
+                                        <span className="h-1 w-1 rounded-full bg-emerald-400" />
+                                        实时
+                                    </span>
+                                )}
+                            </div>
+                            <Visualizer analyser={analyser} isActive={isPlaying} />
                         </div>
 
                         {/* Editor (Flex fill) */}
-                        <div className="flex-1 min-h-0 rounded-xl overflow-hidden border border-zinc-800 shadow-lg bg-zinc-950 flex flex-col">
-                            <div className="h-8 bg-zinc-900 border-b border-zinc-800 flex items-center justify-between px-3">
-                                <span className="text-xs text-zinc-500 font-mono">script.spg</span>
-                                <div className="flex gap-1.5">
-                                    <div className="w-2.5 h-2.5 rounded-full bg-zinc-800 border border-zinc-700"></div>
-                                    <div className="w-2.5 h-2.5 rounded-full bg-zinc-800 border border-zinc-700"></div>
-                                </div>
+                        <div className="flex-1 min-h-0 rounded-2xl overflow-hidden border border-white/8 shadow-2xl shadow-black/40 bg-[#0b0f14] flex flex-col">
+                            <div className="h-9 bg-white/[0.03] border-b border-white/8 flex items-center justify-between px-3 shrink-0">
+                                <span className="flex items-center gap-2 font-mono text-xs text-zinc-400">
+                                    <span className="h-2 w-2 rounded-full bg-cyan-400/60" />
+                                    script.spg
+                                </span>
+                                {parserError && (
+                                    <span className="font-mono text-[10px] text-rose-400/90">
+                                        编译失败
+                                    </span>
+                                )}
                             </div>
                             <CodeEditor
                                 code={activeProject.code}
@@ -1918,16 +2019,18 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
 
     const renderLab = () => (
         <div className="flex-1 flex flex-col min-w-0 bg-slate-950 h-full">
-            <header className="h-14 border-b border-zinc-800 bg-zinc-950/80 backdrop-blur-md flex items-center px-4 gap-3 shrink-0">
+            <header className="h-14 border-b border-white/8 bg-zinc-950/80 backdrop-blur-md flex items-center px-4 gap-3 shrink-0">
                 <button
                     onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-                    className="text-zinc-400 hover:text-white p-2 rounded-lg hover:bg-zinc-800 transition-colors"
+                    title={isSidebarOpen ? '收起侧栏' : '展开侧栏'}
+                    className={`rounded-lg p-2 text-zinc-400 transition-colors hover:bg-white/8 hover:text-white ${FOCUS_RING}`}
                 >
                     <Bars3Icon className="w-5 h-5" />
                 </button>
-                <div className="h-6 w-px bg-zinc-800"></div>
-                <BeakerIcon className="w-5 h-5 text-cyan-500" />
-                <span className="text-sm font-bold text-zinc-100 tracking-wide">Audio Laboratory</span>
+                <div className="h-6 w-px bg-white/10" />
+                <BeakerIcon className="w-4 h-4 text-cyan-400" />
+                <span className="text-sm font-bold tracking-wide text-zinc-100">音频实验室</span>
+                <span className="text-[11px] text-zinc-500">格式转换 · 波形分析 · 增益修复</span>
             </header>
             <div className="flex-1 overflow-hidden">
                 <AudioToolbox
@@ -1954,7 +2057,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
     );
 
     return (
-        <div className="h-full w-full bg-black text-zinc-100 flex flex-col font-sans selection:bg-cyan-500/30 overflow-hidden">
+        <div className="spg-root h-full w-full bg-black text-zinc-100 flex flex-col font-sans selection:bg-cyan-500/30 overflow-hidden">
             {/* Hidden File Input */}
             <input
                 type="file"

@@ -76,13 +76,6 @@
     animation-name: ui-zoom-in;
 }
 
-/* AudioPanel.tsx 用了 4 处 animate-fade-in（工具箱 ×3、面板 ×1），
-   但 Tailwind v4 与本项目都没定义过它 —— 与 animate-in 同源问题。
-   这里直接映射到上面的 ui-fade-in，让那 4 处真的淡入。 */
-.animate-fade-in {
-    animation: ui-fade-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
 /* 地址栏的加载进度条。
    Tailwind 的任意值只生成 animation 声明，关键帧得自己提供；
    这里直接做成一个具名类，比在 JSX 里写 `animate-[loading_2s_...]` 更清楚，
@@ -242,7 +235,6 @@
     .animate-in.fade-in,
     .animate-in.zoom-in-95,
     .animate-in.zoom-in-75,
-    .animate-fade-in,
     .animate-orb-sonar,
     .animate-orb-sonar-delayed,
     .animate-orb-breath,
@@ -563,7 +555,11 @@ input[type='range']:focus-visible {
    ========================================================================== */
 
 /* 卡片入场：轻微上浮 + 缩放，比单纯淡入更有"落位"感。
-   延迟由 --spg-delay 传入（列表项按 index 递增），避免写 N 个 nth-child。 */
+   延迟由 --spg-delay 传入（列表项按 index 递增），避免写 N 个 nth-child。
+
+   fill-mode 用 backwards 而不是 both：both 会让动画结束后仍保留 to 关键帧的
+   `transform: none`，以动画级优先级压住卡片自身的 hover 位移。这里 to 关键帧
+   与元素自然状态本来就一致，backwards 足够，且结束后不留任何残留声明。 */
 @keyframes spg-rise {
     from {
         opacity: 0;
@@ -577,7 +573,7 @@ input[type='range']:focus-visible {
 }
 
 .spg-rise {
-    animation: spg-rise 380ms var(--tp-ease) both;
+    animation: spg-rise 380ms var(--tp-ease) backwards;
     animation-delay: var(--spg-delay, 0ms);
 }
 
@@ -587,6 +583,14 @@ input[type='range']:focus-visible {
     background-color: #09090b;
     background-image: radial-gradient(rgba(255, 255, 255, 0.055) 1px, transparent 1px);
     background-size: 22px 22px;
+}
+
+/* 面板内所有按钮补上指针光标。
+   Tailwind v4 的 preflight 不再给 button 加 cursor: pointer（v3 有），
+   于是整块面板的按钮都是箭头光标 —— 点了有反应，但看起来不像能点。
+   逐个写 cursor-pointer 类会漏，且以后新增按钮还会漏，所以在根节点统一给。 */
+.spg-root button:not(:disabled) {
+    cursor: pointer;
 }
 
 /* 示波器边框的流光，仅播放时挂上，作为"正在出声"的第二重提示 */
