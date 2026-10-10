@@ -17,6 +17,8 @@ import {
     generateId,
     isAiBookFileName,
     isGalleryPackFile,
+    isPagedMedia,
+    isPlayableMedia,
     isValidMediaUrl,
     loadStr,
     packToGalleryBlob,
@@ -1720,9 +1722,12 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         e.preventDefault();
         dragDepthRef.current = 0;
         setIsDragging(false);
+        // 绘本生成器整屏覆盖时由它自己接管投放：这里再导一次会把同一批图片
+        // 同时塞进播放列表，用户拿到一本不该存在的绘本
+        if (showGenerator) return;
         const files = e.dataTransfer?.files;
         if (files && files.length > 0) void importFilesSmart(files);
-    }, [importFilesSmart]);
+    }, [importFilesSmart, showGenerator]);
 
     // 拖出窗口松手/取消时 drop 不触发：窗口级兜底 + relatedTarget 为 null 判离开文档
     useEffect(() => {
@@ -1785,7 +1790,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
 
     // 画面单击/双击：文档分支放行（选词/滚动不误触），按钮等冒泡忽略；
     // 图集/文档按区域翻页，视频左退/右进/中全屏
-    const pagedKind = currentFile?.mediaType === 'image' || currentFile?.mediaType === 'document';
+    const pagedKind = isPagedMedia(currentFile?.mediaType);
     // AI 绘本只按分组判定：同书版式一致，避免缺文案页突然退回普通图片视图
     const storyPages = useMemo(
         () => (currentFile?.groupType === 'ai-book' && currentFile.groupId
@@ -1794,12 +1799,8 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         [playlist.files, currentFile?.groupType, currentFile?.groupId]
     );
     const isStoryPage = !!currentFile && storyPages.length > 0;
-    // 有播放态：音视频/流 + 幻灯片轮播的图集与文档
-    const isPlayableMedia = !!currentFile
-        && (currentFile.mediaType === 'video'
-            || currentFile.mediaType === 'stream'
-            || currentFile.mediaType === 'audio'
-            || pagedKind);
+    // 文档能翻页但没有播放态：播放键置灰，翻页键照常可用
+    const playable = isPlayableMedia(currentFile?.mediaType);
     const handleVideoAreaClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
         const target = e.target as HTMLElement;
         if (target.closest?.('button, a, input, textarea, select, pre')) return;
@@ -1840,13 +1841,14 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
             const wasPlaying = state.isPlaying;
             clickTimerRef.current = window.setTimeout(() => {
                 clickTimerRef.current = null;
-                // 静态占位页无播放态：不同步提示，避免「提示播放但画面无变化」
-                if (!pagedKind && !isPlayableMedia) return;
-                methods.togglePlay();
+                // 由 togglePlay 自己回答「这次是否真的改变了播放态」：
+                // 静态占位页与文档没有播放态，它返回 false，此时不弹提示，
+                // 避免出现「提示正在播放但画面毫无变化」。
+                if (!methods.togglePlay()) return;
                 showFeedback(wasPlaying ? '已暂停' : '播放中', wasPlaying ? 'pause' : 'play');
             }, 260);
         }
-    }, [currentFile?.mediaType, handleSeekDelta, handleToggleFullscreen, isPlayableMedia, methods, pagedKind, showFeedback, state.isPlaying]);
+    }, [currentFile?.mediaType, handleSeekDelta, handleToggleFullscreen, methods, pagedKind, showFeedback, state.isPlaying]);
 
     useEffect(() => () => {
         if (clickTimerRef.current !== null) window.clearTimeout(clickTimerRef.current);
@@ -1965,8 +1967,8 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
             switch (e.code) {
                 case 'Space':
                     e.preventDefault();
-                    m.togglePlay();
-                    feedback(isPlaying ? '已暂停' : '播放中');
+                    // 无播放态的媒体（文档/静态页）不弹提示：否则会「提示播放中」而画面不动
+                    if (m.togglePlay()) feedback(isPlaying ? '已暂停' : '播放中');
                     break;
                 case 'ArrowLeft':
                     e.preventDefault();
@@ -1996,7 +1998,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                     break;
                 case 'KeyK':
                     e.preventDefault();
-                    m.togglePlay();
+                    if (m.togglePlay()) feedback(isPlaying ? '已暂停' : '播放中');
                     break;
                 case 'ArrowUp':
                     e.preventDefault();
@@ -3175,11 +3177,13 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                                 </IconButton>
                             )}
 
-                            {/* 主播放键：尺寸最大、实心强调色，是全条唯一的「重点」 */}
+                            {/* 主播放键：尺寸最大、实心强调色，是全条唯一的「重点」。
+                                文档/静态页没有播放态，置灰并说明原因，好过点了毫无反应。 */}
                             <button
                                 onClick={methods.togglePlay}
-                                className="mx-0.5 p-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl shadow-lg shadow-indigo-600/40 transition hover:scale-105 active:scale-95"
-                                title={state.isPlaying ? '暂停 (Space)' : '播放 (Space)'}
+                                disabled={!playable}
+                                className="mx-0.5 p-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl shadow-lg shadow-indigo-600/40 transition hover:scale-105 active:scale-95 disabled:bg-white/5 disabled:text-slate-600 disabled:shadow-none disabled:hover:scale-100 disabled:cursor-not-allowed"
+                                title={!playable ? '该类型没有播放态' : state.isPlaying ? '暂停 (Space)' : '播放 (Space)'}
                                 aria-label={state.isPlaying ? '暂停' : '播放'}
                             >
                                 {state.isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 fill-current" />}

@@ -8,6 +8,7 @@ import {
     dirOfFile,
     galleryNameFromMarker,
     generateId,
+    isSlideshowMedia,
     loadJSON,
     loadStr,
     revokeVideoFile,
@@ -122,14 +123,6 @@ const restorePlaylist = (): PlaylistState => {
         return fallback;
     }
 };
-
-/**
- * 是否为「幻灯片」型媒体：图集/文档没有 video 元素，播放态即自动轮播开关。
- * 其余非音视频类型（gallery 占位、other）是纯静态页，不存在播放态——
- * 三处判定必须共用本函数，否则会出现「能进播放态却没人自动隐藏控制条」这类不一致。
- */
-const isSlideshowMedia = (mediaType: VideoFile['mediaType']): boolean =>
-    mediaType === 'image' || mediaType === 'document';
 
 export const usePlay = (): UsePlayReturn => {
     const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -290,23 +283,27 @@ export const usePlay = (): UsePlayReturn => {
         setState(prev => ({ ...prev, isPlaying: false }));
     }, []);
 
-    // 切换播放/暂停
-    const togglePlay = useCallback(() => {
+    /**
+     * 切换播放/暂停。
+     *
+     * 返回「本次是否真的改变了播放态」：静态页（画廊占位/other）与文档没有播放态，
+     * 这里不响应。调用方据此决定要不要弹「播放中」提示 —— 让它按媒体类型自行判断
+     * 等于把同一个事实存两份，两边迟早对不上（文档可翻页，却没有播放态）。
+     */
+    const togglePlay = useCallback((): boolean => {
         if (!videoRef.current) {
-            // 无 video 元素：只有幻灯片媒体有「播放态」语义。
-            // 画廊占位/other 是纯静态页，放行会点亮播放态并让控制条自动隐藏，
-            // 用户面对静止画面却找不到控制条，这里直接不响应。
             const file = currentFileRef.current;
-            if (!file || !isSlideshowMedia(file.mediaType)) return;
+            if (!file || !isSlideshowMedia(file.mediaType)) return false;
             setMediaError(null);
             setState(prev => ({ ...prev, isPlaying: !prev.isPlaying }));
-            return;
+            return true;
         }
         if (videoRef.current.paused) {
             play();
         } else {
             pause();
         }
+        return true;
     }, [play, pause]);
 
     // 跳转（直播 / 无限时长直接忽略，避免抛异常）
@@ -877,49 +874,75 @@ export const usePlay = (): UsePlayReturn => {
         };
     }, []);
 
-    // 加载当前媒体源：仅随 currentFile 变化触发，音量/倍速由独立 effect 同步
+    /**
+     * 媒体加载的触发键：只认「源身份」= id + url。
+     *
+     * 不能拿 currentFile 对象本身当依赖：playlist 每次变化都会重建当前项对象，
+     * 于是纯元数据改动（朗读语音写回 audioData、合并时补 groupName）也会走一遍
+     * 换源流程 —— 图片分支会把 isPlaying 强制置回 true，正在读的绘本页当场被
+     * 轮播翻走。id 由 mergeOrderedStreams 刻意沿用、url 变了才是真的换了源。
+     */
+    const mediaSourceKey = currentFile ? `${currentFile.id}:${currentFile.url}` : 'none';
+
+    // 加载当前媒体源：仅随媒体源变化触发，音量/倍速由独立 effect 同步
     useEffect(() => {
         const video = videoRef.current;
-        if (!currentFile) {
-            destroyHls();
-            if (video) {
-                try { video.pause(); video.removeAttribute('src'); video.load(); } catch { /* ignore */ }
-            }
+        // 走 ref 取最新条目：effect 只按 mediaSourceKey 重跑，闭包里的 currentFile 可能已过期
+        const file = currentFileRef.current;
+
+        // 无论走哪个分支，旧的 Hls 实例都不能继续下载 —— 它挂在 hlsRef 上，
+        // 只有这里能释放；放在分支之前可保证没有哪条 return 绕过它。
+        destroyHls();
+
+        /**
+         * 把 video 元素与旧源解绑。
+         * 只清 src 不调 load() 不会真正断开：解码器与网络连接会挂到下一次赋值，
+         * 表现为「切走了还在后台下」。
+         */
+        const detach = () => {
+            if (!video) return;
+            try { video.pause(); video.removeAttribute('src'); video.load(); } catch { /* ignore */ }
+        };
+
+        if (!file) {
+            detach();
+            // 列表被清空/删到空时横幅必须一起走：留着「已跳过 N 段」而播放器是空的，
+            // 用户既看不懂也关不掉（此后没有任何媒体切换来触发清理）
+            setMediaError(null);
+            setMediaWarning(null);
             setState(prev => ({ ...prev, isPlaying: false, isBuffering: false, currentTime: 0, duration: 0 }));
             return;
         }
 
         // 非音视频流走图集 / 文档 / 其他展示分支：停掉旧视频。
-        // 只有图集/文档是幻灯片播放态；画廊占位/other 纯静态页保持暂停，
+        // 只有图集是幻灯片播放态；文档/画廊占位/other 是静态页保持暂停，
         // 否则暂停键误导 + 控制条自动隐藏，用户连点哪里播都找不到
-        if (currentFile.mediaType !== 'video' && currentFile.mediaType !== 'stream' && currentFile.mediaType !== 'audio') {
-            destroyHls();
-            if (video) {
-                try { video.pause(); video.removeAttribute('src'); video.load(); } catch { /* ignore */ }
-            }
-            const slideshow = isSlideshowMedia(currentFile.mediaType);
+        if (file.mediaType !== 'video' && file.mediaType !== 'stream' && file.mediaType !== 'audio') {
+            detach();
+            const slideshow = isSlideshowMedia(file.mediaType);
             setMediaError(null);
+            // 警告同样要清：图集页上残留上一部视频的「已跳过 N 段」是无意义的噪音
+            setMediaWarning(null);
             setState(prev => ({ ...prev, isPlaying: slideshow, isBuffering: false, currentTime: 0, duration: 0 }));
             return;
         }
 
         if (!video) {
-            // 音频分支的隐藏 video 尚未挂载时由幻灯片态兜底，挂载后 effect 会重跑
+            // 音频分支的隐藏 video 尚未挂载时先标缓冲，挂载后 effect 会重跑
             setState(prev => ({ ...prev, isBuffering: true }));
             return;
         }
 
-        destroyHls();
         setMediaError(null);
         // 警告跟着媒体走：换源后上一部的"已跳过 N 段"不该留在新片上
         setMediaWarning(null);
         setState(prev => ({ ...prev, isBuffering: true, currentTime: 0, duration: 0 }));
 
         const isM3U8 =
-            currentFile.url.includes('.m3u8') ||
-            currentFile.url.includes('.m3u') ||
-            currentFile.name.endsWith('.m3u8') ||
-            currentFile.name.endsWith('.m3u');
+            file.url.includes('.m3u8') ||
+            file.url.includes('.m3u') ||
+            file.name.endsWith('.m3u8') ||
+            file.name.endsWith('.m3u');
 
         if (isM3U8 && Hls.isSupported()) {
             const hls = new Hls({
@@ -931,11 +954,11 @@ export const usePlay = (): UsePlayReturn => {
                 // 这里按站点同款口径补齐 m/t/from；仅对 ACG 域 + 带 m= 令牌的
                 // master 生效，其它站点的流原样放行（见 const.ts 的 signAcgHlsUrl）。
                 xhrSetup: (xhr, url) => {
-                    const signed = signAcgHlsUrl(url, currentFile.url);
+                    const signed = signAcgHlsUrl(url, file.url);
                     if (signed !== url) xhr.open('GET', signed, true);
                 }
             });
-            hls.loadSource(currentFile.url);
+            hls.loadSource(file.url);
             hls.attachMedia(video);
             hls.on(Hls.Events.MANIFEST_PARSED, () => {
                 attemptAutoplay(video);
@@ -1012,7 +1035,7 @@ export const usePlay = (): UsePlayReturn => {
             });
             hlsRef.current = hls;
         } else {
-            video.src = currentFile.url;
+            video.src = file.url;
             video.load();
             attemptAutoplay(video);
         }
@@ -1021,7 +1044,7 @@ export const usePlay = (): UsePlayReturn => {
         video.muted = stateRef.current.isMuted;
         try { video.playbackRate = stateRef.current.playbackRate; } catch { /* ignore */ }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [currentFile, destroyHls]);
+    }, [mediaSourceKey, destroyHls]);
 
     // 音量 / 倍速独立同步：不再触发媒体重载
     useEffect(() => {

@@ -2758,7 +2758,12 @@ export interface UsePlayReturn {
     methods: {
         play: () => Promise<void>;
         pause: () => void;
-        togglePlay: () => void;
+        /**
+         * 切换播放/暂停。返回「本次是否真的改变了播放态」：
+         * 静态页（画廊占位/other）与文档没有播放态，此时返回 false，
+         * 调用方据此决定要不要弹「播放中」提示。
+         */
+        togglePlay: () => boolean;
         seek: (time: number) => void;
         setVolume: (volume: number) => void;
         setPlaybackRate: (rate: number) => void;

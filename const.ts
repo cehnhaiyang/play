@@ -298,6 +298,34 @@ export const getMediaType = (name: string, mimeType?: string, url?: string): Med
  * 3. 播放条目的构造与资源释放
  * ========================================================================== */
 
+/**
+ * 是否为「幻灯片」型媒体：没有 video 元素，播放态即自动轮播开关。
+ *
+ * 只有图集算：轮播只为图集实现，把文档算进来会让它一打开就进播放态却永不翻页，
+ * 而控制条因「正在播放」自动隐藏 —— 用户面对静止的文档找不到控制条。文档是
+ * 逐行读的，自动翻页本来也会打断阅读。画廊占位/other 是纯静态页，同理不算。
+ *
+ * 放在这里而不是 usePlay 内部：逻辑层（play / togglePlay / 加载 effect）与
+ * UI 层（是否显示控制条、是否让出底栏高度、单击画面是否有反馈）必须同源判定，
+ * 各写一份必然漂移成「能进播放态却没人自动隐藏控制条」。
+ */
+export const isSlideshowMedia = (mediaType: MediaType | undefined): boolean => mediaType === 'image';
+
+/**
+ * 是否有「播放态」：音视频/流，以及幻灯片轮播的图集。
+ *
+ * 文档、画廊占位、other 都没有播放态 —— 底栏的播放键对它们点了没反应。
+ * 与 {@link isPagedMedia} 的差别正好落在文档上：文档能翻页，但不能播放。
+ * 按钮的可用性判断走这里，动作本身是否生效由 `togglePlay()` 的返回值回答，
+ * 两者都源自同一个事实，不各存一份。
+ */
+export const isPlayableMedia = (mediaType: MediaType | undefined): boolean =>
+    mediaType === 'video' || mediaType === 'stream' || mediaType === 'audio' || isSlideshowMedia(mediaType);
+
+/** 是否为分页媒体（翻页而非快进）：图集与文档 */
+export const isPagedMedia = (mediaType: MediaType | undefined): boolean =>
+    mediaType === 'image' || mediaType === 'document';
+
 /** 生成简短的随机 ID，用于列表项的唯一标识 */
 export const generateId = (): string => {
     try {
