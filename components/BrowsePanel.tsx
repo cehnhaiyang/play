@@ -75,7 +75,6 @@ import type {
     BookmarkBarVisibility,
     CookieItem,
     HeaderRule,
-    MergeStats,
     NavigationError,
     TamperRule,
     TamperState,
@@ -4703,7 +4702,6 @@ export const BrowsePanel: React.FC<BrowsePanelProps> = ({
         renameNode,
         updateNodeUrl,
         moveBookmark,
-        mergeImported,
     } = bookmarksHook;
 
     const [showDownloads, setShowDownloads] = useState(false);

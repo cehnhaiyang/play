@@ -32,7 +32,7 @@
 
 /* 浮层入场动效。
    Tailwind v4 不含 animate-in / fade-in / zoom-in-* 这一族（那是 tailwindcss-animate
-   插件的产物），本项目 tailwind.config.js 的 plugins 为空，所以这些类此前全是空转：
+   插件的产物），本项目没装该插件，所以这些类此前全是空转：
    弹窗只有生硬闪现。这里补齐实际用到的四个，名字与旧类保持一致以免大范围改 JSX。 */
 @keyframes ui-fade-in {
     from {

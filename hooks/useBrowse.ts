@@ -1,9 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    BookmarkNode,
-    BookmarkTree,
-    BookmarkBarVisibility,
-    BookmarksState,
     BrowseState,
     BrowserCommand,
     BrowserDownload,
@@ -18,7 +14,6 @@ import {
     InteractionsState,
     MediaDownloadProgress,
     MediaType,
-    MergeStats,
     NavigationError,
     SearchEngine,
     SearchState,
@@ -41,21 +36,6 @@ import {
     ZOOM_MIN_LEVEL,
     ZOOM_MAX_LEVEL,
 } from '../services/BrowserService';
-import {
-    collectUrls,
-    findNode,
-    flattenUrls,
-    insertNode,
-    makeDefaultTree,
-    makeFolder,
-    makeUrlNode,
-    mergeIntoFolder,
-    migrateFlatBookmarks,
-    moveNode,
-    normalizeTree,
-    removeNode,
-    replaceNode,
-} from '../services/BookmarkService';
 import {
     generateId,
     HLS_SEGMENT_RE_SOURCE,
@@ -172,14 +152,6 @@ const TABS_STORE_MAX = 20;
  * 再深用户也不会去数，而每一项都只是一个 { url, title } 小对象。
  */
 const CLOSED_STACK_MAX = 10;
-const BOOKMARKS_STORE_KEY = 'react-player-bookmarks';
-/**
- * v2 起书签是**树**（带文件夹），与 v1 的扁平数组不兼容。
- * 换键而不是原地改结构：旧键留着，用户若回退版本还能读回自己的书签。
- */
-const BOOKMARK_TREE_STORE_KEY = 'react-player-bookmark-tree';
-const BOOKMARK_BAR_STORE_KEY = 'react-player-bookmark-bar';
-const BOOKMARKS_MAX = 500;
 const LINKS_STORE_KEY = 'sniff-links';
 const LINKS_STORE_MAX = 300;
 
@@ -1455,225 +1427,6 @@ const useTabs = (): TabsState => {
     return useMemo(() => ({ tabs, activeTabId, activeTab, actions }), [tabs, activeTabId, activeTab, actions]);
 };
 
-/* -------------------------------------------------------------------------- */
-/*                               内部：书签                                     */
-/* -------------------------------------------------------------------------- */
-
-/**
- * 初始化：读取书签树。
- *
- * 三级回退，顺序不能换：
- *   1. v2 的树 —— 正常路径；
- *   2. v1 的扁平数组 —— **迁移**进「收藏夹栏」而不是丢弃。老用户升级后
- *      看到的是"书签都还在"，而不是"升级完书签没了"；
- *   3. 空的默认树 —— 只在两者都没有时（首次启动）。
- *
- * 第 3 档给的是**空**树而不是几个预置网址：预置等于替用户决定他该收藏什么。
- * 首次启动的书签栏本就是空的，用户要的是「从 Edge 导入」。
- *
- * 放在 lazy initializer 而不是 effect 里：用 effect 会先渲染一帧空列表再填上。
- */
-const loadStoredBookmarks = (): BookmarkTree => {
-    try {
-        const savedTree = loadStr(BOOKMARK_TREE_STORE_KEY, '', '');
-        if (savedTree) {
-            const parsed: unknown = JSON.parse(savedTree);
-            if (parsed && typeof parsed === 'object') {
-                return normalizeTree(parsed, generateId);
-            }
-        }
-
-        const savedFlat = loadStr(BOOKMARKS_STORE_KEY, '', '');
-        if (savedFlat) {
-            const parsedFlat: unknown = JSON.parse(savedFlat);
-            if (Array.isArray(parsedFlat)) {
-                const migrated = migrateFlatBookmarks(parsedFlat, generateId);
-                // 立刻落盘成 v2，避免每次启动都重跑迁移（迁移会给节点换新 id）
-                saveStr(BOOKMARK_TREE_STORE_KEY, JSON.stringify(migrated), '');
-                return migrated;
-            }
-        }
-    } catch (e) {
-        console.error('加载书签失败:', e);
-    }
-    const defaults = makeDefaultTree();
-    saveStr(BOOKMARK_TREE_STORE_KEY, JSON.stringify(defaults), '');
-    return defaults;
-};
-
-/** 读收藏夹栏显示策略（默认与 Edge/Chrome 出厂一致：仅新标签页） */
-const loadBarVisibility = (): BookmarkBarVisibility => {
-    const saved = loadStr(BOOKMARK_BAR_STORE_KEY, '', '');
-    return saved === 'always' || saved === 'never' ? saved : 'newTab';
-};
-
-/**
- * 把树按节点数收敛到上限。
- *
- * 超限时**从收藏夹栏的末尾往前删**（保留最新的），并且先把「其他收藏夹」
- * 整块保留 —— 那是用户明确归类过的内容，比栏上的随手收藏更该留下。
- * 上限原本只在读回侧生效，内存态与磁盘态可以无限增长，配额爆掉后 saveStr
- * 静默返回 false —— 表现为"收藏了但没存住"。
- */
-const trimTree = (tree: BookmarkTree): BookmarkTree => {
-    let total = flattenUrls(tree.bar).length + flattenUrls(tree.other).length;
-    if (total <= BOOKMARKS_MAX) return tree;
-
-    const bar = tree.bar;
-    const children = [...(bar.children || [])];
-    const otherCount = flattenUrls(tree.other).length;
-    let budget = Math.max(0, BOOKMARKS_MAX - otherCount);
-
-    // 从后往前删 url 节点，文件夹整块保留（删半个文件夹比删几条更糟）
-    for (let i = children.length - 1; i >= 0 && budget >= 0; i -= 1) {
-        const child = children[i];
-        if (child.type !== 'url') continue;
-        if (budget > 0) { budget -= 1; continue; }
-        children.splice(i, 1);
-    }
-    return { bar: { ...bar, children }, other: tree.other };
-};
-
-const useBookmarks = (): BookmarksState => {
-    const [tree, setTree] = useState<BookmarkTree>(loadStoredBookmarks);
-    const [barVisibility, setBarVisibilityState] = useState<BookmarkBarVisibility>(loadBarVisibility);
-
-    /**
-     * 落盘：写收敛后的树，不读回。
-     * 所有变更走函数式更新 —— 基于闭包快照计算会在连点两次时把前一次覆盖掉。
-     */
-    useEffect(() => {
-        saveStr(BOOKMARK_TREE_STORE_KEY, JSON.stringify(trimTree(tree)), '');
-    }, [tree]);
-
-    useEffect(() => {
-        saveStr(BOOKMARK_BAR_STORE_KEY, barVisibility, '');
-    }, [barVisibility]);
-
-    const setBarVisibility = useCallback((value: BookmarkBarVisibility) => {
-        setBarVisibilityState(value);
-    }, []);
-
-    /**
-     * 「是否已收藏」的判据源。
-     *
-     * 用 collectUrls 建集合，而不是遍历上面那份平铺数组 —— 判据只此一处，
-     * 星标亮不亮与收藏夹里有没有它必然一致。
-     */
-    const urlSet = useMemo(() => collectUrls(tree), [tree]);
-
-    const isBookmarked = useCallback((url: string) => urlSet.has(url), [urlSet]);
-
-    /** 切换收藏状态：已存在则从树上摘掉，不存在则追加到收藏夹栏末尾 */
-    const toggleBookmark = useCallback((url: string, title: string = '新书签') => {
-        if (!url) return;
-        let finalTitle = title;
-        try {
-            if (!title || title === '新书签') finalTitle = new URL(url).hostname;
-        } catch { /* 非法 URL 保留传入标题 */ }
-
-        setTree((prev) => {
-            const existing = flattenUrls(prev.bar).find((e) => e.node.url === url)
-                || flattenUrls(prev.other).find((e) => e.node.url === url);
-            if (existing) {
-                const inBar = findNode(prev.bar, existing.node.id);
-                return inBar
-                    ? { bar: removeNode(prev.bar, existing.node.id), other: prev.other }
-                    : { bar: prev.bar, other: removeNode(prev.other, existing.node.id) };
-            }
-            const node = makeUrlNode(generateId(), url, finalTitle);
-            return { bar: insertNode(prev.bar, prev.bar.id, node), other: prev.other };
-        });
-    }, []);
-
-    /** 删除节点。根节点不允许删（界面上也不会给出入口） */
-    const removeBookmark = useCallback((id: string) => {
-        setTree((prev) => {
-            if (id === prev.bar.id || id === prev.other.id) return prev;
-            const inBar = findNode(prev.bar, id);
-            return inBar
-                ? { bar: removeNode(prev.bar, id), other: prev.other }
-                : { bar: prev.bar, other: removeNode(prev.other, id) };
-        });
-    }, []);
-
-    /** 新建文件夹，返回新 id（找不到父节点时返回空串） */
-    const addFolder = useCallback((parentId: string, title: string): string => {
-        const id = generateId();
-        setTree((prev) => {
-            const node = makeFolder(id, title.trim() || '新建文件夹');
-            const inBar = findNode(prev.bar, parentId);
-            return inBar
-                ? { bar: insertNode(prev.bar, parentId, node), other: prev.other }
-                : { bar: prev.bar, other: insertNode(prev.other, parentId, node) };
-        });
-        return id;
-    }, []);
-
-    const renameNode = useCallback((id: string, title: string) => {
-        const clean = title.trim();
-        if (!clean) return;
-        setTree((prev) => ({
-            bar: replaceNode(prev.bar, id, (node) => ({ ...node, title: clean })),
-            other: replaceNode(prev.other, id, (node) => ({ ...node, title: clean })),
-        }));
-    }, []);
-
-    const updateNodeUrl = useCallback((id: string, url: string) => {
-        const clean = url.trim();
-        if (!clean) return;
-        setTree((prev) => ({
-            bar: replaceNode(prev.bar, id, (node) => (node.type === 'url' ? { ...node, url: clean } : node)),
-            other: replaceNode(prev.other, id, (node) => (node.type === 'url' ? { ...node, url: clean } : node)),
-        }));
-    }, []);
-
-    const moveBookmark = useCallback((id: string, targetFolderId: string, index?: number) => {
-        setTree((prev) => moveNode(prev, id, targetFolderId, index));
-    }, []);
-
-    /**
-     * 合并导入的书签。
-     *
-     * 去重集合从**当前树**现算，而不是闭包里的旧值 —— 连续导入两次时，
-     * 第二次必须看得见第一次插进去的 url，否则会重复一份。
-     */
-    const mergeImported = useCallback((target: 'bar' | 'other', nodes: BookmarkNode[]): MergeStats => {
-        const stats: MergeStats = { added: 0, skipped: 0 };
-        setTree((prev) => {
-            const seen = collectUrls(prev);
-            const folder = target === 'bar' ? prev.bar : prev.other;
-            const merged = mergeIntoFolder(folder, nodes, seen, generateId);
-            stats.added = merged.stats.added;
-            stats.skipped = merged.stats.skipped;
-            return target === 'bar'
-                ? { bar: merged.folder, other: prev.other }
-                : { bar: prev.bar, other: merged.folder };
-        });
-        return stats;
-    }, []);
-
-    const clearRoot = useCallback((target: 'bar' | 'other') => {
-        setTree((prev) => target === 'bar'
-            ? { bar: { ...prev.bar, children: [] }, other: prev.other }
-            : { bar: prev.bar, other: { ...prev.other, children: [] } });
-    }, []);
-
-    return useMemo(
-        () => ({
-            tree, barVisibility, setBarVisibility,
-            isBookmarked, toggleBookmark, removeBookmark,
-            addFolder, renameNode, updateNodeUrl, moveBookmark, mergeImported, clearRoot,
-        }),
-        [
-            tree, barVisibility, setBarVisibility,
-            isBookmarked, toggleBookmark, removeBookmark,
-            addFolder, renameNode, updateNodeUrl, moveBookmark, mergeImported, clearRoot,
-        ]
-    );
-};
-
-/* -------------------------------------------------------------------------- */
 /*                             内部：搜索引擎                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -1711,14 +1464,12 @@ const useSearch = (): SearchState => {
 interface InteractionDeps {
     tabs: TabsState;
     search: SearchState;
-    bookmarks: BookmarksState;
 }
 
 const useInteractions = (deps: InteractionDeps): InteractionsState => {
-    const { tabs: tabsState, search, bookmarks } = deps;
+    const { tabs: tabsState, search } = deps;
     const { activeTab, activeTabId, actions: tabActions } = tabsState;
     const { parseInputToUrl } = search;
-    const { isBookmarked } = bookmarks;
 
     const [inputUrl, setInputUrl] = useState('');
     /**
@@ -2251,8 +2002,6 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
         });
     }, [tabsState.tabs, tabActions]);
 
-    const isCurrentPageBookmarked = isBookmarked(activeTab.url);
-
     /* ------------------------------ 页面能力 ------------------------------ */
 
     /**
@@ -2571,11 +2320,6 @@ const useInteractions = (deps: InteractionDeps): InteractionsState => {
                 case 'home':
                     tabActions.goHome(activeId);
                     break;
-                case 'toggleBookmark': {
-                    const tab = tabs.find((t) => t.id === activeId);
-                    if (tab && tab.url) bookmarks.toggleBookmark(tab.url, tab.title);
-                    break;
-                }
                 case 'zoomIn':
                     zoomBy(activeId, 1);
                     break;

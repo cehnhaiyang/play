@@ -2117,16 +2117,6 @@ export interface NavigationError {
 }
 
 /**
- * 一次书签导入的去重统计。
- *
- * 两个计数器的口径都是**网址条数**（不含文件夹），见 BookmarkService 的合并逻辑。
- */
-export interface MergeStats {
-    added: number;
-    skipped: number;
-}
-
-/**
  * ============================================================================
  * 10. 浏览器外壳：标签页与各子状态
  * ============================================================================
@@ -2221,8 +2211,6 @@ export interface BookmarksState {
     updateNodeUrl: (id: string, url: string) => void;
     /** 移动节点到另一个文件夹 */
     moveBookmark: (id: string, targetFolderId: string, index?: number) => void;
-    /** 把导入的节点合并进某个根，返回统计 */
-    mergeImported: (target: 'bar' | 'other', nodes: BookmarkNode[]) => MergeStats;
     /** 清空某个根下的全部内容 */
     clearRoot: (target: 'bar' | 'other') => void;
 }

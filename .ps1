@@ -15,13 +15,11 @@
     [3] 构建生产版本  npm run build          （vite build → dist/）
     [4] 打包应用      npm run electron:build （vite build && electron-builder）
     [5] 类型检查      npx tsc --noEmit
-    [6] 图集工具      node scripts/gallery.js
+    [6] 插件构建      npm run ext:build      （浏览器插件 → extension/dist/）
     [7] 清理产物      dist / dist-electron / release
 
   需要跑测试时直接用命令行（本机测试是硬要求，不放进交互菜单）：
-    npm run test:spg          主进程/引擎/搜索等 9 个套件的单元与静态回归
-    npm run test:proxy-sync   代理设置的跨进程同步
-    npm run test:ui           界面回归（自动起 vite + Electron 截图断言布局）
+    npm run test:spg          主进程/引擎/搜索等套件的单元与静态回归
 #>
 
 # ── 基础设置 ────────────────────────────────────────────────
@@ -34,26 +32,6 @@ $ErrorActionPreference = 'Continue'
 # 回退到当前目录（.bat 已先 cd /d "%~dp0"）。
 $Root = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 Set-Location $Root
-
-# Self-elevation: everything launched from this menu (dev app, build,
-# package) must run as administrator -- the Edge App-Bound cookie key can
-# only be unwrapped with a SYSTEM token, which needs SeDebugPrivilege.
-# If not elevated, relaunch elevated (UAC) and exit this instance.
-# ASCII-only block: this file has no BOM, non-ASCII breaks under GBK read.
-if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Host 'Requesting administrator privileges (UAC)...'
-    try {
-        if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) {
-            Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"" -Verb RunAs -WorkingDirectory $Root -ErrorAction Stop
-        } else {
-            Start-Process -FilePath (Join-Path $Root '.bat') -Verb RunAs -WorkingDirectory $Root -ErrorAction Stop
-        }
-    } catch {
-        Write-Host 'Elevation cancelled or failed; cannot run without administrator privileges.'
-        exit 1
-    }
-    exit
-}
 
 # ── 输出辅助（前缀统一 3 列，便于左对齐）────────────────────
 function Write-Step([string]$Msg) { Write-Host "[·] $Msg" -ForegroundColor Yellow }
@@ -153,13 +131,10 @@ function Type-Check {
     Pause-Return
 }
 
-function Invoke-Gallery {
+function Build-Extension {
     if (-not (Test-Deps)) { Pause-Return; return }
-    Write-Step "图集工具（scripts/gallery.js）"
-    Write-Info "用法  npm run gallery -- <id|url> [--pages 1-5] [--dry-run]"
-    Write-Info "示例  npm run gallery -- 761277 --pages 1-5"
-    Write-Host ""
-    & node (Join-Path $Root 'scripts\gallery.js') --help
+    Write-Info "产物在 extension/dist/，用 chrome://extensions 加载已解压的扩展程序"
+    Invoke-Npm -NpmArgs @('run', 'ext:build') -SuccessMsg "插件构建完成 → extension/dist/" -FailMsg "插件构建失败"
     Pause-Return
 }
 
@@ -197,7 +172,7 @@ while ($true) {
     Write-Host ("─" * 64) -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  1  安装依赖       5  类型检查"
-    Write-Host "  2  开发环境       6  图集工具"
+    Write-Host "  2  开发环境       6  插件构建"
     Write-Host "  3  构建生产版本   7  清理产物"
     Write-Host "  4  打包应用       0  退出"
     Write-Host ""
@@ -209,7 +184,7 @@ while ($true) {
         '3' { Build-Prod }
         '4' { Package-App }
         '5' { Type-Check }
-        '6' { Invoke-Gallery }
+        '6' { Build-Extension }
         '7' { Clean-Build }
         '0' {
             Write-Host ""
