@@ -68,9 +68,12 @@ const main = async () => {
   console.log('\n=== 运行日志 ===');
   const logsOk = require('./logs.test.js').run();
 
+  console.log('\n=== 桥契约 ===');
+  const bridgeOk = require('./bridge.test.js').run();
+
   if (!engineOk || !compatOk || !aibookOk || !aiproviderOk || !searchSyncOk || !searchAsyncOk
     || !mainStaticOk || !tamperOk || !agentToolsOk || !draftOk
-    || !snifferOk || !logsOk) {
+    || !snifferOk || !logsOk || !bridgeOk) {
     process.exitCode = 1;
     console.log('\n存在失败用例。');
   } else {

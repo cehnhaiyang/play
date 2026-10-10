@@ -1,0 +1,205 @@
+'use strict';
+/**
+ * 桥契约的一致性测试。
+ *
+ * 这一套盯的是**拆分过程中最容易悄悄坏掉的东西**：某个功能归谁做。
+ *
+ * 判据是"归属表（meta/bridge.ts）与主进程真实的 IPC 注册逐条对得上"：
+ *
+ *   1. 主进程注册了 handler，表里没有 → 有人加了端点没归类。
+ *      这正是拆分期的典型事故：新端点随手写在 main.js 里，
+ *      没人决定它是插件的还是应用的，最后两边都没实现。
+ *
+ *   2. 表里 route 是 app/split，主进程却没有 handler → 桥的目标不存在。
+ *      插件会发一个永远没人接的请求，表现为"点了没反应"。
+ *
+ *   3. 已退役的通道名出现在插件里 → 半拆状态。插件实现了一个
+ *      应用侧已经删掉的能力，或者还在监听一个永远不来的事件。
+ *
+ * 注意本套件**不**断言"extension 路由不得有 handler"：自建浏览器外壳
+ * 尚未拆除，应用侧目前仍持有这些 handler。那条断言要等外壳删掉之后才成立，
+ * 提前写进来只会让一套本来就该红的用例长期红着，最终被无视。
+ */
+const fs = require('fs');
+const path = require('path');
+
+const ROOT = path.join(__dirname, '..');
+const ELECTRON_DIR = path.join(ROOT, 'electron');
+const EXTENSION_SRC = path.join(ROOT, 'extension', 'src');
+
+let pass = 0;
+const fails = [];
+const check = (name, fn) => {
+    try { fn(); pass++; }
+    catch (e) { fails.push({ name, message: e.message }); }
+};
+const assert = (cond, msg) => { if (!cond) throw new Error(msg || '断言失败'); };
+const eq = (a, b, msg) => {
+    if (a !== b) throw new Error(`${msg || '不相等'}：实际 ${JSON.stringify(a)}，预期 ${JSON.stringify(b)}`);
+};
+
+/** 递归列出目录下所有文件（跳过 node_modules 与构建产物） */
+const walk = (dir) => {
+    if (!fs.existsSync(dir)) return [];
+    const out = [];
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === 'node_modules' || entry.name === 'dist') continue;
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) out.push(...walk(full));
+        else out.push(full);
+    }
+    return out;
+};
+
+const run = () => {
+    // 每次调用都重置计数：run() 会被同一进程调用多次（变异检查就是），
+    // 计数留在模块级会让第二次调用把上一次的失败一起报出来。
+    pass = 0;
+    fails.length = 0;
+
+    const bridge = require('./build/meta/bridge');
+
+    /** 主进程真实注册的全部 handler 通道名 */
+    const registeredHandlers = new Set();
+    /** 主进程真实推送的全部通道名 */
+    const pushedChannels = new Set();
+
+    for (const file of fs.readdirSync(ELECTRON_DIR).filter((f) => f.endsWith('.js'))) {
+        const src = fs.readFileSync(path.join(ELECTRON_DIR, file), 'utf8');
+        for (const m of src.matchAll(/ipcMain\.handle\(\s*'([^']+)'/g)) registeredHandlers.add(m[1]);
+        for (const m of src.matchAll(/\.send\(\s*'([^']+)'/g)) pushedChannels.add(m[1]);
+    }
+
+    /* ====================================================================== */
+    /* 1. 端点：表 ↔ 主进程注册，双向对齐                                       */
+    /* ====================================================================== */
+
+    check('端点表覆盖主进程注册的每一个 handler（无未归类端点）', () => {
+        const unclassified = [...registeredHandlers].filter((name) => !(name in bridge.BRIDGE_ENDPOINTS));
+        eq(unclassified.length, 0,
+            `这些通道在主进程注册了但归属表里没有：${unclassified.join('、')}。`
+            + '请在 meta/bridge.ts 的 BRIDGE_ENDPOINTS 里归类。');
+    });
+
+    check('端点表里 app/split 路由都有真实 handler（无悬空目标）', () => {
+        const dangling = Object.entries(bridge.BRIDGE_ENDPOINTS)
+            .filter(([name, meta]) => meta.route !== 'extension' && !registeredHandlers.has(name))
+            .map(([name, meta]) => `${name}(${meta.route})`);
+        eq(dangling.length, 0,
+            `这些端点在表里归给应用，但主进程没有 handler：${dangling.join('、')}`);
+    });
+
+    check('端点表没有重复分类（表内自洽）', () => {
+        const names = Object.keys(bridge.BRIDGE_ENDPOINTS);
+        eq(new Set(names).size, names.length, 'BRIDGE_ENDPOINTS 存在重复键');
+        for (const [name, meta] of Object.entries(bridge.BRIDGE_ENDPOINTS)) {
+            assert(['extension', 'app', 'split'].includes(meta.route), `${name} 的 route 非法：${meta.route}`);
+            assert(typeof meta.reason === 'string' && meta.reason.length > 8,
+                `${name} 缺少说明归属理由的 reason —— 没有理由的归类下次就会被随手改掉`);
+        }
+    });
+
+    /* ====================================================================== */
+    /* 2. 事件：表 ↔ 主进程推送，双向对齐                                       */
+    /* ====================================================================== */
+
+    check('事件表覆盖主进程推送的每一个通道（除已退役者）', () => {
+        const unclassified = [...pushedChannels]
+            .filter((name) => !(name in bridge.BRIDGE_EVENTS))
+            .filter((name) => !bridge.RETIRED_CHANNELS.includes(name));
+        eq(unclassified.length, 0,
+            `这些推送通道没有归类：${unclassified.join('、')}`);
+    });
+
+    check('事件表里 app/split 路由都有真实推送点', () => {
+        const dangling = Object.entries(bridge.BRIDGE_EVENTS)
+            .filter(([name, meta]) => meta.route !== 'extension' && !pushedChannels.has(name))
+            .map(([name]) => name);
+        eq(dangling.length, 0, `这些事件归给应用，但主进程从不推送：${dangling.join('、')}`);
+    });
+
+    /* ====================================================================== */
+    /* 3. 已退役通道不得出现在插件里                                            */
+    /* ====================================================================== */
+
+    check('插件源码里没有已退役的通道名', () => {
+        const files = walk(EXTENSION_SRC);
+        const hits = [];
+        for (const file of files) {
+            const src = fs.readFileSync(file, 'utf8');
+            for (const name of bridge.RETIRED_CHANNELS) {
+                if (src.includes(name)) hits.push(`${path.relative(ROOT, file)} → ${name}`);
+            }
+        }
+        eq(hits.length, 0, `插件里出现了已退役通道：${hits.join('、')}`);
+    });
+
+    /* ====================================================================== */
+    /* 4. 传输层的两条硬约束                                                    */
+    /* ====================================================================== */
+
+    check('native host 名是 Chrome 接受的形状', () => {
+        // Chrome 要求 host 名只能是小写字母、数字、下划线、点，
+        // 且不能以点开头/结尾。写错的症状是 connectNative 报
+        // "Specified native messaging host not found"，与"没装"无法区分。
+        const name = bridge.NATIVE_HOST_NAME;
+        assert(/^[a-z0-9_]+(\.[a-z0-9_]+)*$/.test(name),
+            `NATIVE_HOST_NAME 形状非法：${name}（只允许小写字母/数字/下划线/点）`);
+        assert(!name.startsWith('.') && !name.endsWith('.'), '不能以点开头或结尾');
+    });
+
+    check('协议版本是正整数，且消息上限为有限值', () => {
+        assert(Number.isInteger(bridge.BRIDGE_PROTOCOL_VERSION) && bridge.BRIDGE_PROTOCOL_VERSION > 0,
+            '协议版本必须是正整数');
+        // 上限存在的意义是逼传输层分片。若被改成 Infinity 或 0，
+        // "一次发完"的写法就会悄悄回来，表现为大 payload 静默失败。
+        assert(Number.isFinite(bridge.NATIVE_MESSAGE_MAX_BYTES) && bridge.NATIVE_MESSAGE_MAX_BYTES > 0,
+            'NATIVE_MESSAGE_MAX_BYTES 必须是有限正数（分片逻辑依赖它）');
+    });
+
+    /* ====================================================================== */
+    /* 5. 媒体请求上下文：跨端播放的前提                                        */
+    /* ====================================================================== */
+
+    check('MediaRequestContext 携带复现浏览器请求所需的四要素', () => {
+        // 这四个字段不是可选优化：<video src> 无法附加请求头，
+        // 缺了它们，防盗链站点上"浏览器能播、应用 403"无解。
+        const src = fs.readFileSync(path.join(ROOT, 'meta', 'bridge.ts'), 'utf8');
+        const block = src.slice(src.indexOf('export interface MediaRequestContext'));
+        const body = block.slice(0, block.indexOf('}'));
+        for (const field of ['url', 'referer', 'userAgent', 'cookie']) {
+            assert(new RegExp(`\\b${field}\\??:`).test(body),
+                `MediaRequestContext 缺少 ${field}`);
+        }
+    });
+
+    check('旧的 DownloadMediaParams 仍带 referer（迁移期不能先丢）', () => {
+        // 桥接落地前，应用侧仍走 DownloadMediaParams。若这里先被删掉，
+        // 迁移中间态就会出现"下载 403 且无从修"的窗口。
+        const src = fs.readFileSync(path.join(ROOT, 'meta', 'interface.ts'), 'utf8');
+        const block = src.slice(src.indexOf('export interface DownloadMediaParams'));
+        const body = block.slice(0, block.indexOf('}'));
+        assert(/\breferer\??:/.test(body), 'DownloadMediaParams 丢了 referer');
+    });
+
+    /* ====================================================================== */
+    /* 6. 规模哨兵：端点数量变化必须是有意的                                    */
+    /* ====================================================================== */
+
+    check('端点总数与主进程注册数一致（规模哨兵）', () => {
+        const tableCount = Object.keys(bridge.BRIDGE_ENDPOINTS).length;
+        eq(tableCount, registeredHandlers.size,
+            `归属表 ${tableCount} 条 vs 主进程注册 ${registeredHandlers.size} 个。`
+            + '数量不等说明有端点只存在于一边。');
+    });
+
+    if (fails.length > 0) {
+        console.log(`桥契约：通过 ${pass} 项，失败 ${fails.length} 项`);
+        for (const f of fails) console.log(`  FAIL  ${f.name}\n        ${f.message}`);
+        return false;
+    }
+    console.log(`桥契约：通过 ${pass} 项，失败 0 项`);
+    return true;
+};
+
+module.exports = { run };
