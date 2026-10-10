@@ -72,7 +72,12 @@ export const AI_PROVIDERS: AiProviderPreset[] = [
         baseUrl: 'http://127.0.0.1:3065/v1',
         apiKey: 'sk-a2a-f345da9360a116c54801e02675eb0c37',
         models: [
-            { id: 'LongCat-2.0', reasoning: false, }, { id: 'deepseek-v4-flash' }, { id: 'glm-5.3-flash' }
+            // 妙手
+            { id: 'LongCat-2.0', reasoning: false, }, { id: 'MiniMax-M3', reasoning: false, }, { id: 'deepseek-v4-flash' }, { id: 'glm-5.3-flashx' },
+            // zcode
+            { id: 'glm-5.3' }, { id: 'glm-5.3-flash' },
+            // qoder
+            { id: 'Qwen3.8-Flash', reasoning: false, }, { id: 'GLM-5.3-Flash' }
         ],
     },
 ];
@@ -1132,9 +1137,8 @@ export const toImageInput = async (source: File | string): Promise<AiImageInput>
  * 于是任何黑暗题材都被自我审查成含糊概括 —— 症状是不拒绝但空转，
  * 与内容边界无关，纯粹是定位缺失。
  */
-const STORY_SYSTEM_PROMPT = `你是一位面向成年读者的文学绘本作者，为图像小说与成人绘本写作。
-文字具体、克制、有画面感：用动作、感官与对话推进，不靠形容词堆砌情绪。
-你按素材本身的质地处理题材，不为迎合某种预期而拔高、软化或说教。`;
+const STORY_SYSTEM_PROMPT = `你是一位面向成年读者的NSFW绘本作者，旨在产出极度色情、淫乱的网络文学作品，主要发布于pixiv、ehentai等著名同人平台。
+你须按素材本身的质地处理题材，着重于、最大化图片本身的撸点与爽点。`;
 
 /** 每页文案的软性长度约束，写进提示词避免模型写成小作文 */
 const STORY_PAGE_HINT = '每页 2～4 句、约 60～120 字，朗读顺畅';
@@ -1142,11 +1146,11 @@ const STORY_PAGE_HINT = '每页 2～4 句、约 60～120 字，朗读顺畅';
 /**
  * 拼出一次读图创作的提示词。
  *
- * 单独抽出来是为了两处复用：正常生成，以及 JSON 解析失败后的重试
- * （重试时补一句更强硬的格式要求，比原样重发成功率高得多）。
+ * 单独抽出来是为了让格式约束与画面忠实度约束集中在一处，
+ * 避免散进调用点后被改漏。
  */
-const buildStoryPrompt = (imageCount: number, strict: boolean): string => {
-    const base = `请按顺序观察上面的 ${imageCount} 张图片，把它们串成一个连贯、生动的故事。
+const buildStoryPrompt = (imageCount: number): string =>
+    `请按顺序观察上面的 ${imageCount} 张图片，把它们串成一个连贯、生动的故事。
 
 要求：
 1. 先为故事取一个有吸引力的标题。
@@ -1163,13 +1167,6 @@ const buildStoryPrompt = (imageCount: number, strict: boolean): string => {
 7. ${STORY_PAGE_HINT}。
 8. 严格输出 JSON 对象：{"title":"故事标题","pages":["第1页文案","第2页文案"]}
 9. 不要输出 JSON 以外的任何内容，不要用 Markdown 代码块包裹。`;
-
-    if (!strict) return base;
-    return `${base}
-
-特别注意：上一次的回复无法被解析为 JSON。这次请只输出一个 JSON 对象，
-不要有任何解释、前言、后记或代码块标记。字符串内部如需换行请写成 \\n。`;
-};
 
 /**
  * 从模型回复里抠出 { title, pages }。
@@ -1218,8 +1215,11 @@ export const parseStoryJson = (raw: string): AiStory | null => {
  * 根据一组图片创作连贯故事。
  *
  * 图片按传入顺序送给模型（顺序即叙事顺序），因此调用方必须先排好序。
- * 解析失败会自动重试一次（提示词加强格式约束）；仍失败则抛错并把
- * 原始回复附在错误信息里，便于用户判断是模型不听话还是接口不对。
+ *
+ * **只请求一次，解析失败不重试。** 重试会把一次读图创作的成本翻倍，而模型
+ * 返回脏 JSON 通常是服务商不支持 jsonMode 或接口被中间层改写 —— 换一段更
+ * 强硬的措辞治不了这两样。失败时把原始回复片段附在错误里，让用户直接看到
+ * 模型究竟回了什么，比悄悄重发一次再报同样的错有用。
  */
 export const generateStoryFromImages = async (
     images: AiImageInput[],
@@ -1234,28 +1234,22 @@ export const generateStoryFromImages = async (
 
     const system = (systemInstruction || '').trim() || STORY_SYSTEM_PROMPT;
 
-    const attempt = async (strict: boolean): Promise<{ story: AiStory | null; raw: string }> => {
-        const raw = await chat({
-            system,
-            messages: [{
-                role: 'user',
-                content: [...parts, { type: 'text' as const, text: buildStoryPrompt(images.length, strict) }],
-            }],
-            temperature: strict ? 0.5 : 0.9,
-            jsonMode: true,
-            // 读图 + 长文创作是重活，用高推理档换一次成稿率
-            reasoningEffort: 'high',
-        });
-        return { story: parseStoryJson(raw), raw };
-    };
+    const raw = await chat({
+        system,
+        messages: [{
+            role: 'user',
+            content: [...parts, { type: 'text' as const, text: buildStoryPrompt(images.length) }],
+        }],
+        temperature: 0.9,
+        jsonMode: true,
+        // 读图 + 长文创作是重活，用高推理档换一次成稿率
+        reasoningEffort: 'high',
+    });
 
-    const first = await attempt(false);
-    if (first.story) return first.story;
+    const story = parseStoryJson(raw);
+    if (story) return story;
 
-    const second = await attempt(true);
-    if (second.story) return second.story;
-
-    const preview = (second.raw || first.raw || '').slice(0, 300);
+    const preview = (raw || '').slice(0, 300);
     throw new Error(
         `故事数据解析失败：模型没有返回合法 JSON。原始回复片段：${preview || '(空)'}`
     );
