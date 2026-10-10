@@ -1414,6 +1414,13 @@ const OSCILLATOR_WAVES: OscillatorType[] = ['sine', 'square', 'sawtooth', 'trian
 /** 判定波形名能否直接赋给 OscillatorNode.type（不能则退回 sine） */
 const isOscillatorWave = (wave: string): wave is OscillatorType =>
   (OSCILLATOR_WAVES as readonly string[]).includes(wave);
+/**
+ * 噪声波形。合成器为它们走 BufferSource 分支，**没有振荡器**，
+ * 因此既不能赋给 OscillatorNode.type，也挂不上 PeriodicWave（harmonics）。
+ */
+const NOISE_WAVES: ExpandedOscillatorType[] = ['white_noise', 'pink_noise', 'brown_noise'];
+const isNoiseWave = (wave: string): boolean =>
+  (NOISE_WAVES as readonly string[]).includes(wave);
 const LFO_TARGETS: LFOTarget[] = ['frequency', 'filter', 'gain', 'pan', 'detune'];
 const FILTER_KINDS: FilterKind[] = [
   'lowpass', 'highpass', 'bandpass', 'notch',
@@ -1458,7 +1465,16 @@ const EFFECT_PARAM_ALIASES: Record<string, Record<string, string>> = {
   flanger: { speed: 'rate', fb: 'feedback' },
   phaser: { speed: 'rate', from: 'min', to: 'max' },
   tremolo: { speed: 'rate' },
-  filter: { start: 'from', end: 'to', dur: 'duration', at: 'start' },
+  /**
+   * 这里**不能**写 `start: 'from'`。
+   *
+   * `start` 已经是 filter 的正式参数（扫频起始时刻，见 EFFECT_PARAMS.filter），
+   * 再把它当"起始频率"的别名，同一个名字就背上了两种量纲：
+   * `filter(start=1, to=4000, duration=2)` 会被改写成 `from=1`，
+   * 用户本意是"第 1 秒开始扫"，得到的却是"从 1Hz 扫到 4000Hz"——
+   * 听感完全不同且不报错。一个名字只能有一个含义：起始频率请写 `from`。
+   */
+  filter: { end: 'to', dur: 'duration', at: 'start' },
   eq: { bass: 'low', treble: 'high' },
 };
 
@@ -1557,6 +1573,10 @@ export class SPGParser {
    * 找到所有 `keyword(...) { body }` 结构。
    * 用括号配对扫描而非正则 —— 正则的 `[^}]+` 会在块内出现嵌套花括号
    * （如乐器里内嵌 `effect_chain { ... }`）时提前截断。
+   *
+   * 关键字与 `{` 之间允许有一个冒号：`effect_chain: { ... }` 是模型很自然会写出的形式，
+   * 而它此前会被静默丢掉 —— 乐器字段白名单里收了 `effect_chain` 所以不报"未知参数"，
+   * 这里又因为紧跟的不是 `{` 而不当成块，于是整条乐器级效果链无声消失。
    */
   private findBlocks(
     code: string,
@@ -1580,6 +1600,12 @@ export class SPGParser {
         }
         headerEnd = close + 1;
         i = close + 1;
+        while (i < code.length && /\s/.test(code[i])) i++;
+      }
+
+      // `keyword: { ... }` 与 `keyword { ... }` 等价
+      if (code[i] === ':') {
+        i++;
         while (i < code.length && /\s/.test(code[i])) i++;
       }
 
@@ -1780,13 +1806,6 @@ export class SPGParser {
     return -1;
   }
 
-  /** 统计字符串中的换行数，用于把块内偏移换算成行号 */
-  private countNewlines(str: string): number {
-    let n = 0;
-    for (let i = 0; i < str.length; i++) if (str[i] === '\n') n++;
-    return n;
-  }
-
   /** 解析数组字面量 `["C4", "E4"]` 或 `[1, 2, 3]` */
   private parseArray(str: string): string[] {
     const t = str.trim();
@@ -1871,7 +1890,10 @@ export class SPGParser {
   /* ---- 块内字段扫描 ---- */
 
   /**
-   * 把块体解析成「键 → 原始值文本」。
+   * 把块体解析成「键 → 值文本 + 行号」。
+   *
+   * 行号必须跟着字段走：块内任一字段出错时，报的是块首那一行的话，
+   * 编辑器会把光标停在 `define_instrument(...) {` 上 —— 而错误在十几行之下。
    *
    * 不能用 `new RegExp(key + '\\s*[:=]\\s*...')` 逐字段匹配，那有三个致命问题：
    *
@@ -1885,8 +1907,12 @@ export class SPGParser {
    * 值延伸到同深度的换行/分号/下一个键。嵌套的 `effect_chain { ... }` 因此被整体跳过，
    * 不会把 `delay(time=..., feedback=...)` 里的具名参数误当成乐器字段。
    */
-  private parseFields(body: string): Map<string, string> {
-    const fields = new Map<string, string>();
+  private parseFields(
+    body: string,
+    lineOf: (index: number) => number,
+    bodyStart: number
+  ): Map<string, { value: string; line: number }> {
+    const fields = new Map<string, { value: string; line: number }>();
     let depth = 0;
     let inSingle = false;
     let inDouble = false;
@@ -1903,12 +1929,20 @@ export class SPGParser {
       if (ch === '(' || ch === '[' || ch === '{') { depth++; i++; continue; }
       if (ch === ')' || ch === ']' || ch === '}') { depth = Math.max(0, depth - 1); i++; continue; }
 
-      // 只在顶层识别键名，且键名必须从左边界开始（行首/空白/分隔符之后）
-      const atBoundary = i === 0 || /[\s;]/.test(prev);
+      /**
+       * 只在顶层识别键名，且键名必须从左边界开始（行首/空白/分隔符之后）。
+       *
+       * 逗号也算左边界：`{ wave:"sine",gain:0.5 }` 这种紧凑写法里，
+       * 键名前面紧挨着的是逗号而不是空格。不认的话 `gain` 整个字段都不会被发现 ——
+       * 它既不会生效、也不会进"未知参数"校验，就是静默消失。
+       */
+      const atBoundary = i === 0 || /[\s;,]/.test(prev);
       if (depth === 0 && atBoundary) {
         const m = /^([A-Za-z_]\w*)\s*([:=])\s*/.exec(body.slice(i));
         if (m) {
           const key = m[1].toLowerCase();
+          // 行号直接由绝对下标查表，不用在扫描途中累加换行数
+          const keyLine = lineOf(bodyStart + i);
           let j = i + m[0].length;
           let vDepth = 0;
           let vSingle = false;
@@ -1953,7 +1987,7 @@ export class SPGParser {
           }
 
           // 同名键后写覆盖先写，与"后写优先"的直觉一致
-          fields.set(key, body.slice(valueStart, j).trim());
+          fields.set(key, { value: body.slice(valueStart, j).trim(), line: keyLine });
           i = j;
           continue;
         }
@@ -1968,25 +2002,45 @@ export class SPGParser {
   /**
    * 取字段值。表达式类字段（envelope/filter/lfo）允许带引号也允许裸写，
    * 两种写法都返回去掉引号后的表达式文本。
+   *
+   * 同时给出该字段**自己**的行号（缺省回落到块首）：报错落在块首那一行时，
+   * 编辑器会把光标停在 `define_instrument(...) {` 上，而错误在十几行之下。
    */
-  private fieldValue(fields: Map<string, string>, key: string): string | null {
-    const v = fields.get(key.toLowerCase());
-    if (v === undefined) return null;
-    const t = v.trim();
-    return t.length > 0 ? this.unquote(t) : null;
+  private field(
+    fields: Map<string, { value: string; line: number }>,
+    key: string
+  ): { value: string; line: number } | null {
+    const f = fields.get(key.toLowerCase());
+    if (f === undefined) return null;
+    const t = f.value.trim();
+    return t.length > 0 ? { value: this.unquote(t), line: f.line } : null;
+  }
+
+  private fieldValue(
+    fields: Map<string, { value: string; line: number }>, key: string
+  ): string | null {
+    return this.field(fields, key)?.value ?? null;
   }
 
   /** 取数值字段；缺失返回 null，非数字抛带行号的错误 */
   private fieldNumber(
-    fields: Map<string, string>, key: string, ctx: string, line: number
+    fields: Map<string, { value: string; line: number }>,
+    key: string, ctx: string, fallbackLine: number
   ): number | null {
-    const raw = this.fieldValue(fields, key);
-    if (raw === null) return null;
-    const v = this.strictFloat(raw);
+    const f = this.field(fields, key);
+    if (f === null) return null;
+    const v = this.strictFloat(f.value);
     if (!Number.isFinite(v)) {
-      throw new SPGError(`${ctx}: 参数 ${key} 需要数字（收到 "${raw}"）`, line);
+      throw new SPGError(`${ctx}: 参数 ${key} 需要数字（收到 "${f.value}"）`, f.line || fallbackLine);
     }
     return v;
+  }
+
+  /** 字段自身的行号（用于报错定位），缺失时回落到块首 */
+  private fieldLine(
+    fields: Map<string, { value: string; line: number }>, key: string, fallbackLine: number
+  ): number {
+    return fields.get(key.toLowerCase())?.line ?? fallbackLine;
   }
 
   /**
@@ -1996,11 +2050,14 @@ export class SPGParser {
    * `reverb(damp=3000)` 会安静地用默认阻尼 —— 用户听到的不是自己写的，却拿不到反馈。
    * 这类"看起来生效其实没生效"的写法是 LLM 生成代码里最难排查的错误，
    * 因此直接报错，并把合法参数名列出来供模型自我纠正。
+   *
+   * 收键名数组而不是对象：乐器/config 块手里拿的是「键 → 值 + 行号」的 Map，
+   * 为了调用这里先 `Object.fromEntries` 再丢掉行号，等于把刚算出来的定位信息扔掉。
    */
   private rejectUnknownParams(
-    named: Record<string, string>, allowed: readonly string[], ctx: string, line: number
+    keys: Iterable<string>, allowed: readonly string[], ctx: string, line: number
   ): void {
-    for (const key of Object.keys(named)) {
+    for (const key of keys) {
       if (!allowed.includes(key)) {
         throw new SPGError(
           `${ctx}: 未知参数 "${key}"。可用参数：${allowed.join(' / ')}`, line
@@ -2093,7 +2150,8 @@ export class SPGParser {
         );
     }
 
-    this.rejectUnknownParams(named, [...allowed, 'curve', 'delay'], `${ctx} 包络 ${kind}()`, line);
+    this.rejectUnknownParams(
+      Object.keys(named), [...allowed, 'curve', 'delay'], `${ctx} 包络 ${kind}()`, line);
 
     env.curve = named.curve
       ? this.enum_(this.unquote(named.curve), ENVELOPE_CURVES, `${ctx} curve`, line)
@@ -2122,7 +2180,7 @@ export class SPGParser {
     const p = positional.map((v) => this.strictFloat(v));
 
     this.rejectUnknownParams(
-      named,
+      Object.keys(named),
       ['freq', 'frequency', 'q', 'gain', 'sweep', 'sweep_to'],
       `${ctx} 滤波器 ${kind}()`, line
     );
@@ -2160,7 +2218,7 @@ export class SPGParser {
     const p = positional.map((v) => this.strictFloat(v));
 
     this.rejectUnknownParams(
-      named, ['freq', 'frequency', 'amount', 'target', 'ramp', 'swell'],
+      Object.keys(named), ['freq', 'frequency', 'amount', 'target', 'ramp', 'swell'],
       `${ctx} LFO ${type}()`, line
     );
 
@@ -2191,13 +2249,19 @@ export class SPGParser {
 
   /* ---- 效果链 ---- */
 
-  private parseEffects(body: string, tempo: number, baseLine: number, ctx: string): EffectDef[] {
+  private parseEffects(
+    body: string,
+    tempo: number,
+    lineOf: (index: number) => number,
+    bodyStart: number,
+    ctx: string
+  ): EffectDef[] {
     const effects: EffectDef[] = [];
     // 效果器同样允许同行连写，复用统一的语句切分
     const statements = this.splitStatements(body);
 
     statements.forEach(({ text: line, offset }) => {
-      const lineNo = baseLine + this.countNewlines(body.slice(0, offset));
+      const lineNo = lineOf(bodyStart + offset);
 
       const m = line.match(/^(\w+)\s*\(([\s\S]*)\)\s*$/);
       if (!m) {
@@ -2212,7 +2276,8 @@ export class SPGParser {
       renamed.forEach(([from, to]) =>
         this.warn(`${ctx} ${name}(): 参数 "${from}" 已按 "${to}" 处理`, lineNo)
       );
-      this.rejectUnknownParams(named, EFFECT_PARAMS[name] ?? [], `${ctx} ${name}()`, lineNo);
+      this.rejectUnknownParams(
+        Object.keys(named), EFFECT_PARAMS[name] ?? [], `${ctx} ${name}()`, lineNo);
 
       const p = positional.map((v) => this.strictFloat(v));
       const num = (keys: string[], fallback: number, idx2: number): number => {
@@ -2374,7 +2439,7 @@ export class SPGParser {
     reserved: readonly string[] = []
   ): NoteExpression {
     this.rejectUnknownParams(
-      named,
+      Object.keys(named),
       [...SPGParser.NOTE_EXPR_PARAMS, ...extraParams],
       ctx, line
     );
@@ -2518,49 +2583,52 @@ export class SPGParser {
       throw new SPGError('只允许一个 config 块', configBlocks[1].line);
     }
     if (configBlocks.length === 1) {
-      const body = configBlocks[0].body;
-      const bodyLine = lineOf(configBlocks[0].bodyStart);
-      const cfg = this.parseFields(body);
+      const block = configBlocks[0];
+      const body = block.body;
+      const bodyLine = lineOf(block.bodyStart);
+      const cfg = this.parseFields(body, lineOf, block.bodyStart);
 
       this.rejectUnknownParams(
-        Object.fromEntries(cfg), ['tempo', 'bpm', 'master_gain', 'gain', 'key', 'scale', 'swing'],
+        cfg.keys(), ['tempo', 'bpm', 'master_gain', 'gain', 'key', 'scale', 'swing'],
         'config', bodyLine
       );
 
       // bpm 是 tempo 最自然的同义写法，模型经常直接写 bpm
-      const tempoRaw = this.fieldValue(cfg, 'tempo') ?? this.fieldValue(cfg, 'bpm');
-      if (tempoRaw !== null) {
-        tempo = this.strictFloat(tempoRaw);
+      const tempoField = this.field(cfg, 'tempo') ?? this.field(cfg, 'bpm');
+      if (tempoField !== null) {
+        tempo = this.strictFloat(tempoField.value);
         if (!Number.isFinite(tempo) || tempo <= 0 || tempo > 1000) {
-          throw new SPGError(`tempo 必须大于 0 且不超过 1000（收到 ${tempoRaw}）`, bodyLine);
+          throw new SPGError(
+            `tempo 必须大于 0 且不超过 1000（收到 ${tempoField.value}）`, tempoField.line
+          );
         }
       }
-      const volRaw = this.fieldValue(cfg, 'master_gain') ?? this.fieldValue(cfg, 'gain');
-      if (volRaw !== null) {
-        masterVolumeConfig = this.strictFloat(volRaw);
+      const volField = this.field(cfg, 'master_gain') ?? this.field(cfg, 'gain');
+      if (volField !== null) {
+        masterVolumeConfig = this.strictFloat(volField.value);
         if (!Number.isFinite(masterVolumeConfig) || masterVolumeConfig < 0) {
-          throw new SPGError(`master_gain 不能为负数（收到 ${volRaw}）`, bodyLine);
+          throw new SPGError(`master_gain 不能为负数（收到 ${volField.value}）`, volField.line);
         }
         masterVolumeConfig = Math.min(2, masterVolumeConfig);
       }
-      const keyRaw = this.fieldValue(cfg, 'key');
-      if (keyRaw !== null) {
-        if (!/^[A-Ga-g][#b♯♭]?m?$/.test(keyRaw.trim())) {
+      const keyField = this.field(cfg, 'key');
+      if (keyField !== null) {
+        if (!/^[A-Ga-g][#b♯♭]?m?$/.test(keyField.value.trim())) {
           throw new SPGError(
-            `key 必须是调性记号，如 C / Am / F# / Bbm（收到 "${keyRaw}"）`, bodyLine
+            `key 必须是调性记号，如 C / Am / F# / Bbm（收到 "${keyField.value}"）`, keyField.line
           );
         }
-        key = keyRaw.trim();
+        key = keyField.value.trim();
       }
-      const scaleRaw = this.fieldValue(cfg, 'scale');
-      if (scaleRaw !== null) {
-        scale = this.enum_(scaleRaw, SCALE_NAMES, 'config scale', bodyLine);
+      const scaleField = this.field(cfg, 'scale');
+      if (scaleField !== null) {
+        scale = this.enum_(scaleField.value, SCALE_NAMES, 'config scale', scaleField.line);
       }
-      const swingRaw = this.fieldValue(cfg, 'swing');
-      if (swingRaw !== null) {
-        swing = this.strictFloat(swingRaw);
+      const swingField = this.field(cfg, 'swing');
+      if (swingField !== null) {
+        swing = this.strictFloat(swingField.value);
         if (!Number.isFinite(swing) || swing < 0 || swing > 1) {
-          throw new SPGError(`swing 必须在 0~1 之间（收到 ${swingRaw}）`, bodyLine);
+          throw new SPGError(`swing 必须在 0~1 之间（收到 ${swingField.value}）`, swingField.line);
         }
       }
     }
@@ -2584,10 +2652,10 @@ export class SPGParser {
       const body = block.body;
       const bodyLine = lineOf(block.bodyStart);
 
-      // 块内字段一次性扫描成「键 → 值」，避免逐字段正则互相串味
-      const fields = this.parseFields(body);
+      // 块内字段一次性扫描成「键 → 值 + 行号」，避免逐字段正则互相串味
+      const fields = this.parseFields(body, lineOf, block.bodyStart);
 
-      this.rejectUnknownParams(Object.fromEntries(fields), [
+      this.rejectUnknownParams(fields.keys(), [
         'preset', 'wave', 'envelope', 'env', 'amp_envelope', 'filter', 'filter_envelope',
         'filter_env_amount', 'lfo', 'pan', 'gain', 'fm_wave', 'fm_index', 'fm_ratio',
         'detune', 'glide', 'glide_from', 'pitch_env_amount', 'pitch_decay', 'spread',
@@ -2599,13 +2667,14 @@ export class SPGParser {
       ], ctx, bodyLine);
 
       // 预设作为基线
-      const presetName = this.fieldValue(fields, 'preset');
+      const presetField = this.field(fields, 'preset');
       let base: Partial<InstrumentDef> = {};
-      if (presetName) {
-        const loaded = getPreset(presetName);
+      if (presetField) {
+        const loaded = getPreset(presetField.value);
         if (!loaded) {
           throw new SPGError(
-            `${ctx}: 未知预设 "${presetName}"。可用预设：${PRESET_NAMES.join(' / ')}`, bodyLine
+            `${ctx}: 未知预设 "${presetField.value}"。可用预设：${PRESET_NAMES.join(' / ')}`,
+            presetField.line
           );
         }
         base = { ...loaded };
@@ -2620,46 +2689,56 @@ export class SPGParser {
       if (instEffectBlocks.length === 1) {
         const eb = instEffectBlocks[0];
         instEffects = this.parseEffects(
-          eb.body, tempo, lineOf(block.bodyStart + eb.bodyStart), ctx
+          eb.body, tempo, lineOf, block.bodyStart + eb.bodyStart, ctx
         );
       }
 
-      const waveRaw = this.fieldValue(fields, 'wave') ?? base.wave ?? 'sine';
-      const wave = this.enum_(waveRaw, OSC_WAVES, `${ctx} wave`, bodyLine);
+      // 每个字段的报错都定位到**它自己**那一行，而不是块首
+      const waveField = this.field(fields, 'wave');
+      const wave = this.enum_(
+        waveField?.value ?? base.wave ?? 'sine', OSC_WAVES, `${ctx} wave`,
+        waveField?.line ?? bodyLine
+      );
 
-      const envStr = this.fieldValue(fields, 'envelope')
-        ?? this.fieldValue(fields, 'env')
-        ?? this.fieldValue(fields, 'amp_envelope');
-      const envelope = (envStr ? this.parseEnvelope(envStr, ctx, bodyLine) : undefined)
+      const envField = this.field(fields, 'envelope')
+        ?? this.field(fields, 'env')
+        ?? this.field(fields, 'amp_envelope');
+      const envelope = (envField ? this.parseEnvelope(envField.value, ctx, envField.line) : undefined)
         ?? base.envelope ?? DEFAULT_ENVELOPE;
 
-      const filterStr = this.fieldValue(fields, 'filter');
-      const filter = (filterStr ? this.parseFilter(filterStr, ctx, bodyLine) : undefined) ?? base.filter;
+      const filterField = this.field(fields, 'filter');
+      const filter = (filterField ? this.parseFilter(filterField.value, ctx, filterField.line) : undefined)
+        ?? base.filter;
 
-      const filterEnvStr = this.fieldValue(fields, 'filter_envelope');
-      const filterEnvelope = (filterEnvStr ? this.parseEnvelope(filterEnvStr, ctx, bodyLine) : undefined)
-        ?? base.filterEnvelope;
+      const filterEnvField = this.field(fields, 'filter_envelope');
+      const filterEnvelope = (filterEnvField
+        ? this.parseEnvelope(filterEnvField.value, ctx, filterEnvField.line)
+        : undefined) ?? base.filterEnvelope;
 
-      const lfoStr = this.fieldValue(fields, 'lfo');
-      const lfo = (lfoStr ? this.parseLFO(lfoStr, ctx, bodyLine) : undefined) ?? base.lfo;
+      const lfoField = this.field(fields, 'lfo');
+      const lfo = (lfoField ? this.parseLFO(lfoField.value, ctx, lfoField.line) : undefined) ?? base.lfo;
 
       // 自定义谐波
       let harmonics = base.harmonics;
-      const harmRaw = this.fieldValue(fields, 'harmonics');
-      if (harmRaw !== null) {
-        harmonics = this.parseArray(harmRaw)
+      const harmField = this.field(fields, 'harmonics');
+      if (harmField !== null) {
+        harmonics = this.parseArray(harmField.value)
           .map((v) => this.strictFloat(v))
           .filter((v) => Number.isFinite(v));
         if (harmonics.length === 0) {
-          throw new SPGError(`${ctx}: harmonics 数组不能为空`, bodyLine);
+          throw new SPGError(`${ctx}: harmonics 数组不能为空`, harmField.line);
         }
       }
 
       // FM 调制器必须是真正的振荡器波形：写噪声名会在合成器被静默跳过
       // （听到的就是没 FM 的声音），写 custom 则退化成 sine —— 两种都是"写了白写"。
-      const fmWaveRaw = this.fieldValue(fields, 'fm_wave') ?? base.fm_wave;
-      const fmWave = fmWaveRaw
-        ? this.enum_(fmWaveRaw, OSCILLATOR_WAVES, `${ctx} fm_wave（只能是 sine / square / sawtooth / triangle）`, bodyLine)
+      // 预设里带的 fm_wave 同样过一遍校验：预设表由本文件维护，写错在这里就该拦住。
+      const fmWaveField = this.field(fields, 'fm_wave');
+      const fmWaveSource = fmWaveField?.value ?? base.fm_wave;
+      const fmWave = fmWaveSource
+        ? this.enum_(fmWaveSource, OSCILLATOR_WAVES,
+          `${ctx} fm_wave（只能是 sine / square / sawtooth / triangle）`,
+          fmWaveField?.line ?? bodyLine)
         : undefined;
 
       const pickNum = (key: string, baseVal: number | undefined, fallback?: number): number | undefined => {
@@ -2675,16 +2754,35 @@ export class SPGParser {
       if (fmRatio !== undefined && fmRatio <= 0) {
         throw new SPGError(
           `${ctx}: fm_ratio 是倍频比，必须为正数（收到 ${fmRatio}）`
-          + `；不需要 FM 时直接删掉 fm_wave / fm_ratio / fm_index`, bodyLine
+          + `；不需要 FM 时直接删掉 fm_wave / fm_ratio / fm_index`,
+          this.fieldLine(fields, 'fm_ratio', bodyLine)
         );
       }
 
-      // wave: "custom" 没有内置定义：不配 harmonics 会静默退化成 sine。
+      /**
+       * wave: "custom" 必须配 harmonics，否则合成器找不到 PeriodicWave 会退回 sine。
+       * 但 harmonics 可以来自预设基线，所以这里查的是最终值而不是本块的字段。
+       */
       if (wave === 'custom' && harmonics === undefined) {
         throw new SPGError(
           `${ctx}: wave "custom" 需要配合 harmonics 使用`
           + `（如 harmonics: [1, 0.5, 0.25]），否则请写具体波形：`
-          + `sine / square / sawtooth / triangle`, bodyLine
+          + `sine / square / sawtooth / triangle`,
+          waveField?.line ?? bodyLine
+        );
+      }
+
+      /**
+       * 噪声波形走 BufferSource，**根本没有振荡器**，谐波无处可挂。
+       * 不拦的话 `wave:"white_noise" + harmonics:[...]` 会安静地按纯噪声发声，
+       * 用户以为自己叠加了谐波音色，实际什么都没发生。
+       */
+      if (harmonics !== undefined && isNoiseWave(wave)) {
+        throw new SPGError(
+          `${ctx}: wave "${wave}" 是噪声，不能配合 harmonics 使用`
+          + `（噪声没有振荡器可挂谐波）。请改用 sine / square / sawtooth / triangle，`
+          + `或直接写 wave: "custom"`,
+          harmField?.line ?? waveField?.line ?? bodyLine
         );
       }
 
@@ -2692,7 +2790,9 @@ export class SPGParser {
       for (const k of ['glide', 'pitch_decay', 'loop_point']) {
         const v = this.fieldNumber(fields, k, ctx, bodyLine);
         if (v !== null && v < 0) {
-          throw new SPGError(`${ctx}: 参数 ${k} 不能为负数（收到 ${v}）`, bodyLine);
+          throw new SPGError(
+            `${ctx}: 参数 ${k} 不能为负数（收到 ${v}）`, this.fieldLine(fields, k, bodyLine)
+          );
         }
       }
 
@@ -2736,7 +2836,7 @@ export class SPGParser {
       );
       if (insideInstrument) continue;
       topLevelEffects.push(
-        ...this.parseEffects(eb.body, tempo, lineOf(eb.bodyStart), 'effect_chain')
+        ...this.parseEffects(eb.body, tempo, lineOf, eb.bodyStart, 'effect_chain')
       );
     }
     effects = topLevelEffects;
@@ -2757,7 +2857,8 @@ export class SPGParser {
       }
 
       this.rejectUnknownParams(
-        seqHeader, ['name', 'seq', 'id', 'instrument', 'inst', 'gain', 'transpose', 'humanize'],
+        Object.keys(seqHeader),
+        ['name', 'seq', 'id', 'instrument', 'inst', 'gain', 'transpose', 'humanize'],
         `sequence "${seqName}" 头部`, block.line
       );
 
@@ -3174,7 +3275,8 @@ export class SPGParser {
           case 'rest': {
             const duration = arg(['duration', 'dur', 'len'], 0) ?? '';
             if (!duration) throw new SPGError(`${ctx}: rest 缺少时值参数，如 rest("4n")`, lineNo);
-            this.rejectUnknownParams(named, ['duration', 'dur', 'len'], `${ctx} rest()`, lineNo);
+            this.rejectUnknownParams(
+              Object.keys(named), ['duration', 'dur', 'len'], `${ctx} rest()`, lineNo);
             this.validateDuration(duration, tempo, ctx, lineNo);
             commands.push({ type: 'rest', duration });
             break;
@@ -3219,7 +3321,8 @@ export class SPGParser {
         }
         const { positional, named } = this.parseArgs(m[1]);
         this.rejectUnknownParams(
-          named, ['source', 'seq', 'track', 'time', 'at', 'loop', 'repeat', 'times',
+          Object.keys(named),
+          ['source', 'seq', 'track', 'time', 'at', 'loop', 'repeat', 'times',
             'gain', 'pan', 'stagger'],
           'mix track()', lineNo
         );
@@ -3315,6 +3418,27 @@ function hashSeed(str: string): number {
 }
 
 /**
+ * 一个事件从起音到彻底静音所需的时长。
+ *
+ * 这是"尾音有多长"的**唯一定义**：调度器用它累加总时长（决定离线导出的长度），
+ * 合成器用它决定效果链内 LFO 何时停止。两处各写一份的后果是它们会漂移 ——
+ * 合成器的实际停止时刻是 `delay + duration + release + 0.1`，
+ * 谁忘了 `delay` 这一项，谁的估算就偏短（包络 delay 可达数秒）。
+ *
+ * 鼓组以 `decay` 为准（可被 hit 的时值或 decay 参数截断），振荡器以包络为准。
+ */
+function eventTail(event: ScheduledEvent): number {
+  if (event.drum) {
+    const spec = DRUM_SPECS[event.drum];
+    const natural = spec ? spec.decay : 0.3;
+    const scaled = natural * (event.drumDecay ?? 1);
+    const gated = event.duration > 0 ? Math.min(scaled, Math.max(event.duration, 0.01)) : scaled;
+    return gated + 0.15;
+  }
+  return (event.envelope?.delay ?? 0) + event.duration + (event.envelope?.release ?? 0.2) + 0.1;
+}
+
+/**
  * 把音序里的乐理记法全部换算成绝对秒数，产出一张"合成器照着铺节点"的事件表。
  * 合成器因此不做任何乐理计算，只负责发声。
  */
@@ -3361,7 +3485,6 @@ export class EventScheduler {
       startTime: number,
       trackGain: number,
       trackPan: number,
-      trackTranspose: number,
       /**
        * 随机流盐：种子若只含 (音序名, 起始时刻)，mix 里同一音序同一时刻出现两次
        * （如齐奏叠加）时两遍的 humanize 抖动逐采样相同 —— 双轨叠加等于单轨加 6dB。
@@ -3378,7 +3501,7 @@ export class EventScheduler {
       const rand = createRandom(hashSeed(`${seqName}:${startTime.toFixed(6)}:${salt}`));
 
       const seqGain = seq.gain ?? 1;
-      const seqTranspose = (seq.transpose ?? 0) + trackTranspose;
+      const seqTranspose = seq.transpose ?? 0;
       const seqHumanize = seq.humanize ?? 0;
 
       let currentTime = startTime;
@@ -3447,7 +3570,7 @@ export class EventScheduler {
         // 起音噪声不应在鼓组上叠加：鼓组本身已有独立的噪声层
         const attackNoise = isDrum ? 0 : (inst?.attackNoise ?? 0);
 
-        scheduledEvents.push({
+        const event: ScheduledEvent = {
           time: finalTime,
           freq,
           duration,
@@ -3478,27 +3601,11 @@ export class EventScheduler {
           effects: inst?.effects,
           loopPoint: inst?.loopPoint ?? 0,
           ...overrides,
-        });
+        };
+        scheduledEvents.push(event);
 
-        /**
-         * 尾音长度必须与合成器的实际发声长度一致。
-         *
-         * 合成器把振荡器停在 `t + duration + release + 0.1`，鼓组则停在 `t + decay + 0.15`
-         * （decay 可被 hit 的时值或 decay 参数改变）。只按 `duration + release` 累加会
-         * **漏算所有鼓组尾音**：一段只有 `hit("crash","4n")` 的曲子总时长不到 1 秒，
-         * 而 crash 的音色衰减有 1.9 秒 —— 离线导出会把镲片硬生生切掉。
-         */
-        let tail: number;
-        if (isDrum) {
-          const spec = DRUM_SPECS[overrides?.drum as DrumName];
-          const natural = spec ? spec.decay : 0.3;
-          const scaled = natural * (overrides?.drumDecay ?? 1);
-          const gated = duration > 0 ? Math.min(scaled, Math.max(duration, 0.01)) : scaled;
-          tail = gated + 0.15;
-        } else {
-          tail = (inst?.envelope?.delay ?? 0) + duration + (inst?.envelope?.release ?? 0.2) + 0.1;
-        }
-        const end = finalTime + tail;
+        // 尾音长度与合成器的实际发声长度同源（见 eventTail 说明）
+        const end = finalTime + eventTail(event);
         if (end > maxTime) maxTime = end;
       };
 
@@ -3686,7 +3793,6 @@ export class EventScheduler {
             currentStart,
             track.gain ?? 1,
             track.pan ?? 0,
-            0,
             `${trackIndex}:${i}`
           );
           // stagger 让每次循环错位叠加，可做卡农
@@ -3698,7 +3804,7 @@ export class EventScheduler {
       let cursor = 0;
       let seqIndex = 0;
       sequences.forEach((seq) => {
-        cursor += scheduleSequence(seq.name, cursor, 1, 0, 0, `solo:${seqIndex++}`);
+        cursor += scheduleSequence(seq.name, cursor, 1, 0, `solo:${seqIndex++}`);
       });
     }
 
@@ -3781,10 +3887,6 @@ export class AudioSynthesizer {
     fillNoise(buffer.getChannelData(0), color, createRandom(NOISE_SEEDS[color]));
     this.noiseBuffers.set(key, buffer);
     return buffer;
-  }
-
-  private static isNoise(wave: string): boolean {
-    return wave === 'white_noise' || wave === 'pink_noise' || wave === 'brown_noise';
   }
 
   /* ---- 包络自动化 ---- */
@@ -4471,11 +4573,9 @@ export class AudioSynthesizer {
     const masterBus = ctx.createGain();
     masterBus.gain.value = 1.0;
 
-    // 效果链内部 LFO 的停止时刻：最后一个事件的尾音之后
-    const chainStop = events.reduce(
-      (acc, e) => Math.max(acc, e.time + e.duration + (e.envelope?.release ?? 0) + 0.5),
-      1
-    );
+    // 效果链内部 LFO 的停止时刻：最后一个事件的尾音之后。
+    // 用 eventTail 而不是 duration+release —— 鼓组按包络算是 0，LFO 会在镲片还响着时停摆。
+    const chainStop = events.reduce((acc, e) => Math.max(acc, e.time + eventTail(e)), 1);
 
     if (effects.length > 0) {
       this.buildEffectChain(ctx, masterBus, destination, effects, registerSource, chainStop, timeOffset);
@@ -4516,7 +4616,7 @@ export class AudioSynthesizer {
       const release = Math.max(0, env.release);
       const tailEnd = t + (env.delay ?? 0) + duration + release + 0.1;
 
-      const isNoise = AudioSynthesizer.isNoise(event.wave);
+      const isNoise = isNoiseWave(event.wave);
       const voiceCount = clamp(event.voices ?? 1, 1, 7, 1);
 
       /* 振幅总线：所有声部汇总后统一做包络，避免声部间相位差被包络扭曲 */
@@ -4694,26 +4794,35 @@ export class AudioSynthesizer {
         osc.detune.value = clamp(detuneCents, -4800, 4800, 0);
         voiceOscillators.push(osc);
 
-        // FM 调制
+        /**
+         * FM 调制。
+         *
+         * 判定条件是 **fm_wave 存在且 fm_index 非零**，不能写成 `event.fm_ratio &&` ——
+         * fm_ratio 是个有默认值的数值，拿它当开关会让"只写了 fm_wave + fm_index"
+         * 的乐器静默失去 FM（`0 &&` 与 `undefined &&` 都是 falsy），
+         * 而解析器只在 fm_ratio<=0 时报错，恰好漏掉"根本没写"这一支。
+         *
+         * fm_index 为 0 或缺失时调制增益恒为 0，建出来的只是个不出声的振荡器，
+         * 白白占一份调度与节点开销，直接跳过。
+         */
+        const fmIndex = event.fm_index ?? 0;
         let fmMod: OscillatorNode | null = null;
-        if (event.fm_wave && event.fm_ratio && !AudioSynthesizer.isNoise(event.fm_wave)) {
+        if (event.fm_wave && fmIndex > 0 && !isNoiseWave(event.fm_wave)) {
           fmMod = ctx.createOscillator();
           fmMod.type = isOscillatorWave(event.fm_wave) ? event.fm_wave : 'sine';
-          // 比率可小于 1（产生非谐低频调制），但不能为 0 或负
-          const ratio = clamp(Math.abs(event.fm_ratio), 0.01, 32, 1);
+          // 比率可小于 1（产生非谐低频调制），但不能为 0 或负；缺省 1 即同频调制
+          const ratio = clamp(Math.abs(event.fm_ratio ?? 1), 0.01, 32, 1);
           fmMod.frequency.setValueAtTime(clamp(freq * ratio, 0.01, 20000, freq), t);
           fmMod.detune.value = clamp(detuneCents, -4800, 4800, 0);
 
           const fmGain = ctx.createGain();
           // fm_index 是"调制指数"，换算成 Hz 偏移量
-          fmGain.gain.setValueAtTime(clamp(event.fm_index ?? 0, 0, 20000, 0), t);
+          fmGain.gain.setValueAtTime(clamp(fmIndex, 0, 20000, 0), t);
           // 调制量随时值衰减，模拟真实 FM 音色的起音亮度
-          if (event.fm_index && event.fm_index > 0) {
-            fmGain.gain.exponentialRampToValueAtTime(
-              Math.max(ZERO, event.fm_index * 0.08),
-              t + Math.max(0.05, duration * 0.6)
-            );
-          }
+          fmGain.gain.exponentialRampToValueAtTime(
+            Math.max(ZERO, fmIndex * 0.08),
+            t + Math.max(0.05, duration * 0.6)
+          );
 
           fmMod.connect(fmGain);
           fmGain.connect(osc.frequency);
@@ -4791,10 +4900,17 @@ export class AudioSynthesizer {
         } else {
           lfoGain.gain.setValueAtTime(peakAmount, t);
         }
-        // 渐进增强（riser 式颤音）
+        /**
+         * 渐进增强（riser 式颤音）。
+         *
+         * 终点必须**不早于**淡入终点：`ramp` 比音符时值长时（例如
+         * `ramp=2` 配 `4n` 音符），淡入写在 `t+2`、增强写在 `t+0.5`，
+         * 两个自动化事件时间倒流 —— 浏览器对乱序自动化事件的处理是未定义的。
+         * 取两者较大值，保证时间线严格单调。
+         */
         if (event.lfo.swell) {
           lfoGain.gain.linearRampToValueAtTime(
-            peakAmount * 2.2, t + Math.max(0.05, duration)
+            peakAmount * 2.2, t + Math.max(0.05, duration, ramp)
           );
         }
 

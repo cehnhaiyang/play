@@ -921,7 +921,8 @@ effect_chain {
 以下同义写法也能编译，但会给出"已按某某处理"的提示，正式写法请直接用规范名：
 delay→time、fb→feedback、size→decay、drive→amount（失真里）、depth→bits（位深里）、
 speed→rate、tone→damping、bass→low、treble→high、ping_pong→pingpong、
-start→from、end→to（扫频里）、from→min、to→max（移相里）、dur→duration、at→start。
+end→to（扫频里）、from→min、to→max（移相里）、dur→duration、at→start。
+注意 \`filter\` 里 \`start\` 是**扫频起始时刻(秒)**，起始频率请写 \`from\`。
 
 **顺序很重要**：失真应放在延迟/混响之前，否则会把尾音一起弄脏。
 

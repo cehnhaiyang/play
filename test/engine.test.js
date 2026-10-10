@@ -1548,6 +1548,189 @@ sequence(name="s", instrument="g"){ note("C4","4n") }
   eq(inst.effects[0].amount, 0.6);
 });
 
+group('回归修复 · 字段扫描与报错定位');
+
+/**
+ * 逗号也是键名的左边界。
+ *
+ * `{ wave:"sine",gain:0.5 }` 里 `gain` 前面紧挨的是逗号而不是空白，
+ * 旧实现的 atBoundary 只认 `[\s;]`，于是 gain 整个字段都不会被发现 ——
+ * 它既不生效、也不进"未知参数"校验，就是静默消失（用户写的音量被丢掉）。
+ */
+check('紧凑逗号写法不会丢字段', () => {
+  const r = parse(`
+define_instrument(name="t"){ wave:"sine",gain:0.42 }
+sequence(name="s", instrument="t"){ note("C4","4n") }
+`);
+  eq(r.instruments.get('t').gain, 0.42, 'gain 字段被静默丢弃');
+});
+
+check('紧凑逗号写法下的未知参数仍会报错', () => {
+  const e = lineOfError(`
+define_instrument(name="t"){ wave:"sine",gaain:0.42 }
+sequence(name="s", instrument="t"){ note("C4","4n") }`);
+  assert(e && /未知参数/.test(e.message), `应报未知参数: ${e && e.message}`);
+});
+
+/**
+ * 报错行号必须指向出错的**那一行**，而不是块首。
+ *
+ * 旧实现把整个块的字段都按 bodyLine（块首）报，编辑器于是把光标停在
+ * `define_instrument(...) {` 上，而真正的错误在十几行之下 —— 行号形同虚设。
+ */
+check('乐器字段报错指向字段自己那一行', () => {
+  const e = lineOfError(`define_instrument(name="t") {
+  wave: "sine"
+  gain: 0.6
+  fm_wave: "white_noise"
+}`);
+  assert(e && /fm_wave/.test(e.message), `应报 fm_wave: ${e && e.message}`);
+  eq(e.line, 4, 'fm_wave 在第 4 行');
+});
+
+check('config 字段报错指向字段自己那一行', () => {
+  const e = lineOfError(`config {
+  tempo: 120
+  swing: 5
+}
+sequence(name="s"){ note("C4","4n") }`);
+  assert(e && /swing/.test(e.message), `应报 swing: ${e && e.message}`);
+  eq(e.line, 3, 'swing 在第 3 行');
+});
+
+check('包络表达式报错指向 envelope 字段那一行', () => {
+  const e = lineOfError(`define_instrument(name="t") {
+  wave: "sine"
+  envelope: "nope(1,2)"
+}`);
+  assert(e && /包络/.test(e.message), `应报包络错误: ${e && e.message}`);
+  eq(e.line, 3, 'envelope 在第 3 行');
+});
+
+check('效果器报错行号跟随语句所在行', () => {
+  const e = lineOfError(`sequence(name="s"){ note("C4","4n") }
+effect_chain {
+  reverb(decay=2, mix=0.3)
+  delay(nope=1)
+}`);
+  assert(e && /未知参数/.test(e.message), `应报未知参数: ${e && e.message}`);
+  eq(e.line, 4, 'delay 在第 4 行');
+});
+
+group('回归修复 · 静默失效的写法');
+
+/**
+ * `effect_chain: { ... }` 必须等于 `effect_chain { ... }`。
+ *
+ * 乐器字段白名单里收了 `effect_chain`（就是为了让带冒号的写法不报"未知参数"），
+ * 但 findBlocks 只认紧跟 `{` 的形式，于是这条链被静默丢掉：
+ * 不报错、也没效果，用户以为加了失真，实际听到的是干声。
+ */
+check('effect_chain 带冒号写法生效', () => {
+  const r = parse(`
+define_instrument(name="g"){ wave:"sawtooth" effect_chain: { distortion(amount=0.6) } }
+sequence(name="s", instrument="g"){ note("C4","4n") }
+`);
+  const inst = r.instruments.get('g');
+  eq(inst.effects.length, 1, 'effect_chain: {...} 被静默丢弃');
+  eq(inst.effects[0].amount, 0.6);
+});
+
+/**
+ * 只写 fm_wave + fm_index（不写 fm_ratio）必须仍然有 FM。
+ *
+ * 合成器的判定条件曾是 `event.fm_wave && event.fm_ratio` —— 拿一个有默认值的
+ * 数值当开关，`undefined` 与 `0` 都是 falsy，于是"没写 fm_ratio"静默失去 FM；
+ * 而解析器只在 fm_ratio<=0 时报错，恰好漏掉"根本没写"这一支。
+ */
+check('只写 fm_wave+fm_index 时 FM 仍然生效', () => {
+  const { ctx } = render(`
+define_instrument(name="fm"){ fm_wave:"sine", fm_index:400 }
+sequence(name="s", instrument="fm"){ note("C4","4n") }
+`);
+  // FM 会额外建一个调制振荡器：单声部时应看到 2 个振荡器
+  const oscs = ctx._nodes.filter((n) => n.kind === 'OscillatorNode');
+  assert(oscs.length >= 2, `应建出 FM 调制振荡器，实际只有 ${oscs.length} 个`);
+});
+
+/**
+ * fm_index 为 0 或缺失时不该建调制振荡器：增益恒为 0，纯属浪费。
+ */
+check('无 fm_index 时不建多余的 FM 振荡器', () => {
+  const { ctx } = render(`
+define_instrument(name="fm"){ fm_wave:"sine" }
+sequence(name="s", instrument="fm"){ note("C4","4n") }
+`);
+  const oscs = ctx._nodes.filter((n) => n.kind === 'OscillatorNode');
+  eq(oscs.length, 1, 'fm_index 缺省时不应创建调制振荡器');
+});
+
+/**
+ * 噪声波形没有振荡器，谐波无处可挂 —— 必须报错而不是安静地按纯噪声发声。
+ */
+check('噪声波形配 harmonics 报错', () => {
+  const e = lineOfError(`define_instrument(name="n"){ wave:"white_noise", harmonics:[1,0.5] }
+sequence(name="s", instrument="n"){ note("C4","4n") }`);
+  assert(e && /harmonics/.test(e.message), `应报 harmonics 不可用: ${e && e.message}`);
+});
+
+/**
+ * `filter(start=...)` 是扫频起始**时刻**，不能被当成"起始频率"的别名。
+ *
+ * 别名表里曾写着 `start: 'from'`，而 start 本身就是 filter 的正式参数：
+ * `filter(start=1, to=4000, duration=2)` 会被改写成 `from=1`，
+ * 用户本意"第 1 秒开始扫"，得到的却是"从 1Hz 扫到 4000Hz"。
+ */
+check('filter 的 start= 保持"起始时刻"语义', () => {
+  const r = parse(`
+sequence(name="s"){ note("C4","2n") }
+effect_chain { filter(kind="lowpass", start=1, to=4000, duration=2) }
+`);
+  const fx = r.effects[0];
+  eq(fx.start, 1, 'start 应是起始时刻');
+  eq(fx.from, 200, 'from 应保持默认值，不被 start 覆盖');
+});
+
+/**
+ * LFO 的 swell 终点不能早于 ramp 终点。
+ *
+ * `ramp` 比音符时值长时（ramp=2 配 4n 音符），淡入写在 t+2、增强写在 t+0.5，
+ * 两个自动化事件时间倒流 —— 浏览器对乱序自动化事件的处理是未定义的。
+ */
+check('LFO ramp 长于音符时值不产生时间倒流', () => {
+  const { ctx } = render(`
+define_instrument(name="a"){ lfo:"sine(freq=5, amount=10, target=frequency, ramp=2, swell=true)" }
+sequence(name="s", instrument="a"){ note("C4","4n") }
+`);
+  const problems = auditTimelines(ctx);
+  assert(problems.length === 0, `时间线异常:\n  ${problems.join('\n  ')}`);
+});
+
+/**
+ * 包络 delay 必须计入尾音长度。
+ *
+ * chainStop 曾写成 `duration + release + 0.5`，漏掉 envelope.delay；
+ * 而合成器实际把振荡器停在 `delay + duration + release + 0.1`。
+ * delay 可达数秒（"吹奏前的气息准备"），于是长 delay 的音色在效果链 LFO
+ * 已经停摆之后还在发声 —— 调制类效果（chorus/phaser/tremolo）中途冻结。
+ */
+check('包络 delay 计入效果链 LFO 停止时刻', () => {
+  const ctx = new MockBaseContext(44100);
+  const { events } = compile(`
+define_instrument(name="a"){ envelope: "adsr(0.01, 0.1, 0.7, 0.2, delay=3)" }
+sequence(name="s", instrument="a"){ note("C4","4n") }
+`);
+  const synth = new AudioSynthesizer();
+  const fx = [{ type: 'chorus', rate: 1, depth: 3, mix: 0.5 }];
+  synth.scheduleEvents(ctx, ctx.createGain(), events, fx, () => {});
+  const lfos = ctx._nodes.filter(
+    (n) => n.kind === 'OscillatorNode' && n.stopTime !== null && n.stopTime > 0
+  );
+  assert(lfos.length > 0, '应建出效果链 LFO');
+  const maxStop = Math.max(...lfos.map((n) => n.stopTime));
+  assert(maxStop >= 3, `delay=3 时 LFO 不应在 3 秒前停止，实际 ${maxStop}`);
+});
+
 /* ========================================================================== */
 /*                    8. 提示词与引擎一致性（防止教错语法）                     */
 /* ========================================================================== */
