@@ -2415,15 +2415,18 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse, is
         showFeedback(`画面: ${OBJECT_FIT_LABEL[nextFit]}`);
     };
 
-    // 「这个源没有尽头」：duration 保留 Infinity 语义（见 usePlay 的 durationchange），
-    // 元数据未就绪时是 0，所以不会把 VOD 误判成 LIVE。
-    // 不按 mediaType 判：嗅探器会把 fMP4 直播标成 video，按类型判会让它既拿不到
-    // LIVE 标记、又留着一条永远拖不动的进度条（ProgressBar 的 validDuration 为 0）。
+    // 「这个源没有尽头」：只看元素自己报出的 duration。
+    //
+    // durationchange 把 NaN 归零、Infinity 原样保留（见 usePlay），所以
+    // state.duration 的取值是 [0, +∞]，`=== Infinity` 就是唯一的「无限」情形 ——
+    // 元数据未就绪时是 0，不会把 VOD 误判成 LIVE。
+    // 不再叠 mediaType === 'stream'：那是把「源有没有尽头」这个事实又存了一份，
+    // 而它只由元素回答。多这一层只会漏判（同一个直播地址被标成 video 时就拿不到
+    // LIVE 标记，进度条也照样是条拖不动的死条）。
     const isLive = state.duration === Infinity;
     // 快进/快退按钮的可用性：判据与 seek 的拒绝条件逐字相同（有限时长且为正）。
     // 不按 mediaType 判 —— seek 只看元素真实的 duration，两处各判一份必然漂移成
     // 「按钮亮着但点了没反应」。（键盘 J/L 与 ←/→ 走 seek 的返回值，无需另判。）
-    // isLive 就是 duration === Infinity，已被 Number.isFinite 排除，不再重复判。
     const seekable = !pagedKind && playable && Number.isFinite(state.duration) && state.duration > 0;
 
     // 音频视图外圈进度环的填充比例（0~1）。duration 为 Infinity/NaN 时按 0 处理，

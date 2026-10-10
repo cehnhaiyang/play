@@ -134,13 +134,15 @@ export const usePlay = (): UsePlayReturn => {
      * 播放列表的**唯一写入点**：ref 与 state 同一次写入。
      *
      * 此前只用 setPlaylist 写 state，另挂一个 effect 把 state 回填进 ref —— 同一个
-     * 事实存了两处，而 ref 恒定落后 state 一个提交。所有增删又都是「读 ref → 算
-     * 新表 → 覆盖写」，于是同一轮里连着改两次时，第二次读到的是旧表、把第一次的
-     * 结果整个盖掉（导入时「散文件 + 解包画廊 + 多本绘本」都是连着调好几次）。
-     * 目前那几处调用之间恰好都有 await、React 来得及冲刷，才没暴露出来 ——
-     * 这正是「靠时序侥幸才对」：少一个 await 就丢数据，且不报任何错。
+     * 事实存了两处，而 effect 要等提交之后才跑，ref 恒落后 state 一个提交。
+     * 所有增删又都是「读 ref → 算新表 → 覆盖写」：只要同一轮里连着改两次，
+     * 第二次读到旧表就会把第一次的结果整个盖掉（导入流程里「散文件 + 解包画廊 +
+     * 多本绘本」正是连着调好几次），且不报任何错。
      *
-     * 让 ref 成为写穿缓存后，它永远等于最后一次提交值，谁先跑完都不影响结果。
+     * 是否真的丢数据取决于两次调用之间 React 有没有来得及冲刷 —— 那不是调用处
+     * 能保证的事（await 一个纯微任务的函数就不足以让它冲刷），属于「靠时序侥幸」。
+     * 让 ref 成为写穿缓存后它永远等于最后一次提交值，与冲刷时机无关。
+     *
      * 仍然不用 setState 的函数式 updater：索引计算夹着 revokeVideoFile 这类副作用，
      * 塞进 updater 会在 StrictMode 下重放。
      *
@@ -253,7 +255,7 @@ export const usePlay = (): UsePlayReturn => {
      * 表现为「切走了还在后台下」。
      *
      * 参数是**元素本身**而不是去读 videoRef：React 在提交阶段就把 ref 摘掉了，
-     * 而 effect 的清理函数要等到提交之后才跑，那时 `videoRef.current` 早已指向
+     * 而 effect 的清理函数要等提交之后才跑，那时 `videoRef.current` 早已指向
      * 新元素或 null。凡是「释放我刚才配置的那个元素」都必须把元素握在手里，
      * 回头去 ref 里取只会拿到别人。
      */
@@ -295,7 +297,6 @@ export const usePlay = (): UsePlayReturn => {
         detachElement(videoRef.current);
         setState(prev => ({ ...prev, isPlaying: false, isBuffering: false, currentTime: 0, duration: 0 }));
     }, [destroyHls, detachElement]);
-
 
     useEffect(() => () => destroyHls(), [destroyHls]);
 
@@ -1101,14 +1102,17 @@ export const usePlay = (): UsePlayReturn => {
          *
          * 音视频分支与图集/文档分支互斥，切到后者时 React 会把 <video> 整个卸载。
          * 摘除的媒体元素**不会自己断开**：规范只要求它暂停，src 与资源加载都还在，
-         * 于是后台继续拉流、继续占解码器，直到被回收。而真正能中止它的是
+         * 于是后台继续拉流、继续占解码器，直到被回收。真正能中止它的是
          * `removeAttribute('src') + load()` —— 偏偏这时 videoRef.current 已被 React
-         * 在提交阶段置空，回头去 ref 里取只会拿到 null：原先各分支里的解绑在
-         * 「视频切图片」这条路径上一直是空转的。只有把元素握在闭包里才够得着它。
+         * 在提交阶段置空（ref 摘除早于 passive effect 清理），回头去 ref 里取只会
+         * 拿到 null：原先各分支里的解绑在「视频切图片」这条路径上一直是空转的。
+         * 只有把元素握在闭包里才够得着它。
          *
          * 按「元素是否还是当前元素」筛一道：video→video 换源时 React 复用同一个
-         * 元素，此时若也解绑，清空 src 触发的 error 会落到紧随其后的新源上，
-         * 给每次换片都弹一条假的「媒体加载失败」。
+         * 元素，这时解绑是多余的 —— 紧接着 effect 体就会赋新 src 并 load()，
+         * 而 load() 本身会中止上一次的资源获取。多这一次 pause + 清 src 还会让
+         * 元素短暂进入无源状态（其 error 事件是否来得及落到新源上未实测，
+         * 但这条路径不需要冒这个险）。
          */
         return () => {
             if (videoRef.current !== video) detachElement(video);
