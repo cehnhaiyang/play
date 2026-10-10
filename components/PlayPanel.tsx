@@ -1126,9 +1126,9 @@ const StoryGenerator: React.FC<StoryGeneratorProps> = ({ onComplete, onClose }) 
                                     placeholder="例如：用冷峻的硬汉侦探口吻叙述，短句为主，带黑色幽默……（留空则用默认风格）"
                                     className="mt-2 w-full px-3 py-2 bg-black/40 border border-white/10 rounded-xl text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-teal-500/50 resize-y disabled:opacity-50 transition"
                                 />
-                                {/* 该描述会顶掉默认人设（非叠加）；忠实度与不回避要求始终生效 */}
+                                {/* 该描述会顶掉默认人设（非叠加）；忠实度与具体性要求始终生效 */}
                                 <p className="mt-1.5 text-[10.5px] text-slate-500 leading-4">
-                                    这段描述会作为系统人设发送，替代默认的故事风格；画面忠实度与不回避的要求始终生效。
+                                    这段描述会作为系统人设发送，替代默认的故事风格；画面忠实度与"用具体场景写、不用概括句搪塞"的要求始终生效。
                                 </p>
                             </>
                         )}

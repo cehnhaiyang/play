@@ -4009,7 +4009,7 @@ interface SidebarPrefs { open: boolean; width: number; fullscreen: boolean }
  * 文案写在这里而不是散在 JSX 里，将来加「导出为 JSON」时只动这一个数组。
  */
 const AGENT_EXPORT_ITEMS: { label: string; hint: string; includeReasoning: boolean }[] = [
-    { label: '带思考导出', hint: '推理过程一并写入（折叠展示）', includeReasoning: true },
+    { label: '带思考导出', hint: '推理过程一并写入', includeReasoning: true },
     { label: '不带思考导出', hint: '只留结论、脚本与返回值', includeReasoning: false },
 ];
 
@@ -4804,21 +4804,21 @@ const AgentSidebar: React.FC<{
                                     onScroll={handleScroll}
                                     className="custom-scrollbar min-h-0 flex-1 space-y-2.5 overflow-y-auto py-2.5 pr-1"
                                 >
-                                {messages.length === 0 ? (
-                                    <EmptyHint onPick={(text) => setInput((prev) => (prev.trim() ? prev : text))} />
-                                ) : (
-                                    messages.map((message) => (
-                                        <MessageRow
-                                            key={message.id}
-                                            message={message}
-                                            expanded={expanded.has(message.id)}
-                                            onToggle={() => toggleExpand(message.id)}
-                                            canEdit={canEdit}
-                                            onRewind={() => handleRewind(message.id)}
-                                            onRemove={() => actions.removeMessage(message.id)}
-                                        />
-                                    ))
-                                )}
+                                    {messages.length === 0 ? (
+                                        <EmptyHint onPick={(text) => setInput((prev) => (prev.trim() ? prev : text))} />
+                                    ) : (
+                                        messages.map((message) => (
+                                            <MessageRow
+                                                key={message.id}
+                                                message={message}
+                                                expanded={expanded.has(message.id)}
+                                                onToggle={() => toggleExpand(message.id)}
+                                                canEdit={canEdit}
+                                                onRewind={() => handleRewind(message.id)}
+                                                onRemove={() => actions.removeMessage(message.id)}
+                                            />
+                                        ))
+                                    )}
 
                                     {busy && (
                                         <div className="flex items-center gap-2 px-1 text-[10px] text-slate-500">
