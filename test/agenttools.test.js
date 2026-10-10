@@ -1,15 +1,27 @@
 'use strict';
 /**
- * Agent 新工具（tamper / storage / tokens）的派发回归。
+ * Agent 引擎（工具派发 + 主循环 + 上下文重建）的回归。
  *
- * 被测的是 useAgent 里真实的 dispatchTool —— 用 react 的 shim 把 hook 跑起来，
- * 不重写副本。测试打在三处容易错的地方：
+ * ## 被测对象变了
+ *
+ * 原先被测的是 `app/renderer/hooks/useAgent.ts` 里的 React hook，测试只能靠
+ * 切源码字符串 + React shim 把它跑起来。引擎搬到 `extension/src/agent/` 之后
+ * 它是一个**普通模块**：`AgentEngine` 接收宿主、存储、模型三个端口，因此
+ * 这里直接 `require` 编译产物，塞假端口进去跑真代码。
+ *
+ * 这不只是省事。切源码字符串的断言有一个固有的坏处：**它对格式敏感**。
+ * 把 `const dispatchTool = useCallback(async (` 改成换行写法，测试就红了，
+ * 而产品没有任何变化 —— 那种红会训练人忽略它。
+ *
+ * ## 仍然保留的源码断言
+ *
+ * 有一类性质**只能**从源码上看出来，跑不出来：比如"每一处定稿点都带了推理"。
+ * 那种断言留在原处，只是路径指向新的引擎文件。
+ *
+ * 打在三处容易错的地方：
  *   1. 部分更新：set 只传一类规则时，其余两类必须原样保留；
  *   2. 落盘边界：模型改规则走 applyRules（不落盘），不是 saveRules；
  *   3. tokens find 的 key 必须能写回去（cookie 用 cookie 名，不是数组下标）。
- *
- * 编译产物不含 hooks/（test tsconfig 只 include services/const/meta），
- * 所以这里用 stripTypeScriptTypes 直接求值源码 —— 与篡改引擎测试同一套办法。
  */
 const fs = require('fs');
 const path = require('path');
@@ -19,155 +31,91 @@ const ROOT = path.join(__dirname, '..');
 /**
  * 被测源码路径。
  *
- * 可用 AGENT_SRC 覆盖 —— 变异测试靠它指向一份**改坏的副本**，
+ * 仍然需要它，因为有一类性质**只能从源码上看出来**（见文件头"仍然保留的源码断言"）。
+ * 引擎跑起来之后能测的是行为；"每一处定稿点都带了推理"这种**覆盖面**问题
+ * 跑不出来 —— 漏掉一处只会在那种结束方式下才显形。
+ *
+ * 可用 `AGENT_SRC` 覆盖：变异测试靠它指向一份改坏的副本，
  * 从而在不碰产品文件的前提下验证断言真的能失败。
  */
-const SRC_PATH = process.env.AGENT_SRC || path.join(ROOT, 'app', 'renderer', 'hooks', 'useAgent.ts');
+const SRC_PATH = process.env.AGENT_SRC || path.join(ROOT, 'extension', 'src', 'agent', 'engine.ts');
+
 /**
- * 源码统一成 LF 再切块。
+ * 全部引擎源码（按文件），供"某一处必须/不得出现某写法"这类断言使用。
  *
- * 切片标记里带 `\n`（如 `'});\n};'`），而仓库里的文件是 CRLF 检出的 ——
- * 不归一的话 `indexOf` 永远找不到结尾，整套 dispatch 用例会以
- * "找不到 xxx 的结尾" 集体失败。那是换行符的差异，不是产品代码的问题。
- * 归一放在读取处（而不是把标记改成 CRLF），换行风格再变也不会再踩。
+ * 与单个 SRC_PATH 的区别：引擎已经拆成六个文件，断言写在哪个文件里是**实现细节**。
+ * 只读 engine.ts 会让"推理不进上下文"这种跨文件的约束漏测（transcript 那部分
+ * 在 transcript.ts 里）。所以覆盖面断言一律扫全部文件。
  */
+const AGENT_DIR = path.join(ROOT, 'extension', 'src', 'agent');
+const AGENT_SOURCES = fs.readdirSync(AGENT_DIR)
+    .filter((f) => f.endsWith('.ts'))
+    .map((f) => ({
+        file: f,
+        text: fs.readFileSync(path.join(AGENT_DIR, f), 'utf8').replace(/\r\n/g, '\n'),
+    }));
+const ALL_SRC = AGENT_SOURCES.map((s) => s.text).join('\n');
+
 const SRC = fs.readFileSync(SRC_PATH, 'utf8').replace(/\r\n/g, '\n');
 
-/** 用正则切出 dispatchTool 的完整函数体（含结尾的依赖数组） */
-const grabDispatch = () => {
-    const start = SRC.indexOf('    const dispatchTool = useCallback(async (');
-    if (start < 0) throw new Error('useAgent.ts 里找不到 dispatchTool');
-    const endMarker = '    }, [deps.getActiveWebview, execActive, waitForPageReady]);';
-    const end = SRC.indexOf(endMarker, start);
-    if (end < 0) throw new Error('找不到 dispatchTool 的结尾');
-    return SRC.slice(start, end + endMarker.length);
-};
-
-/** 同样切出三个归一化 helper */
-const grabBlock = (marker, endMarker) => {
-    const start = SRC.indexOf(marker);
-    if (start < 0) throw new Error(`找不到 ${marker}`);
-    const end = SRC.indexOf(endMarker, start);
-    if (end < 0) throw new Error(`找不到 ${marker} 的结尾`);
-    return SRC.slice(start, end + endMarker.length);
-};
-
-const strip = (ts) => require('module').stripTypeScriptTypes(ts, { mode: 'strip' });
-
 /**
- * useAgent 从 shared/core 导入的三个 JWT 函数。
- * 直接用**编译产物**（build/shared/core/index.js），不重写副本 ——
- * 否则这里测的是我对 JWT 的理解，而不是产品实现。
- */
-const CONST = require('./build/shared/core/index.js');
-
-/**
- * 抽 keepReasoning 求值（含它依赖的 truncateBytes / byteLength）。
+ * 引擎与它的纯函数，直接 require **编译产物**。
  *
- * 这三个都是模块级纯函数，可以直接切片求值 —— 比走 hook 便宜得多，
- * 而"推理有没有被保留"这件事本来就只取决于它们。
+ * 这是本次搬迁最大的收益：不再切源码字符串、不再需要 React shim。
+ * 切字符串的断言对格式敏感 —— 换个换行写法就红，而产品没变，
+ * 那种红会训练人忽略它。
  */
-const loadKeepReasoning = () => {
-    const grab = (marker, endMarker) => {
-        const start = SRC.indexOf(marker);
-        if (start < 0) throw new Error(`useAgent.ts 里找不到 ${marker}`);
-        const end = SRC.indexOf(endMarker, start);
-        if (end < 0) throw new Error(`找不到 ${marker} 的结尾`);
-        return SRC.slice(start, end + endMarker.length);
-    };
+const AGENT = require('./build/extension/src/agent/engine.js');
+const TRANSCRIPT = require('./build/extension/src/agent/transcript.js');
+const PROMPT = require('./build/extension/src/agent/prompt.js');
+const TEXT = require('./build/extension/src/agent/text.js');
+const PARSE = require('./build/extension/src/agent/parse.js');
+const TOOLS = require('./build/extension/src/agent/tools.js');
 
-    const code = [
-        'const REASONING_LIMIT_BYTES = 32768;',
-        grab('const byteLength = (text: string): number =>', ';'),
-        grab('const truncateBytes = (', '\n};'),
-        grab('export const keepReasoning = (raw: string): string | undefined =>', '\n};'),
-    ].join('\n');
+const keepReasoning = TEXT.keepReasoning;
+const {
+    buildTranscript,
+    insertAfterId,
+    COMPACT_PREFIX,
+    PROTOCOL_ERROR_LABEL,
+    protocolErrorObservation,
+    AUTO_RUN_PREFIX,
+    MANUAL_RUN_PREFIX,
+    environmentEventObservation,
+    toolObservation,
+} = TRANSCRIPT;
+const { CONTEXT_LIMIT_TOKENS, SCRIPTS_STORE_MAX } = PROMPT;
 
-    const js = strip(code).replace('export const keepReasoning', 'const keepReasoning');
-    return new Function(`${js}\nreturn { keepReasoning };`)().keepReasoning;
-};
-
-const keepReasoning = loadKeepReasoning();
-
-/**
- * 抽 buildTranscript 求值（含它依赖的 takeRecentRoundGroups / splitRounds 等）。
- *
- * 同样切片求值而不是走 hook：这个函数是**纯的**，而它要防的是
- * 「模型看不到上一轮」这种整轮失忆 —— 直接对输入输出下断言最省事也最硬。
- *
- * 常量从源码里抓真实值，不在测试里重写一遍：重写的话产品改了门槛、
- * 测试却仍按旧值断言，行为变化就漏过去了。
- */
-const loadBuildTranscript = () => {
-    const grab = (marker, endMarker) => {
-        const start = SRC.indexOf(marker);
-        if (start < 0) throw new Error(`useAgent.ts 里找不到 ${marker}`);
-        const end = SRC.indexOf(endMarker, start);
-        if (end < 0) throw new Error(`找不到 ${marker} 的结尾`);
-        return SRC.slice(start, end + endMarker.length);
-    };
-
-    const code = [
-        // 上下文硬门槛：断言"到门槛就拦住"时要用真实值，不能在测试里重写。
-        // 它是 export const（界面也要用），所以不能走 constOf。
-        SRC.match(/export const CONTEXT_LIMIT_TOKENS = [0-9_]+;/)[0].replace('export ', ''),
-        // 压缩摘要的前缀：buildTranscript 用它拼摘要消息，测试要按同一个
-        // 字面量断言，不能在这里重写一份
-        SRC.match(/const COMPACT_PREFIX = '[^']*';/)[0],
-        // 这四项是 buildTranscript 的直接依赖。
-        // takeRecentRoundGroups / byteLength / truncateBytes 都不再需要：
-        // buildTranscript 已不裁剪，测试里也不该抽用不到的代码进来
-        grab('const splitRounds = (', '\n};'),
-        // 协议错误那条记录的 label 与回灌文案：roundToMessages 靠它们认出
-        // "这是一次协议错误"并吐回与当场逐字相同的措辞。缺一个就是求值期
-        // ReferenceError —— 那说明切片清单没跟上产品代码，不是产品的问题
-        grab('const PROTOCOL_ERROR_LABEL = ', ';'),
-        grab('const protocolErrorObservation = (reply: string): string =>', ';'),
-        // 环境事件（自动 / 手动执行）的文案：前缀常量与产出函数
-        grab('const AUTO_RUN_PREFIX = ', ';'),
-        grab('const MANUAL_RUN_PREFIX = ', ';'),
-        grab('const scriptNameOf = (message: AgentMessage): string =>', '\n};'),
-        grab('const environmentEventObservation = (message: AgentMessage): string =>', '\n};'),
-        // 工具观察的措辞：send 与 roundToMessages 共用它，两处必须逐字一致
-        grab('const toolObservation = (label: string, result: string, ok: boolean): string =>', '\n};'),
-        grab('const roundToMessages = (', '\n};'),
-        grab('const splitByCompaction = (', '\n};'),
-        grab('const buildTranscript = (', '\n};'),
-        // insertAfterId 单独测（压缩分界线的插入位置），与 buildTranscript 无依赖关系
-        grab('const insertAfterId = (', '\n};'),
-    ].join('\n');
-
-    const js = strip(code);
-    return new Function(`${js}\nreturn { buildTranscript, insertAfterId, COMPACT_PREFIX, CONTEXT_LIMIT_TOKENS };`)();
-};
-
-const { buildTranscript, insertAfterId, COMPACT_PREFIX, CONTEXT_LIMIT_TOKENS } = loadBuildTranscript();
+/** buildDispatch 的默认页面地址。传 false 才表示没有可用页面 */
+const DEFAULT_TAB_URL = 'https://example.com/';
 
 /* -------------------------------------------------------------------------- */
-/*                        端到端 harness：真跑 useAgent                        */
+/*                     端到端 harness：真跑 AgentEngine                        */
 /* -------------------------------------------------------------------------- */
-
 /**
- * 把真实的 useAgent 求值出来并挂到一套最小 React shim 上。
+ * 造一个真跑的 AgentEngine。
  *
- * 为什么要走这一步：跨轮上下文的关键一环是 `messagesRef` 与 messages 的同步，
- * 它既不在 buildTranscript 里（纯函数测不到），也不是任何一条静态断言能覆盖的
- * —— 漏掉那个 useEffect 时，buildTranscript 永远收到空数组，而纯函数用例全绿。
+ * 与应用侧那份 hook 版 harness 的差别：**不再需要 React shim**。引擎现在接收
+ * 宿主、存储、模型三个端口，测试塞假端口进去就能把整个主循环跑起来 ——
+ * 而这正是"引擎不做成 hook"这个决定换来的东西之一。
  *
- * 不用真 React：测试套件是零依赖的 node 脚本（连 react 都没装进 dependencies），
- * 而这里需要的只是"重渲染 + effect + 依赖比较"这三件事。
+ * ## 为什么是 async
+ *
+ * 引擎构造后必须 await `hydrate()`（它要从存储读回历史与脚本，那是异步的）。
+ * 不 await 的话第一次 `state()` 看到的是空列表，而所有"恢复历史"的用例都会
+ * 悄悄退化成在测空状态 —— 那比直接报错难查得多。
  */
-const buildAgentHarness = (options = {}) => {
+const buildAgentHarness = async (options = {}) => {
     const chats = [];
     const store = {};
     // 播种已保存脚本：走真实的落盘 key（agent-scripts），让 normalizeScript /
     // 上限截断这些加载路径也参与验证，而不是手搓一份"已经合法"的 state。
     if (options.seedScripts) store['agent-scripts'] = options.seedScripts;
+
     /**
      * AiService 的**编译产物**。
      *
-     * 用在两处：给 hook 注入真实的 estimatePromptTokens（它算上下文占用），
-     * 以及让 chat 桩的估算回落与产品同源 —— 自己重写一份估算，
+     * 让 chat 桩的估算回落与产品同源 —— 自己重写一份估算，
      * 测的就是"我对估算的理解"而不是产品实现。
      */
     const AI = require('./build/shared/ai/AiService.js');
@@ -176,7 +124,7 @@ const buildAgentHarness = (options = {}) => {
     // 后者会让第 2 轮之后再也拿不到工具调用，造不出"轮内有工具消息"的场景。
     let roundCalls = 0;
 
-    const chat = async (opts) => {
+    const chatImpl = async (opts) => {
         chats.push(opts.messages.map((m) => ({ role: m.role, content: m.content })));
         roundCalls += 1;
         /**
@@ -185,8 +133,6 @@ const buildAgentHarness = (options = {}) => {
          *
          * 不能只在 noUsage 为假时回调 —— 那会让"服务端不回 usage"这条回落路径
          * 在测试里根本走不到，而它恰恰是本地代理环境下最常见的形态。
-         * 估算也不在这里重写：直接调编译产物里的 estimatePromptTokens，
-         * 与产品同一份实现。
          */
         const replyFor = () => {
             if (typeof opts.system === 'string' && opts.system.includes('对话压缩器')) {
@@ -208,7 +154,7 @@ const buildAgentHarness = (options = {}) => {
                 }
             }
             if (options.toolCall && roundCalls === 1) {
-                // toolCase: 'upper' 让模型回大写工具名，用来验证解析侧的严格匹配
+                // toolCase: 大写让模型回大写工具名，用来验证解析侧的严格匹配
                 // （全小写协议下大写即写错，必须落到未知工具）
                 const toolName = options.toolCase === 'upper' ? 'JS' : 'js';
                 return JSON.stringify({ thought: '取数', tool: toolName, args: { code: 'return 1;' } });
@@ -234,268 +180,214 @@ const buildAgentHarness = (options = {}) => {
         return reply;
     };
 
-    const persist = {
-        loadJSON: (k, d) => (k in store ? store[k] : d),
-        saveJSON: (k, v) => { store[k] = v; return true; },
+    /**
+     * 内存存储。
+     *
+     * save 的函数体在调用那一刻**同步**执行完（没有 await），所以引擎那句
+     * "落盘不 await"的写法在这里表现为立即生效 —— 这让 setMessages 能靠
+     * 重新 hydrate 来摆状态，而不必给产品代码开一个测试专用的写入口。
+     */
+    const storage = {
+        load: async (k, d) => (k in store ? store[k] : d),
+        save: async (k, v) => { store[k] = v; },
     };
-
-    const CONST = require('./build/shared/core/index.js');
-    const fakeWindow = { setTimeout: () => 1, clearTimeout: () => {} };
-
-    // 去掉 import（类型导入 strip 后已消失）与 export；
-    // 具名导入原本来自多个模块，删掉 import 后从注入口解构回来。
-    const body = [
-        'const { useState, useRef, useCallback, useMemo, useEffect } = React;',
-        'const { chat, estimatePromptTokens } = AiService;',
-        'const { buildCookieKeys, collectDroppedRules, decodeJwt, findCookieByKey, generateId, pickJwtCandidates, rewriteJwtPayload } = Const;',
-        // loadJSON / saveJSON 用测试自己的内存桩顶掉，免得落到真的 localStorage
-        'const { loadJSON, saveJSON } = persist;',
-    ].join('\n') + '\n'
-        + strip(SRC)
-            .replace(/^import[\s\S]*?from\s+'[^']*';\s*$/gm, '')
-            .replace(/^export /gm, '');
-
-    const makeAgent = new Function(
-        'React', 'AiService', 'Const', 'persist', 'window', 'TextEncoder',
-        `${body}\nreturn useAgent;`,
-    );
-
-    /* --- 最小 React：只有 hook 槽、依赖比较、重渲染与 effect --- */
-
-    const sameDeps = (a, b) => Array.isArray(a) && Array.isArray(b)
-        && a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
-
-    const hooks = [];
-    let idx = 0;
-    let effects = [];
-    let queued = false;
-    let current = null;
-    let result;
-    // 首个 useState 就是 messages，记下它的 setter 供测试直接摆状态
-    let messagesSetter = null;
-
-    const R = {
-        useState(init) {
-            const i = idx++;
-            if (!(i in hooks)) hooks[i] = { v: typeof init === 'function' ? init() : init };
-            const slot = hooks[i];
-            const setter = (next) => {
-                const val = typeof next === 'function' ? next(slot.v) : next;
-                if (Object.is(val, slot.v)) return;
-                slot.v = val;
-                queued = true;
-            };
-            if (i === 0 && !messagesSetter) messagesSetter = setter;
-            return [slot.v, setter];
-        },
-        useRef(init) {
-            const i = idx++;
-            if (!(i in hooks)) hooks[i] = { current: init };
-            return hooks[i];
-        },
-        useCallback(fn, deps) {
-            const i = idx++;
-            const prev = hooks[i];
-            if (prev && sameDeps(prev.deps, deps)) return prev.fn;
-            hooks[i] = { fn, deps };
-            return fn;
-        },
-        useMemo(fn, deps) {
-            const i = idx++;
-            const prev = hooks[i];
-            if (prev && sameDeps(prev.deps, deps)) return prev.v;
-            const v = fn();
-            hooks[i] = { v, deps };
-            return v;
-        },
-        useEffect(fn, deps) {
-            const i = idx++;
-            const prev = hooks[i];
-            if (prev && sameDeps(prev.deps, deps)) return;
-            hooks[i] = { deps };
-            effects.push(fn);
-        },
-    };
-
-    // useAgent 在模块加载时就解构 React，所以 Proxy 必须返回稳定的转发函数，
-    // 真正的 hook 槽等调用那一刻再从 current 上取。
-    const ReactProxy = new Proxy({}, {
-        get: (_t, k) => (...args) => {
-            if (!current) throw new Error(`React.${String(k)} 在 harness 就绪前被调用`);
-            return current[k](...args);
-        },
-    });
-
-    // estimatePromptTokens 用**编译产物**（build/shared/ai/AiService.js），
-    // 与产品同源：hook 拿它算上下文占用，测试自己重写一份就测不到真实口径了
-    const factory = makeAgent(ReactProxy, { chat, estimatePromptTokens: AI.estimatePromptTokens }, CONST, persist, fakeWindow, TextEncoder);
 
     /**
-     * 假 webview。默认**有页面**，需要造"没有可用页面"的用例传 webview:false。
+     * 假宿主。默认**有页面**，需要造"没有可用页面"的用例传 webview: false。
      *
      * 默认必须有：没有页面时 js 一律返回 {error: 当前没有可用的页面}，
      * 于是所有依赖成功结果的用例都会悄悄退化成在测失败路径 ——
      * 而它们断言的是观察前缀、跨轮可见性这些与成败无关的性质，测错了也不知道。
      */
-    const fakeWebview = options.webview === false ? null : {
-        executeJavaScript: async (source) => {
-            // 复刻真实执行器的契约：脚本源码是包好的 IIFE，直接求值拿到返回值
+    const tabUrl = options.webviewUrl || 'https://example.com/';
+    const hasPage = options.webview !== false;
+    const ranCode = [];
+    const navigated = [];
+
+    /*
+     * 当前标签页可变，且记录 activeTab() 被问了几次。
+     *
+     * 这两样是给"执行前重新解析活动标签"那条断言用的：缓存 tabId 的写法在
+     * 单标签页的用例里完全看不出问题，只有切换之后才暴露。所以必须能切、
+     * 也必须能数。
+     */
+    let currentTabId = 1;
+    let activeTabCalls = 0;
+    let lastEvalTabId = null;
+
+    const host = {
+        activeTab: async () => {
+            activeTabCalls += 1;
+            return hasPage ? { id: currentTabId, url: tabUrl } : null;
+        },
+        evaluate: async (tabId, source) => {
+            /*
+             * 复刻真实执行器的契约：源码是包好的 IIFE，直接求值拿到返回值。
+             * 用 new Function 而不是 eval —— 与 debugger 的 Runtime.evaluate
+             * 同为"独立作用域求值"，能暴露依赖外部变量的写法。
+             */
+            lastEvalTabId = tabId;
+            ranCode.push(source);
             const value = await new Function(`return (${source})`)();
-            return typeof value === 'string' ? value : JSON.stringify(value);
+            return { value: typeof value === 'string' ? value : JSON.stringify(value), failed: false };
         },
-        getURL: () => options.webviewUrl || 'https://example.com/',
-        loadURL: async () => {},
-    };
-
-    const deps = {
-        getActiveWebview: () => fakeWebview,
+        navigate: async (_tabId, url) => { navigated.push(url); return { url, loaded: true }; },
         onPageReady: () => () => {},
+        readWebStorage: async () => {
+            // throwOnBridge：让宿主抛异常，用来测"工具内部异常"这条与
+            // "返回 error 字段"完全不同的失败路径。readWebStorage 是 storage get
+            // 与 tokens find 都要过的口，在这里抛能覆盖 dispatchTool 里
+            // **没有**自己 try/catch 的那一类调用。
+            if (options.throwOnBridge) throw new Error('页面宿主不可用');
+            return '{}';
+        },
+        writeWebStorage: async () => true,
+        removeWebStorage: async () => true,
+        getCookies: async () => [],
+        setCookie: async () => true,
+        removeCookie: async () => true,
         tamper: {
-            state: { interceptRules: [], requestRules: [], headerRules: [], cookies: [], local: {}, session: {} },
-            actions: {
-                applyRules() {}, saveRules: () => true,
-                getCookies: async () => [],
-                setCookie: async () => true, removeCookie: async () => true,
-                // throwOnBridge：让 preload 桥抛异常，用来测"工具内部异常"
-                // 这条与"返回 error 字段"完全不同的失败路径。
-                // getLocalStorage 是 storage get 与 tokens find 都要过的桥，
-                // 在这里抛能覆盖 dispatchTool 里**没有**自己 try/catch 的那一类调用。
-                getLocalStorage: async () => {
-                    if (options.throwOnBridge) throw new Error('preload 桥不可用');
-                    return '{}';
-                },
-                getSessionStorage: async () => '{}',
-                setLocalStorage: async () => true, setSessionStorage: async () => true,
-                removeLocalStorage: async () => true, removeSessionStorage: async () => true,
-            },
+            rules: { interceptRules: [], requestRules: [], headerRules: [] },
+            applyRules: () => {},
         },
     };
 
-    const render = () => {
-        idx = 0;
-        effects = [];
-        current = R;
-        result = factory(deps);
-        for (const fn of effects) fn();
-    };
-    // 把 setState 排下的重渲染跑完（React 里这会发生在下一次 commit）
-    const flush = () => {
-        let guard = 0;
-        while (queued && guard++ < 50) { queued = false; render(); }
-    };
-
-    render();
-    flush();
+    const snapshots = [];
+    const engine = new AGENT.AgentEngine({
+        host,
+        storage,
+        chat: { chat: chatImpl },
+        onDelta: () => {},
+        onSnapshot: (s) => snapshots.push(s),
+    });
+    await engine.hydrate();
 
     return {
         chats,
-        /** 当前状态。先 flush 再取：动作排下的 setState 要跑完才看得到结果 */
-        state: () => { flush(); return result; },
+        ranCode,
+        navigated,
+        engine,
+        /** 当前状态。引擎的快照是同步可取的（hydration 已经 await 过） */
+        state: () => engine.snapshot(),
+        /** activeTab() 被问了几次。用来证明引擎没有缓存标签页 */
+        activeTabCalls: () => activeTabCalls,
+        /** 最近一次页面执行落在哪个标签页 */
+        lastEvalTabId: () => lastEvalTabId,
+        /** 模拟用户切标签页 */
+        switchTab: (id) => { currentTabId = id; },
         async send(text) {
             roundCalls = 0;
-            await result.actions.send(text);
-            flush();
+            await engine.snapshot().actions.send(text);
         },
         /** 不 await 地发起一轮，用来观察"运行中"这个中间态 */
         sendPending(text) {
             roundCalls = 0;
-            const p = result.actions.send(text);
-            flush();
-            return p;
+            return engine.snapshot().actions.send(text);
         },
-        /** 直接改消息列表，用于构造删除 / 回退的起始状态 */
-        setMessages(list) {
-            messagesSetter(list);
-            flush();
+        /**
+         * 直接摆消息列表，用于构造删除 / 回退 / 超限的起始状态。
+         *
+         * 走**存储 + 重新 hydrate**而不是给引擎开一个写入口：hydrate 是真实存在
+         * 的代码路径（service worker 被回收后就是靠它恢复），所以这里测到的
+         * 是产品行为；加一个 setMessagesForTest() 则会让"恢复"这条路无人覆盖。
+         */
+        async setMessages(list) {
+            store['agent-messages'] = list;
+            await engine.hydrate();
         },
     };
 };
 
 /**
  * 造一个 dispatchTool。
- * tamper 是个可观测的假引擎：applyRules / saveRules 分别记账，
- * 这样"有没有越界落盘"是可断言的。
+ *
+ * tamper 是个可观测的假引擎：applyRules 记账，
+ * 这样"有没有越界落盘"是可断言的（引擎侧没有 saveRules 这个口）。
  */
-const buildDispatch = (tamperState, scripts = [], webviewUrl = null) => {
-    const helpers = [
-        grabBlock('const toRuleString = (value: unknown): string =>', "String(value));"),
-        grabBlock('const STRICT_NUMBER_RE = ', '/;'),
-        grabBlock('const toEngineValue = (value: unknown): string =>', '\n};'),
-        grabBlock('const normalizeFieldRules = (raw: unknown, label: string)', '});\n};'),
-        grabBlock('const normalizeHeaderRules = (raw: unknown): HeaderRule[] | string =>', '});\n};'),
-        grabBlock('const fieldRuleToProtocol = (rule: TamperRule): Record<string, unknown> =>', '\n};'),
-        grabBlock('const headerRuleToProtocol = (rule: HeaderRule): Record<string, unknown> =>', '\n});'),
-        grabBlock('const safeParseObject = (raw: string)', '\n};'),
-        grabBlock('const readWebviewUrl = (webview: WebviewElement): string =>', '\n};'),
-        // 异常 → 文案：dispatchTool 的每个 catch 都用它，漏注入会 ReferenceError
-        grabBlock('const errorText = (e: unknown): string =>', ';'),
-        // 未知 action / area 的统一错误文案也是产品代码的一环，
-        // 不抽出来就会 ReferenceError —— 那是脚手架的错，不是产品的错。
-        grabBlock('const unknownAreaError = (area: string): string =>', ';'),
-        grabBlock('const unknownActionError = (got: string, valid: string[]): string =>', '\n};'),
-        // cookie 定位也是产品代码里的一环，
-        // 必须原样抽出来测，不能在这里重写一份。
-        grabBlock('const cookieKeyError = (key: string): string =>', ';'),
-    ].join('\n');
+const buildDispatch = (tamperState, scripts = [], webviewUrl = DEFAULT_TAB_URL) => {
+    const calls = {
+        apply: 0, save: 0, setCookie: [], setLocal: [], setSession: [], removed: [],
+        ranCode: [], navigated: [],
+    };
 
-    const dispatch = grabDispatch();
-    const body = `
-${strip(helpers)}
-// dispatchTool 外面裹着 useCallback；这里只要那个函数本身
-const useCallback = (fn) => fn;
-// JWT 三个函数来自 const 的编译产物（见文件头说明）；collectDroppedRules 同理 ——
-// dispatchTool 里对"被跳过的规则"的判定必须与面板同源，不能在这里重写一份。
-// buildCookieKeys / findCookieByKey 是 cookie 唯一键（面板与 tokens 工具共用），
-// 漏注入会让 tokens find 直接抛 ReferenceError —— 那是测试脚手架的错，不是产品代码的。
-const { decodeJwt, pickJwtCandidates, rewriteJwtPayload, collectDroppedRules, buildCookieKeys, findCookieByKey } = __CONST__;
-const asString = (v) => (typeof v === 'string' ? v : '');
-const generateId = () => 'gen-' + Math.random().toString(36).slice(2, 8);
-const SCRIPTS_STORE_MAX = 3;
+    const tamper = JSON.parse(JSON.stringify(tamperState));
+    const tamperRef = {
+        current: {
+            rules: {
+                interceptRules: tamper.intercept,
+                requestRules: tamper.request,
+                headerRules: tamper.headers,
+            },
+            applyRules: (i, r, h) => {
+                calls.apply++;
+                tamperRef.current.rules = { interceptRules: i, requestRules: r, headerRules: h };
+            },
+        },
+    };
 
-const calls = {
-  apply: 0, save: 0, setCookie: [], setLocal: [], setSession: [], removed: [],
-  ranCode: [], navigated: [],
-};
-const tamper = ${JSON.stringify(tamperState)};
-const tamperRef = {
-  current: {
-    state: { interceptRules: tamper.intercept, requestRules: tamper.request, headerRules: tamper.headers },
-    actions: {
-      applyRules: (i, r, h) => { calls.apply++; tamperRef.current.state = { interceptRules: i, requestRules: r, headerRules: h }; },
-      saveRules: (i, r, h) => { calls.save++; return true; },
-      getCookies: async () => tamper.cookies,
-      setCookie: async (c) => { calls.setCookie.push(c); return true; },
-      removeCookie: async (n) => { calls.removed.push(n); return true; },
-      getLocalStorage: async () => JSON.stringify(tamper.local),
-      getSessionStorage: async () => JSON.stringify(tamper.session),
-      setLocalStorage: async (k, v) => { calls.setLocal.push([k, v]); return true; },
-      setSessionStorage: async (k, v) => { calls.setSession.push([k, v]); return true; },
-      removeLocalStorage: async (k) => { calls.removed.push('local:' + k); return true; },
-      removeSessionStorage: async (k) => { calls.removed.push('session:' + k); return true; },
-    },
-  },
-};
-const deps = { getActiveWebview: () => null };
-const __WEBVIEW_URL__ = ${JSON.stringify(webviewUrl)};
-// 需要页面的用例传 webviewUrl 进来：桩从这里读地址、导航记进 calls.navigated。
-// 传整个 webview 对象不行 —— 下面这段 body 是 new Function 的字符串作用域，
-// 外部闭包变量穿不进去，只能穿可 JSON 序列化的配置。
-if (__WEBVIEW_URL__) {
-  deps.getActiveWebview = () => ({
-    getURL: () => __WEBVIEW_URL__,
-    loadURL: async (u) => { calls.navigated.push(u); },
-  });
-}
-// 记下真正跑过的代码，好断言 R 确实把 code 交给了执行器
-const execActive = async (code) => { calls.ranCode.push(code); return '{"ok":true}'; };
-const waitForPageReady = async () => true;
-const scriptsRef = { current: ${JSON.stringify(scripts)} };
-const setScripts = (fn) => { scriptsRef.current = fn(scriptsRef.current); };
+    /**
+     * 脚本清单。
+     *
+     * 换引用而不是原地改：与引擎里 scriptStore() 的实现同一形状，
+     * 于是 scriptsRef.current 永远是最新那份，断言直接看它即可。
+     */
+    const scriptsRef = { current: scripts.slice() };
+    const scriptStore = {
+        list: () => scriptsRef.current,
+        add: (s) => { scriptsRef.current = [...scriptsRef.current, s]; },
+        update: (id, patch) => {
+            scriptsRef.current = scriptsRef.current.map((x) => (x.id === id ? { ...x, ...patch } : x));
+        },
+        remove: (id) => { scriptsRef.current = scriptsRef.current.filter((x) => x.id !== id); },
+    };
 
-${strip(dispatch)}
-return { dispatchTool, calls, tamperRef, scriptsRef };
-`;
-    return new Function('__CONST__', body)(CONST);
+    /*
+     * 默认**有页面**，传 false 才表示"没有可用页面"。
+     *
+     * 与 buildAgentHarness 同一约定。反过来（默认无页面）会让 storage / tokens
+     * 这些"现在要问宿主当前标签"的工具一律走进无页面分支 —— 而它们的用例断言的是
+     * cookie 的 key、JWT 的写回位置这些与页面有无无关的性质，会集体退化成
+     * 在测失败路径，且看起来像是产品坏了。
+     */
+    const hasPage = webviewUrl !== false;
+    const host = {
+        activeTab: async () => (hasPage ? { id: 1, url: webviewUrl } : null),
+        evaluate: async (_tabId, source) => {
+            calls.ranCode.push(source);
+            return { value: '{"ok":true}', failed: false };
+        },
+        navigate: async (_tabId, url) => { calls.navigated.push(url); return { url, loaded: true }; },
+        onPageReady: () => () => {},
+        /*
+         * 签名必须与 AgentHost 逐字对齐（tabId 在第一个参数）。
+         *
+         * 这里漏掉 tabId 时不会报错，只会**静默错位**：area 收到的是 tabId 数字，
+         * 于是 `area === 'local'` 恒为假，读到的永远是 session 那份。
+         * 表现为"storage get local 返回了 session 的数据"，而断言只会说
+         * "data 应是对象" —— 与真正的原因隔了两层。
+         */
+        readWebStorage: async (_tabId, area) => JSON.stringify(area === 'local' ? tamper.local : tamper.session),
+        writeWebStorage: async (_tabId, area, key, value) => {
+            (area === 'local' ? calls.setLocal : calls.setSession).push([key, value]);
+            return true;
+        },
+        removeWebStorage: async (_tabId, area, key) => { calls.removed.push(area + ':' + key); return true; },
+        getCookies: async () => tamper.cookies,
+        setCookie: async (_tabId, c) => { calls.setCookie.push(c); return true; },
+        removeCookie: async (_tabId, n) => { calls.removed.push(n); return true; },
+        tamper: tamperRef.current,
+    };
+
+    const ctx = {
+        host,
+        scripts: scriptStore,
+        exec: async (code) => { calls.ranCode.push(code); return '{"ok":true}'; },
+        tabId: hasPage ? 1 : null,
+    };
+
+    // 两个参数：调用点不必改签名，宿主与脚本清单由闭包提供
+    const dispatchTool = (tool, args) => TOOLS.dispatchTool(tool, args, ctx);
+    return { dispatchTool, calls, tamperRef, scriptsRef };
 };
 
 /* -------------------------------------------------------------------------- */
@@ -592,14 +484,21 @@ const run = async () => {
 
     // 满了必须明说，不能静默丢弃（旧实现在数组末尾 slice，砍掉的正是刚加的那条）
     await check('script_store·save 达上限时报错并提示用 delete 删', async () => {
-        const full = [1, 2, 3].map((i) => ({
+        /*
+         * 用产品的真实上限，不手写一个 3。
+         *
+         * 旧 harness 里 SCRIPTS_STORE_MAX 被脚手架硬编成 3（切源码时手抄的），
+         * 于是这条断言测的是"3 这个数字"而不是产品行为 —— 产品改成 200
+         * 它照样绿。现在从编译产物里读真值。
+         */
+        const full = Array.from({ length: SCRIPTS_STORE_MAX }, (_, i) => ({
             id: 's' + i, name: 'n' + i, description: '', code: 'return 1;', urlPattern: '', enabled: true,
         }));
         const { dispatchTool, scriptsRef } = buildDispatch(EMPTY, full);
         const out = j(await dispatchTool('script_store', { action: 'save', code: 'return 2;' }));
         assert(typeof out.error === 'string', '应回错误');
         assert(/delete/.test(out.error), `错误里应提示用 delete 删除，实际：${out.error}`);
-        assert(scriptsRef.current.length === 3, '不得写入');
+        assert(scriptsRef.current.length === SCRIPTS_STORE_MAX, '不得写入');
     });
 
     /* ------------------------ script_store: 删除 ------------------------ */
@@ -764,7 +663,7 @@ const run = async () => {
     });
 
     await check('navigate：无页面时报错', async () => {
-        const { dispatchTool } = buildDispatch(EMPTY, []);
+        const { dispatchTool } = buildDispatch(EMPTY, [], false);
         const out = j(await dispatchTool('navigate', { url: 'https://example.com/' }));
         assert(out.error && out.error.includes('没有可用'), `应报无页面，实际 ${JSON.stringify(out)}`);
     });
@@ -803,7 +702,7 @@ const run = async () => {
         assert(out.counts.request === 1, `request 应保留 1 条，实际 ${out.counts.request}`);
         assert(out.counts.headers === 1, `headers 应为 1 条，实际 ${out.counts.headers}`);
         assert(calls.apply === 1, '应调用 applyRules 一次');
-        const st = tamperRef.current.state;
+        const st = tamperRef.current.rules;
         assert(st.interceptRules[0].jsonPath === 'vip', '拦截规则必须原样保留');
         assert(st.headerRules[0].headerName === 'Referer', '请求头规则名应写入内部 headerName');
     });
@@ -843,7 +742,7 @@ const run = async () => {
             action: 'set',
             intercept: [{ enabled: true, url_pattern: '*', key: 'vip', value: true, op: 'set' }],
         });
-        const v = tamperRef.current.state.interceptRules[0].newValue;
+        const v = tamperRef.current.rules.interceptRules[0].newValue;
         assert(typeof v === 'string', `newValue 必须是字符串，实际 ${typeof v}`);
         assert(v === 'true', `newValue 应为 "true"，实际 ${JSON.stringify(v)}`);
     });
@@ -856,11 +755,11 @@ const run = async () => {
             action: 'set',
             intercept: [{ enabled: true, url_pattern: '*', key: 'code', value: '123', op: 'set' }],
         });
-        const v = tamperRef.current.state.interceptRules[0].newValue;
+        const v = tamperRef.current.rules.interceptRules[0].newValue;
         assert(v === '=123', `字符串必须强制前缀，实际 ${JSON.stringify(v)}（否则引擎会按数字 123 写入）`);
         // 往返：get 应把 "=123" 逆解回字符串 "123"
         const { dispatchTool: d2 } = buildDispatch({
-            intercept: tamperRef.current.state.interceptRules,
+            intercept: tamperRef.current.rules.interceptRules,
             request: [], headers: [], cookies: [], local: {}, session: {},
         });
         const got = j(await d2('tamper', { action: 'get' }));
@@ -876,7 +775,7 @@ const run = async () => {
             intercept: [{ enabled: true, url_pattern: '*', key: 'secret', op: 'delete' }],
         }));
         assert(out.applied === true, '应成功');
-        assert(tamperRef.current.state.interceptRules[0].newValue === 'undefined',
+        assert(tamperRef.current.rules.interceptRules[0].newValue === 'undefined',
             'delete 应译成 undefined（引擎删字段语义）');
     });
 
@@ -922,7 +821,7 @@ const run = async () => {
             headers: [{ enabled: true, url_pattern: '*', name: 'X-Retry', value: 42 }],
         }));
         assert(out.applied === true, '应成功');
-        const hv = tamperRef.current.state.headerRules[0].headerValue;
+        const hv = tamperRef.current.rules.headerRules[0].headerValue;
         assert(hv === '42', `headerValue 应为 "42"，实际 ${JSON.stringify(hv)}（空串会删除该请求头）`);
     });
 
@@ -934,7 +833,7 @@ const run = async () => {
             action: 'set',
             headers: [{ enabled: true, url_pattern: '*', name: 'X-Flag', value: false }],
         });
-        const hv = tamperRef.current.state.headerRules[0].headerValue;
+        const hv = tamperRef.current.rules.headerRules[0].headerValue;
         assert(hv === 'false', `headerValue 应为 "false"，实际 ${JSON.stringify(hv)}`);
     });
 
@@ -1537,14 +1436,14 @@ const run = async () => {
      * 少任何一处，那种结束方式下的思考就会随气泡一起消失。
      */
     await check('每一处定稿点都带 reasoning', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        const src = ALL_SRC;
         const hits = src.match(/reasoning:\s*keepReasoning\(liveReasoning\)/g) || [];
         assert(hits.length === 5,
             `应有 5 处定稿点带上推理（中断两种 / 最终回复 / 工具调用 / 协议错误），实际 ${hits.length} 处`);
     });
 
     await check('中断时只有推理也要落一条消息', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        const src = ALL_SRC;
         // 用户中途点停止时，常常只流出了推理、正文还是空的。
         // 不落这条的话，那部分思考同样会随气泡消失 —— 正是本次要修的 bug。
         assert(/else if \(liveReasoning\.trim\(\)\)/.test(src),
@@ -1564,7 +1463,7 @@ const run = async () => {
      * chat() 的 messages 实参只能是 transcript，不能是 UI 那份 messages 状态。
      */
     await check('推理不进模型上下文：transcript 只 push role/content', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        const src = ALL_SRC;
 
         const pushes = src.match(/transcript\.push\([^)]*\)/g) || [];
         assert(pushes.length > 0, '应能找到 transcript.push（找不到说明实现变了，本断言需重写）');
@@ -1574,13 +1473,13 @@ const run = async () => {
         }
 
         // 初始项同理：它是本轮第一条发给模型的消息
-        const init = src.match(/const transcript: AiChatMessage\[\] = \[[^\]]*\]/);
+        const init = src.match(/const transcript = \[[^\]]*\]/);
         assert(init, '应能找到 transcript 的初始化');
         assert(!/reasoning/.test(init[0]), 'transcript 初始项不得携带 reasoning');
     });
 
     await check('推理不进模型上下文：chat 只收 transcript', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        const src = ALL_SRC;
 
         /**
          * 先切出 chat({...}) 这一段，再看它里面的 messages 指向谁。
@@ -1591,9 +1490,9 @@ const run = async () => {
          * （compact 的摘要器，messages 是 digest），从文件头 indexOf 会命中它，
          * 于是这条断言测的是摘要器而不是主循环 —— 主循环把推理漏进上下文也照样绿。
          */
-        const sendAt = src.indexOf('const send = useCallback(async (prompt: string)');
+        const sendAt = src.indexOf('private async send(prompt: string)');
         assert(sendAt >= 0, '应能找到 send');
-        const start = src.indexOf('await chat({', sendAt);
+        const start = src.indexOf('this.options.chat.chat({', sendAt);
         assert(start >= 0, '应能在 send 里找到 chat() 调用');
         const end = src.indexOf('});', start);
         assert(end > start, '应能找到 chat() 调用的结尾');
@@ -1661,8 +1560,22 @@ const run = async () => {
      * 所以这里直接钉住调用点：工具消息里必须带 label，且它含 action。
      */
     await check('工具消息写入 label（含 action），不只写 tool', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
-        const at = src.indexOf("                    role: 'tool',");
+        const src = ALL_SRC;
+        /*
+         * 按 `role: 'tool',` 定位，不锚定缩进。
+         *
+         * 这条断言从 hook 时代就在，当时锚的是 20 空格缩进（hook 里的嵌套层数）。
+         * 引擎里同一个构造点缩进变了 —— 缩进是实现细节，断言认的应该是
+         * "工具消息的构造块里有没有 label"。
+         */
+        /*
+         * 找的是**工具调用**那条 tool 消息，不是协议错误那条。
+         *
+         * 两者都是 role:'tool'，但协议错误的 label 是 PROTOCOL_ERROR_LABEL 常量，
+         * 不是从 action 拼出来的 —— 从第一个 role:'tool' 开始切片会切到它，
+         * 于是这条断言测错了对象。认 content 里的 thought 拼接才是工具调用那条。
+         */
+        const at = src.indexOf("content: thought || ");
         assert(at > 0, '应能找到工具消息的构造点');
         const block = src.slice(at, at + 700);
         assert(/^\s*label,$/m.test(block),
@@ -1709,7 +1622,7 @@ const run = async () => {
 
     /** 同上：四个提示点都必须真的打上 notice 标记；步数上限已按用户要求彻底去掉 */
     await check('四处界面提示都写入 notice 标记', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        const src = ALL_SRC;
         const notices = src.match(/^\s*notice: true,$/gm) || [];
         assert(notices.length === 4,
             `中断提示 / 空回复提示 / 协议错误放弃提示 / 轮内上下文超限提示都应带 notice，实际 ${notices.length} 处`);
@@ -1724,7 +1637,7 @@ const run = async () => {
      * 只会让模型去找一个根本不存在的标记，于是"回看历史"这条纪律形同虚设。
      */
     await check('提示词声明的观察前缀与实现一致', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        const src = ALL_SRC;
 
         // 提示词那一段
         const specAt = src.indexOf('你**能看到之前几轮的对话与工具结果**');
@@ -1772,10 +1685,13 @@ const run = async () => {
      * 四处任一处漂移都不会报错，只会让「谁按的」各说一套。
      */
     await check('环境事件只有一个构造点，来源只有一个存放处', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
-        const at = src.indexOf('const recordScriptRun = useCallback((');
+        const src = ALL_SRC;
+        const at = src.indexOf('private recordScriptRun(');
         assert(at > 0, '应能找到环境事件的构造点');
-        const block = src.slice(at, src.indexOf('}, [appendMessage]);', at));
+        // 到下一个方法定义为止。不用具体依赖数组收尾 —— 那是 hook 时代的形状，
+        // 引擎里方法之间只隔一个空行，认依赖数组会一直找不到结尾。
+        const next = src.indexOf('\n    private ', at + 10);
+        const block = src.slice(at, next > 0 ? next : at + 1200);
 
         assert(/^\s*origin,$/m.test(block), '构造点必须把 origin 原样写进消息');
         assert(/origin === 'manual' \? MANUAL_RUN_PREFIX : AUTO_RUN_PREFIX/.test(block),
@@ -1827,7 +1743,7 @@ const run = async () => {
      * 判断来源**不许**再用前缀（那是第二个真值）：origin 字段才是判据。
      */
     await check('执行来源的前缀只有一个来源', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        const src = ALL_SRC;
         assert(/const AUTO_RUN_PREFIX = '自动执行：';/.test(src), '自动前缀必须由具名常量给出');
         assert(/const MANUAL_RUN_PREFIX = '手动执行：';/.test(src), '手动前缀必须由具名常量给出');
         // 剥前缀只发生在 scriptNameOf 里，且它按 origin 选前缀、不猜内容
@@ -1872,30 +1788,30 @@ const run = async () => {
      * 纯函数用例，但那时历史里会不会多出本轮提问，取决于 React 何时提交 setState。
      */
     await check('send 在追加本轮提问之前读历史', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
-        const sendAt = src.indexOf('const send = useCallback(async (prompt: string)');
+        const src = ALL_SRC;
+        const sendAt = src.indexOf('private async send(prompt: string)');
         assert(sendAt >= 0, '应能找到 send');
-        // 历史先取到局部变量 list，再喂给 buildTranscript。断言认的是
-        // "读 messagesRef 那一刻" 与 "appendMessage 那一刻" 的先后，
-        // 所以取 messagesRef.current 的位置就是判据。
-        const readAt = src.indexOf('messagesRef.current', sendAt);
-        const buildAt = src.indexOf('buildTranscript(', sendAt);
+        /*
+         * 断言认的是"重建历史那一刻"与"追加本轮提问那一刻"的先后。
+         *
+         * 读历史在引擎里是 `buildTranscript(this.messages)` —— 不再是 hook 时代的
+         * `messagesRef.current`（那时要靠 ref 绕开闭包快照，引擎里 this.messages
+         * 永远是当前值，那个中间层随 hook 一起消失了）。
+         */
+        const buildAt = src.indexOf('const history = buildTranscript(', sendAt);
         const appendAt = src.indexOf("appendMessage({ id: generateId(), role: 'user', content: text", sendAt);
-        assert(readAt > 0, 'send 里应读 messagesRef.current 拿历史');
         assert(buildAt > 0, 'send 里应调用 buildTranscript 重建历史');
         assert(appendAt > 0, 'send 里应追加本轮用户消息');
-        assert(readAt < appendAt,
-            '必须在 appendMessage 之前读历史，否则本轮提问会重复进上下文');
         assert(buildAt < appendAt,
             '必须在 appendMessage 之前重建历史，否则本轮提问会重复进上下文');
     });
 
     await check('send 把历史拼在本轮提问前面', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
-        const m = src.match(/const transcript: AiChatMessage\[\] = \[([^\]]*)\]/);
+        const src = ALL_SRC;
+        const m = src.match(/const transcript = \[([^\]]*)\]/);
         assert(m, '应能找到 transcript 的初始化');
         assert(/\.\.\.history/.test(m[1]), `transcript 必须以历史打头，实际：[${m[1]}]`);
-        assert(/role: 'user', content: text/.test(m[1]), '本轮提问应排在历史之后');
+        assert(/content: text/.test(m[1]), '本轮提问应排在历史之后');
     });
 
     /**
@@ -1972,7 +1888,7 @@ const run = async () => {
      * 所以这里把真实的 useAgent 跑起来，直接看第二次 chat() 收到了什么。
      */
     await check('端到端：第二轮请求带着第一轮的问答', async () => {
-        const h = buildAgentHarness();
+        const h = await buildAgentHarness();
         await h.send('第一轮的提问：看看这个页面');
         await h.send('第二轮的提问：它有多少条数据？');
 
@@ -1990,7 +1906,7 @@ const run = async () => {
     });
 
     await check('端到端：第三轮累积前两轮，且本轮提问不重复', async () => {
-        const h = buildAgentHarness();
+        const h = await buildAgentHarness();
         await h.send('第一轮');
         await h.send('第二轮');
         await h.send('第三轮');
@@ -2001,7 +1917,7 @@ const run = async () => {
     });
 
     await check('端到端：工具结果跨轮可见，且以 user 观察形式出现', async () => {
-        const h = buildAgentHarness({ toolCall: true });
+        const h = await buildAgentHarness({ toolCall: true });
         await h.send('先取一下价格');
         await h.send('刚才取到的价格是多少？');
 
@@ -2012,7 +1928,7 @@ const run = async () => {
     });
 
     await check('端到端：大写工具名落到未知工具（严格匹配）', async () => {
-        const h = buildAgentHarness({ toolCall: true, toolCase: 'upper' });
+        const h = await buildAgentHarness({ toolCall: true, toolCase: 'upper' });
         await h.send('取一下');
         const tool = h.state().messages.find((m) => m.role === 'tool');
         assert(tool, '应有一条 tool 消息（报错也要记账）');
@@ -2029,7 +1945,7 @@ const run = async () => {
      * "一条消息属于哪一轮"，手搓的假数据会把这条判据的验证变成自证。
      */
     const twoRounds = async (options = {}) => {
-        const h = buildAgentHarness({ toolCall: true, ...options });
+        const h = await buildAgentHarness({ toolCall: true, ...options });
         await h.send('第一轮提问');
         await h.send('第二轮提问');
         const list = h.state().messages;
@@ -2148,7 +2064,7 @@ const run = async () => {
     await check('运行中：删除与回退都被拒绝', async () => {
         let release;
         const gate = new Promise((r) => { release = r; });
-        const h = buildAgentHarness({ hold: gate });
+        const h = await buildAgentHarness({ hold: gate });
         await h.send('第一轮提问');
         const before = h.state().messages;
 
@@ -2185,7 +2101,7 @@ const run = async () => {
      */
     await check('工具失败：回灌前缀标明失败，并附上错误原文', async () => {
         // webview:false → js 返回"当前没有可用的页面"，稳定造出失败
-        const h = buildAgentHarness({ toolCall: true, webview: false });
+        const h = await buildAgentHarness({ toolCall: true, webview: false });
         await h.send('取一下');
 
         const tool = h.state().messages.find((m) => m.role === 'tool');
@@ -2209,7 +2125,7 @@ const run = async () => {
      * 若实现把失败当成"说完了"，就不会有第二次调用。
      */
     await check('工具失败后继续跑下一步，不当作收尾', async () => {
-        const h = buildAgentHarness({
+        const h = await buildAgentHarness({
             webview: false,
             replies: [
                 JSON.stringify({ thought: '取数', tool: 'js', args: { action: 'R', code: 'return 1;' } }),
@@ -2232,7 +2148,7 @@ const run = async () => {
      * 这是本次要修的第二个核心问题：调用错误被当成普通文本处理。
      */
     await check('协议错误：回灌错误提示并继续，不把散文当结论', async () => {
-        const h = buildAgentHarness({
+        const h = await buildAgentHarness({
             replies: [
                 '我先看看页面结构，稍等。',                       // 散文，没有 JSON
                 JSON.stringify({ thought: '收到', final: '真正的结论' }),
@@ -2260,7 +2176,7 @@ const run = async () => {
 
     /** 协议错误也要在界面上留痕，否则用户看到模型"凭空消失"一步 */
     await check('协议错误：界面留一条失败记录', async () => {
-        const h = buildAgentHarness({ replies: '我又忘了写 JSON' });
+        const h = await buildAgentHarness({ replies: '我又忘了写 JSON' });
         await h.send('看看');
 
         const bad = h.state().messages.find((m) => m.label === '协议错误');
@@ -2279,7 +2195,7 @@ const run = async () => {
      * 一个函数产出，这里把这条对称性钉住。
      */
     await check('协议错误的回灌文案当场与重建时逐字一致', async () => {
-        const h = buildAgentHarness({ replies: '我忘了写 JSON' });
+        const h = await buildAgentHarness({ replies: '我忘了写 JSON' });
         await h.send('看看');
 
         // 当场的回灌：第一次协议错误之后那一轮请求里带的那条 user 消息
@@ -2311,7 +2227,7 @@ const run = async () => {
      */
     await check('工具观察的文案当场与重建时逐字一致', async () => {
         // webview:false → js 稳定失败，正好覆盖带"修正参数"那段后缀的分支
-        const h = buildAgentHarness({ toolCall: true, webview: false });
+        const h = await buildAgentHarness({ toolCall: true, webview: false });
         await h.send('取一下');
 
         const tool = h.state().messages.find((m) => m.role === 'tool');
@@ -2341,7 +2257,7 @@ const run = async () => {
      * （上面那条用例会因为两处都退化而仍然通过），所以这里直接钉住它只有一个来源。
      */
     await check('协议错误的 label 只有一个来源', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        const src = ALL_SRC;
         assert(/const PROTOCOL_ERROR_LABEL = '协议错误';/.test(src),
             'label 必须由具名常量给出');
         assert(/label: PROTOCOL_ERROR_LABEL,/.test(src),
@@ -2359,10 +2275,10 @@ const run = async () => {
      * 且每一步都要付一次调用费。
      */
     await check('协议错误：连续超限后停止并说明原因', async () => {
-        const h = buildAgentHarness({ replies: '一直不按协议回' });
+        const h = await buildAgentHarness({ replies: '一直不按协议回' });
         await h.send('看看');
 
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        const src = ALL_SRC;
         const max = Number(src.match(/const MAX_PROTOCOL_ERRORS = (\d+);/)[1]);
         assert(h.chats.length === max,
             `应恰好尝试 ${max} 次后停止，实际 ${h.chats.length} 次`);
@@ -2374,7 +2290,7 @@ const run = async () => {
 
     /** 成功执行一次工具就归零：偶发笔误不该跟着整个会话不放 */
     await check('协议错误计数在工具成功执行后归零', async () => {
-        const h = buildAgentHarness({
+        const h = await buildAgentHarness({
             replies: [
                 '第一次写错',                                     // 协议错误 1
                 JSON.stringify({ thought: '改好了', tool: 'js', args: { action: 'R', code: 'return 1;' } }),
@@ -2399,7 +2315,7 @@ const run = async () => {
      * 而模型连"这一步失败了"都不知道，下一轮还会照着原计划重来。
      */
     await check('工具抛异常：兜住并回灌，循环不终止', async () => {
-        const h = buildAgentHarness({
+        const h = await buildAgentHarness({
             throwOnBridge: true,
             replies: [
                 JSON.stringify({ thought: '读存储', tool: 'storage', args: { action: 'get', area: 'local' } }),
@@ -2411,7 +2327,7 @@ const run = async () => {
         const tool = h.state().messages.find((m) => m.role === 'tool');
         assert(tool, '异常也应记一条 tool 消息');
         assert(tool.ok === false, '抛异常的步骤 ok 应为 false');
-        assert(tool.result.includes('preload 桥不可用'),
+        assert(tool.result.includes('页面宿主不可用'),
             `异常信息必须原样交给模型，实际 ${tool.result}`);
 
         assert(h.chats.length >= 2, `异常后应继续跑，实际只发了 ${h.chats.length} 次`);
@@ -2429,7 +2345,7 @@ const run = async () => {
      * 不能悄无声息。
      */
     await check('手动执行：无页面时错误原样记账并进对话', async () => {
-        const h = buildAgentHarness({ webview: false, seedScripts: [{ id: 's1', name: '取价', code: 'return 1;' }] });
+        const h = await buildAgentHarness({ webview: false, seedScripts: [{ id: 's1', name: '取价', code: 'return 1;' }] });
         const before = h.state().messages.length;
 
         const out = await h.state().actions.runScriptNow('s1');
@@ -2446,8 +2362,34 @@ const run = async () => {
         assert(tool.ok === false, '失败的执行 ok 应为 false');
     });
 
+    /**
+     * 每次执行都要**重新问**宿主当前是哪个标签页，不得缓存。
+     *
+     * 这条是变异测试逼出来的：把 `execActive` 改成"首次解析后缓存 tabId"，
+     * 170 条断言全绿 —— 因为每个用例只跑一次、只用一个标签页。
+     * 而缓存带来的故障恰恰只在**切换标签页之后**才出现：脚本继续跑到上一个
+     * 页面上，用户看到的是"我明明切过来了，它还在读旧页面"。
+     *
+     * 判据是 activeTab() 的调用次数：切换后再执行一次，必须重新问。
+     */
+    await check('执行前重新解析活动标签，不缓存 tabId', async () => {
+        const h = await buildAgentHarness({ seedScripts: [{ id: 's1', name: '取价', code: 'return 1;' }] });
+
+        await h.state().actions.runScriptNow('s1');
+        const afterFirst = h.activeTabCalls();
+
+        // 模拟用户切到另一个标签页
+        h.switchTab(99);
+        await h.state().actions.runScriptNow('s1');
+
+        assert(h.activeTabCalls() > afterFirst,
+            `切换标签页后必须重新问宿主，实际调用次数停在 ${afterFirst}`);
+        assert(h.lastEvalTabId() === 99,
+            `脚本应跑在新标签页上，实际 ${h.lastEvalTabId()}`);
+    });
+
     await check('手动执行：未知 id 不记账不进对话', async () => {
-        const h = buildAgentHarness({ seedScripts: [{ id: 's1', name: '取价', code: 'return 1;' }] });
+        const h = await buildAgentHarness({ seedScripts: [{ id: 's1', name: '取价', code: 'return 1;' }] });
         const before = h.state().messages.length;
 
         const out = await h.state().actions.runScriptNow('不存在的-id');
@@ -2460,7 +2402,7 @@ const run = async () => {
     await check('运行中：手动执行被拒绝', async () => {
         let release;
         const gate = new Promise((r) => { release = r; });
-        const h = buildAgentHarness({ hold: gate, seedScripts: [{ id: 's1', name: '取价', code: 'return 1;' }] });
+        const h = await buildAgentHarness({ hold: gate, seedScripts: [{ id: 's1', name: '取价', code: 'return 1;' }] });
         await h.send('第一轮提问');
         const before = h.state().messages.length;
 
@@ -2483,7 +2425,7 @@ const run = async () => {
      * 新提示词里实际存在的等价表述，而不是已删掉的旧小节名。
      */
     await check('提示词含行为约束（假设 / 证据 / 交付）', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        const src = ALL_SRC;
         // thought 字段的写法即工作方式：先假设、再给证据链
         assert(src.includes('假设或判断依据'), '工具调用的 thought 应要求写假设或判断依据');
         assert(src.includes('推导与证据链'), '收尾的 thought 应要求写推导与证据链');
@@ -2503,7 +2445,7 @@ const run = async () => {
      * 改了常量提示词不跟着变，模型就按错的上限规划步骤。
      */
     await check('提示词用插值引用常量，不手抄数字', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        const src = ALL_SRC;
         assert(/\$\{RESULT_LIMIT_BYTES \/ 1024\}KB/.test(src),
             'js 返回值上限应插值 RESULT_LIMIT_BYTES —— 手抄的 32KB 在常量改动后必然过期');
         assert(!/正文 ≤\d+KB/.test(src), '不得把正文上限手抄进提示词');
@@ -2513,7 +2455,7 @@ const run = async () => {
     /* --------------------------- 提示词：输出与参数契约 --------------------------- */
 
     await check('输出协议：无围栏直接贴 JSON，且 tool/final 互斥', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        const src = ALL_SRC;
         const at = src.indexOf('## 输出协议');
         assert(at > 0, '应有「输出协议」一节');
         const section = src.slice(at, src.indexOf('## ', at + 10));
@@ -2522,7 +2464,7 @@ const run = async () => {
     });
 
     await check('工具说明：全小写匹配、update 动作、导航归一都有交代', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        const src = ALL_SRC;
         const at = src.indexOf('## 可用工具定义');
         assert(at > 0, '应有「可用工具定义」一节');
         const spec = src.slice(at, src.indexOf('## 执行准则', at));
@@ -2534,7 +2476,7 @@ const run = async () => {
     });
 
     await check('准则：失败两次换路，失败不是终点', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        const src = ALL_SRC;
         const at = src.indexOf('## 执行准则');
         assert(at > 0, '应有「执行准则」一节');
         /**
@@ -2561,7 +2503,7 @@ const run = async () => {
      * 而界面上看不出任何异常 —— 只是数字悄悄变大。落在消息上则天然可重算。
      */
     await check('用量落在消息上，且累计由现存消息重算', async () => {
-        const h = buildAgentHarness({ toolCall: true });
+        const h = await buildAgentHarness({ toolCall: true });
         await h.send('第一轮');
 
         const st = h.state();
@@ -2594,7 +2536,7 @@ const run = async () => {
      * 它同样是界面上画得出来的一个数。
      */
     await check('累计等于各步用量之和（含摘要调用，界面口径一致）', async () => {
-        const h = buildAgentHarness({ toolCall: true });
+        const h = await buildAgentHarness({ toolCall: true });
         for (let i = 0; i < 6; i += 1) await h.send(`第${i}轮`);
         // 压一次：摘要调用本身也要计费，而它必须落在**消息**上
         const record = await h.state().actions.compact();
@@ -2619,7 +2561,7 @@ const run = async () => {
      * 整个统计功能就是空的，而用户看不出是"没有数据"还是"没有花费"。
      */
     await check('服务端不回 usage 时走估算并标注 estimated', async () => {
-        const h = buildAgentHarness({ noUsage: true });
+        const h = await buildAgentHarness({ noUsage: true });
         await h.send('问一句');
 
         const st = h.state();
@@ -2639,7 +2581,7 @@ const run = async () => {
      * 而用户唯一的自查手段就是拿这些数相加，对不上时他只会以为统计坏了。
      */
     await check('上下文占用随历史增长，且由现存消息决定', async () => {
-        const h = buildAgentHarness();
+        const h = await buildAgentHarness();
         const empty = h.state().usage.contextTokens;
         assert(empty > 0, '空会话也应计入系统提示词（它就是下一次请求要发的一部分）');
 
@@ -2676,13 +2618,13 @@ const run = async () => {
      * 所以：前 3 轮各 40 万 token（合计 120 万，越过 800k），
      * 后 3 轮很小（默认 60% 档覆盖前 7 条，后 5 条原样保留）。
      */
-    const fillBeyondLimit = (h) => {
+    const fillBeyondLimit = async (h) => {
         const filler = '填'.repeat(600_000);
         const round = (i, content) => ([
             { id: `u${i}`, role: 'user', content: `第${i}轮`, at: i * 2 },
             { id: `a${i}`, role: 'assistant', content, at: i * 2 + 1 },
         ]);
-        h.setMessages([
+        await h.setMessages([
             ...round(0, filler),
             ...round(1, filler),
             ...round(2, filler),
@@ -2693,10 +2635,10 @@ const run = async () => {
     };
 
     await check('达到门槛即 contextFull 为真', async () => {
-        const h = buildAgentHarness();
+        const h = await buildAgentHarness();
         assert(h.state().contextFull === false, '空会话不该算满');
 
-        fillBeyondLimit(h);
+        await fillBeyondLimit(h);
         const st = h.state();
         assert(st.usage.contextTokens >= CONTEXT_LIMIT_TOKENS,
             `构造前提：上下文应已越过门槛，实际 ${st.usage.contextTokens}`);
@@ -2710,8 +2652,8 @@ const run = async () => {
      * actions.send 的路径都会绕过 disabled。少了这一层，输入框锁着也拦不住。
      */
     await check('超限时 send 直接拒绝，不发起任何模型调用', async () => {
-        const h = buildAgentHarness();
-        fillBeyondLimit(h);
+        const h = await buildAgentHarness();
+        await fillBeyondLimit(h);
         const callsBefore = h.chats.length;
 
         await h.send('这条不该发出去');
@@ -2731,7 +2673,7 @@ const run = async () => {
      * 所以文案只能由 contextFullMessage 一个函数产出。
      */
     await check('两道门槛共用同一句文案', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        const src = ALL_SRC;
         assert(/const contextFullMessage = \(\): string =>/.test(src),
             '越线文案必须由具名函数产出');
         const uses = src.match(/contextFullMessage\(\)/g) || [];
@@ -2744,11 +2686,11 @@ const run = async () => {
     });
 
     /** 门槛是 >= 而不是 >：正好等于时也要拦住 */
-    await check('正好等于门槛时也拦住（>= 语义）', async () => {        const h = buildAgentHarness();
+    await check('正好等于门槛时也拦住（>= 语义）', async () => {        const h = await buildAgentHarness();
         // 用中文字符凑一个刚好到门槛的上下文。estimateTokens 对 CJK 是 1.5 字符/token，
         // 所以要 n 个 token 就写 ceil(n * 1.5) 个汉字。
         const chars = Math.ceil(CONTEXT_LIMIT_TOKENS * 1.5);
-        h.setMessages([{ id: 'u0', role: 'user', content: '填'.repeat(chars), at: 0 }]);
+        await h.setMessages([{ id: 'u0', role: 'user', content: '填'.repeat(chars), at: 0 }]);
 
         const tokens = h.state().usage.contextTokens;
         assert(tokens >= CONTEXT_LIMIT_TOKENS,
@@ -2761,10 +2703,10 @@ const run = async () => {
 
     /** 严格小于门槛时必须放行 —— 否则用户会被永久锁死 */
     await check('严格小于门槛时正常放行', async () => {
-        const h = buildAgentHarness();
+        const h = await buildAgentHarness();
         // 目标：凑到门槛的九成左右，确保严格小于
         const chars = Math.floor(CONTEXT_LIMIT_TOKENS * 1.5 * 0.9);
-        h.setMessages([{ id: 'u0', role: 'user', content: '填'.repeat(chars), at: 0 }]);
+        await h.setMessages([{ id: 'u0', role: 'user', content: '填'.repeat(chars), at: 0 }]);
 
         const tokens = h.state().usage.contextTokens;
         assert(tokens < CONTEXT_LIMIT_TOKENS,
@@ -2780,8 +2722,8 @@ const run = async () => {
      * 压缩必须能把上下文拉回门槛以下，否则"压缩后即可继续"是空话。
      */
     await check('压缩后上下文回落，输入框重新可用', async () => {
-        const h = buildAgentHarness();
-        fillBeyondLimit(h);
+        const h = await buildAgentHarness();
+        await fillBeyondLimit(h);
         assert(h.state().contextFull === true, '构造前提：应已满');
 
         const record = await h.state().actions.compact();
@@ -2807,7 +2749,7 @@ const run = async () => {
      * 而后者等于完全没有压缩。
      */
     await check('压缩后旧轮次退出上下文，摘要取而代之', async () => {
-        const h = buildAgentHarness();
+        const h = await buildAgentHarness();
         for (let i = 0; i < 6; i += 1) await h.send(`第${i}轮的提问`);
         const before = h.state().usage.contextTokens;
 
@@ -2820,10 +2762,8 @@ const run = async () => {
         assert(record.afterTokens < record.beforeTokens,
             `压缩后应更小，实际 ${record.beforeTokens} → ${record.afterTokens}`);
 
-        // 分界线是 compact 排下的一次 setState，必须让它落地再发下一轮：
-        // 否则 send 读到的 messagesRef 还是压缩前的快照，测的就不是产品行为。
-        // 真实 React 里这次重渲染由 setState 自动触发，harness 得手动 flush。
-        h.state();
+        // 引擎里 compact() 是 await 的，写完 this.messages 才返回 ——
+        // 不需要 hook 时代那次"手动 flush setState"。
 
         // 下一次请求里：摘要必须在，且被压掉的那一轮原文必须不在
         await h.send('压缩后再问一句');
@@ -2836,7 +2776,7 @@ const run = async () => {
 
     /** 压缩记录必须落进对话流（界面上要有那条分界线），且带用量 */
     await check('压缩记录作为一条消息落进对话流并计入用量', async () => {
-        const h = buildAgentHarness();
+        const h = await buildAgentHarness();
         for (let i = 0; i < 6; i += 1) await h.send(`第${i}轮`);
 
         const beforeCalls = h.state().usage.calls;
@@ -2854,14 +2794,14 @@ const run = async () => {
 
     /** 条数不足时不该压缩：压了也没有可压的内容，白花一次调用 */
     await check('消息不足时压缩是空操作', async () => {
-        const h = buildAgentHarness();
+        const h = await buildAgentHarness();
 
         // 空会话：分界线之后 0 条，任何档位都算不出覆盖数
         assert(await h.state().actions.compact() === null, '空会话应返回 null');
         assert(h.chats.length === 0, '不得发起摘要调用');
 
         // 1 条消息配 40% 档：floor(1*0.4)=0，同样无可压内容
-        h.setMessages([{ id: 'u0', role: 'user', content: '只有一条', at: 0 }]);
+        await h.setMessages([{ id: 'u0', role: 'user', content: '只有一条', at: 0 }]);
         h.state().actions.setCompactRatio(0.4);
         const before = h.chats.length;
 
@@ -2874,7 +2814,7 @@ const run = async () => {
 
     /** 非法档位直接忽略，不能让脏值把判据搞成 NaN */
     await check('setCompactRatio 拒绝非法档位', async () => {
-        const h = buildAgentHarness();
+        const h = await buildAgentHarness();
         assert(h.state().compactRatio === 0.6, '构造前提：默认档位应为 60%');
 
         h.state().actions.setCompactRatio(0.5);
@@ -2892,7 +2832,7 @@ const run = async () => {
      * 以及消息很少但每条都很大（不可压缩、但照样锁）。
      */
     await check('canCompact 只看条数与档位，与 contextFull 无关', async () => {
-        const h = buildAgentHarness();
+        const h = await buildAgentHarness();
 
         // 空会话：压不动，也没满
         assert(h.state().canCompact === false, '空会话不该可压缩');
@@ -2913,7 +2853,7 @@ const run = async () => {
 
     /** 清空之后两个判据都要回落，不能残留 */
     await check('清空后 canCompact 与 contextFull 都回落', async () => {
-        const h = buildAgentHarness();
+        const h = await buildAgentHarness();
         for (let i = 0; i < 5; i += 1) await h.send(`第${i}轮`);
         assert(h.state().canCompact === true, '构造前提：应可压缩');
 
@@ -2921,13 +2861,13 @@ const run = async () => {
         assert(h.state().canCompact === false, '清空后不该可压缩');
         assert(h.state().contextFull === false, '清空后不该算满');
         // 退回系统提示词基数（不是 0）：那部分与历史无关，清空也还在
-        const empty = buildAgentHarness().state().usage.contextTokens;
+        const empty = (await buildAgentHarness()).state().usage.contextTokens;
         assert(h.state().usage.contextTokens === empty,
             `清空后上下文占用应退回基数，实际 ${h.state().usage.contextTokens} vs ${empty}`);
     });
     /** 摘要为空是失败，不能把一段历史换成空白还报成功 */
     await check('摘要为空视为失败，历史不动', async () => {
-        const h = buildAgentHarness({ compactReply: '   ' });
+        const h = await buildAgentHarness({ compactReply: '   ' });
         for (let i = 0; i < 6; i += 1) await h.send(`第${i}轮`);
         const before = h.state().messages.length;
 
@@ -2944,7 +2884,7 @@ const run = async () => {
         const gate = new Promise((r) => { release = r; });
         // holdAt 必须指向**第 5 次**调用：前 4 次留给 4 轮对话，
         // 卡在第 2 次的话连构造初始状态都过不去（会直接挂死）
-        const h = buildAgentHarness({ hold: gate, holdAt: 5 });
+        const h = await buildAgentHarness({ hold: gate, holdAt: 5 });
         for (let i = 0; i < 4; i += 1) await h.send(`第${i}轮`);
         assert(h.state().messages.length > 0, '构造前提：应有 4 轮历史');
 
@@ -2966,7 +2906,7 @@ const run = async () => {
      * 上下文里干活 —— 而界面上看不出任何异常。这条是压缩功能里最危险的失效模式。
      */
     await check('回退到压缩点之前后摘要自动作废，原文重新进上下文', async () => {
-        const h = buildAgentHarness();
+        const h = await buildAgentHarness();
         for (let i = 0; i < 6; i += 1) await h.send(`第${i}轮`);
         await h.state().actions.compact();
         assert(h.state().messages.some((m) => m.compaction), '构造前提：应已压缩');
@@ -2997,7 +2937,7 @@ const run = async () => {
      * "线以上那些模型已经看不见了"。
      */
     await check('压缩分界线插在覆盖范围的末尾，不是追加到对话末尾', async () => {
-        const h = buildAgentHarness();
+        const h = await buildAgentHarness();
         for (let i = 0; i < 6; i += 1) await h.send(`第${i}轮`);
         await h.state().actions.compact();
 
@@ -3097,7 +3037,7 @@ const run = async () => {
 
     /** 摘要调用的 system 提示词必须是**结构化**的那一份，不是"总结一下" */
     await check('压缩提示词要求结构化输出并禁止编造', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        const src = ALL_SRC;
         const at = src.indexOf('const COMPACT_SYSTEM_PROMPT = `');
         assert(at > 0, '应有 COMPACT_SYSTEM_PROMPT');
         const prompt = src.slice(at, src.indexOf('`;', at));
@@ -3112,7 +3052,7 @@ const run = async () => {
 
     /** 提示词里声明的摘要前缀必须与实现写出的**逐字一致** */
     await check('提示词声明的摘要前缀与实现一致', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        const src = ALL_SRC;
         assert(src.includes('${COMPACT_PREFIX}'), '提示词应以插值引用 COMPACT_PREFIX，不手抄');
 
         const compacted = {
@@ -3155,14 +3095,14 @@ const run = async () => {
      * 配当前档位，>= 1 才算压得动。
      */
     await check('canCompact 与 compact() 的条数闸门同源', async () => {
-        const src = fs.readFileSync(SRC_PATH, 'utf8');
+        const src = ALL_SRC;
         assert(/const \{ messages: live, summary: priorSummary \} = splitByCompaction\(list\);/.test(src),
             'compact() 里应先取分界线之后的消息，全量重算会把压过的再压一遍');
-        assert(/const coverCount = compactCoverCount\(live\.length, compactRatio\);/.test(src),
+        assert(/const coverCount = compactCoverCount\(live\.length, this\.compactRatio\);/.test(src),
             'compact() 里应按分界线之后的消息数与当前档位算覆盖数');
         assert(/if \(coverCount < 1\) return null;/.test(src),
             'compact() 里覆盖数为 0 时必须返回 null');
-        assert(/canCompact: compactCoverCount\(splitByCompaction\(messages\)\.messages\.length, compactRatio\) >= 1/.test(src),
+        assert(/canCompact: compactCoverCount\(splitByCompaction\(this\.messages\)\.messages\.length, this\.compactRatio\) >= 1/.test(src),
             'canCompact 必须用同一个函数与同一种比较，否则按钮可点但无效果');
         assert(!/COMPACT_KEEP_ROUNDS/.test(src),
             '轮次常量必须彻底移除，留着就是下一个漂移的源头');
@@ -3175,7 +3115,7 @@ const run = async () => {
      * 否则按钮可能接到了一个只改本地 state 的假动作。
      */
     await check('撤销压缩后原文重新进上下文（端到端）', async () => {
-        const h = buildAgentHarness();
+        const h = await buildAgentHarness();
         for (let i = 0; i < 6; i += 1) await h.send(`第${i}轮`);
         await h.state().actions.compact();
 
@@ -3199,8 +3139,8 @@ const run = async () => {
      */
     await check('压缩档位按条数覆盖前 N%（40/60/80/100）', async () => {
         for (const [ratio, cover] of [[0.4, 4], [0.6, 6], [0.8, 8], [1, 10]]) {
-            const h = buildAgentHarness();
-            h.setMessages(Array.from({ length: 10 }, (_, i) => (
+            const h = await buildAgentHarness();
+            await h.setMessages(Array.from({ length: 10 }, (_, i) => (
                 { id: `m${i}`, role: 'user', content: `消息${i}`, at: i }
             )));
             h.state().actions.setCompactRatio(ratio);
@@ -3221,8 +3161,8 @@ const run = async () => {
 
     /** 100% 全压之后分界线后没有消息，canCompact 必须回落 */
     await check('100% 全压后无可压内容，canCompact 回落', async () => {
-        const h = buildAgentHarness();
-        h.setMessages(Array.from({ length: 5 }, (_, i) => (
+        const h = await buildAgentHarness();
+        await h.setMessages(Array.from({ length: 5 }, (_, i) => (
             { id: `m${i}`, role: 'user', content: `消息${i}`, at: i }
         )));
         h.state().actions.setCompactRatio(1);
@@ -3244,8 +3184,8 @@ const run = async () => {
      * 正确行为是增量：只压分界线之后的新内容，旧摘要显式链进摘要器。
      */
     await check('重复压缩只压新增，旧摘要链式进入摘要器', async () => {
-        const h = buildAgentHarness();
-        h.setMessages(Array.from({ length: 10 }, (_, i) => (
+        const h = await buildAgentHarness();
+        await h.setMessages(Array.from({ length: 10 }, (_, i) => (
             { id: `m${i}`, role: 'user', content: `消息${i}`, at: i }
         )));
 
@@ -3276,7 +3216,7 @@ const run = async () => {
         let release;
         const gate = new Promise((r) => { release = r; });
         // 4 轮对话 = 4 次 chat，第 5 次是压缩的摘要调用，把它卡住
-        const h = buildAgentHarness({ hold: gate, holdAt: 5 });
+        const h = await buildAgentHarness({ hold: gate, holdAt: 5 });
         for (let i = 0; i < 4; i += 1) await h.send(`第${i}轮`);
 
         const pending = h.state().actions.compact();
@@ -3306,7 +3246,7 @@ const run = async () => {
     await check('压缩中锚点被删则丢弃本次摘要，历史不动', async () => {
         let release;
         const gate = new Promise((r) => { release = r; });
-        const h = buildAgentHarness({ hold: gate, holdAt: 5 });
+        const h = await buildAgentHarness({ hold: gate, holdAt: 5 });
         for (let i = 0; i < 4; i += 1) await h.send(`第${i}轮`);
         // 8 条消息配 60% 档：覆盖前 4 条，upTo 是第 4 条
         const anchorId = h.state().messages[3].id;
@@ -3333,7 +3273,7 @@ const run = async () => {
     await check('连点压缩只发起一次摘要调用', async () => {
         let release;
         const gate = new Promise((r) => { release = r; });
-        const h = buildAgentHarness({ hold: gate, holdAt: 5 });
+        const h = await buildAgentHarness({ hold: gate, holdAt: 5 });
         for (let i = 0; i < 4; i += 1) await h.send(`第${i}轮`);
 
         const first = h.state().actions.compact();

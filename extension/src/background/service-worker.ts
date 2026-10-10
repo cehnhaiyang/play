@@ -25,10 +25,14 @@ import {
     MAX_SNIFFED_ITEMS,
     SNIFF_DEDUP_MS,
     STORAGE_KEYS,
+    type BallRequest,
+    type ExtensionResponse,
     type PanelRequest,
     type PanelResponse,
     type SniffedMedia,
 } from '../shared/protocol';
+import { agentBridge } from './agent-bridge';
+import type { AgentEngine } from '../agent/engine';
 
 /* ========================================================================== */
 /* 1. 状态：一律落 storage，内存只做缓存                                       */
@@ -265,6 +269,33 @@ const cookieRemove = async (url: string, name: string) => {
     await chrome.cookies.remove({ url, name });
 };
 
+/**
+ * 覆盖一条 cookie 的值。
+ *
+ * 与页面宿主的 `setCookie` 不同：那条要收完整对象（保留 httpOnly / 过期时间），
+ * 这条只给面板用 —— 面板的输入框只能改值。**先读回原条目再改值**，不这么做
+ * 就是整条覆盖，会把 httpOnly 与过期时间一起抹掉，会话 cookie 当场降级。
+ */
+const cookieSet = async (url: string, name: string, value: string): Promise<boolean> => {
+    const list = await chrome.cookies.getAll({ url });
+    const existing = list.find((c) => c.name === name);
+    if (!existing) return false;
+
+    const domain = existing.domain.startsWith('.') ? existing.domain.slice(1) : existing.domain;
+    const result = await chrome.cookies.set({
+        url,
+        name,
+        value,
+        domain,
+        path: existing.path,
+        secure: existing.secure,
+        httpOnly: existing.httpOnly,
+        ...(existing.expirationDate ? { expirationDate: existing.expirationDate } : {}),
+        ...(existing.sameSite ? { sameSite: existing.sameSite } : {}),
+    });
+    return !!result;
+};
+
 /* ========================================================================== */
 /* 4. 下载                                                                    */
 /* ========================================================================== */
@@ -324,19 +355,173 @@ const downloadsStart = async (url: string, filename?: string) => {
 /* 5. 消息路由                                                                */
 /* ========================================================================== */
 
-chrome.runtime.onMessage.addListener((message: PanelRequest, _sender, sendResponse) => {
-    // 返回 true 才能异步回复。忘了它，面板收到的永远是 undefined，
-    // 表现为"界面一直转圈"。
+/**
+ * 三条通道的消息都会到这里：面板（侧边栏）、球（content script）、
+ * offscreen 宿主。**必须按 `target` 分流**。
+ *
+ * 不分流会怎样：球发的 `ai-delta` 被面板的 handler 当成未知消息，
+ * 面板回一条 `{ok:false}`，而球同时在等自己的回包 —— 于是"谁来回这一条"
+ * 变成了竞态。协议里带 `target` 就是为了让这件事是确定的。
+ *
+ * 面板的消息没有 `target`（它是既有协议，改动它要动整个侧边栏），
+ * 所以判据是"有 target 的走新路径，没有的按面板处理"。
+ */
+chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+    const envelope = message as { target?: string; kind?: string } | null;
+
+    if (envelope?.target === 'sw') {
+        void (async (): Promise<void> => {
+            try {
+                sendResponse({ ok: true, result: await dispatchBall(message as BallRequest) } satisfies ExtensionResponse);
+            } catch (e) {
+                sendResponse({ ok: false, error: errorText(e) } satisfies ExtensionResponse);
+            }
+        })();
+        // 返回 true 才能异步回复。忘了它，球收到的永远是 undefined。
+        return true;
+    }
+
+    /*
+     * offscreen 与球之间的广播不是发给 SW 的，直接放行。
+     *
+     * 不 return true 就不会占用响应通道，消息继续由真正的接收方处理。
+     */
+    if (envelope?.target === 'host' || envelope?.target === 'ball') return false;
+
+    // 其余按面板消息处理
     void (async (): Promise<void> => {
         try {
-            const result = await dispatch(message);
+            const result = await dispatch(message as PanelRequest);
             sendResponse({ ok: true, result } satisfies PanelResponse);
         } catch (e) {
-            sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) } satisfies PanelResponse);
+            sendResponse({ ok: false, error: errorText(e) } satisfies PanelResponse);
         }
     })();
     return true;
 });
+
+const errorText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+/**
+ * 悬浮球发来的请求。
+ *
+ * 与面板的 dispatch 分开：球能做的事**严格多于**面板（它能驱动 Agent、
+ * 能附着调试器），而面板没有那个上下文。合成一个 switch 会让"面板能不能
+ * 调 page-eval"这个问题永远没有答案。
+ */
+const dispatchBall = async (message: BallRequest): Promise<unknown> => {
+    switch (message.kind) {
+        case 'sniffer-set-enabled':
+            await setEnabled(message.enabled);
+            return { enabled: message.enabled };
+
+        case 'sniffer-get-state':
+            return { enabled: await getEnabled(), items: await getItems() };
+
+        case 'sniffer-clear':
+            await clearItems();
+            return { cleared: true };
+
+        case 'downloads-start':
+            return { downloadId: await downloadsStart(message.url, message.filename) };
+
+        case 'cookies-get':
+            return cookiesGet(message.url);
+
+        case 'cookies-set':
+            return { saved: await cookieSet(message.url, message.name, message.value) };
+
+        case 'cookies-remove':
+            await cookieRemove(message.url, message.name);
+            return { removed: true };
+
+        /*
+         * Agent 的三条：引擎挂在 agentBridge 上，球只负责转发。
+         *
+         * 这些消息**不带 tabId**：引擎每次都问宿主的 `activeTab()`，
+         * 那是"当前操作哪个页面"的唯一权威。球传一个自己的 tabId 会让同一个
+         * 事实有两个存放处 —— 用户切标签页后两边立刻不一致。
+         */
+        case 'host-ensure':
+            await agentBridge.ensureOffscreen();
+            return { ready: true };
+
+        case 'agent-snapshot': {
+            const engine = await agentBridge.getEngine();
+            return { snapshot: engine.snapshot() };
+        }
+
+        case 'agent-action': {
+            const engine = await agentBridge.getEngine();
+            return { result: await runAgentAction(engine, message) };
+        }
+
+        case 'page-eval': {
+            /*
+             * 直接执行，不走引擎的主循环。
+             *
+             * 这条给"脚本页的手动运行"用：它不属于任何一次模型调用，
+             * 走 dispatchTool 反而会被 busy 闸门挡住。串行化仍由引擎的队列
+             * 保证 —— 换一条路径执行就等于绕开了"模型步骤与手动执行不交错"。
+             */
+            const engine = await agentBridge.getEngine();
+            return { result: await engine.execForScript(message.tabId, message.code) };
+        }
+
+        case 'page-navigate': {
+            const engine = await agentBridge.getEngine();
+            return { result: await engine.navigateForScript(message.tabId, message.url) };
+        }
+
+        default: {
+            // 穷尽检查：新增 BallRequest 分支却忘了在这里处理时，
+            // 这一行会变成类型错误，而不是运行时的静默 undefined。
+            const never: never = message;
+            throw new Error(`未知消息：${JSON.stringify(never)}`);
+        }
+    }
+};
+
+/** 引擎上的动作。形状与 AgentState['actions'] 一致，球原样转发 */
+const runAgentAction = async (
+    engine: AgentEngine,
+    message: Extract<BallRequest, { kind: 'agent-action' }>,
+): Promise<unknown> => {
+    const { action } = message;
+    switch (action.type) {
+        case 'send':
+            await engine.snapshot().actions.send(action.prompt);
+            return { done: true };
+        case 'stop':
+            engine.snapshot().actions.stop();
+            return { done: true };
+        case 'clear':
+            engine.snapshot().actions.clear();
+            return { done: true };
+        case 'compact':
+            return { compaction: await engine.snapshot().actions.compact() };
+        case 'set-compact-ratio':
+            engine.snapshot().actions.setCompactRatio(action.ratio);
+            return { done: true };
+        case 'remove-message':
+            engine.snapshot().actions.removeMessage(action.id);
+            return { done: true };
+        case 'rewind':
+            return { prompt: engine.snapshot().actions.rewindTo(action.id) };
+        case 'run-script':
+            return { result: await engine.snapshot().actions.runScriptNow(action.id) };
+        case 'remove-script':
+            engine.snapshot().actions.removeScript(action.id);
+            return { done: true };
+        case 'toggle-script':
+            engine.snapshot().actions.toggleScript(action.id);
+            return { done: true };
+        default: {
+            const never: never = action;
+            throw new Error(`未知 Agent 动作：${JSON.stringify(never)}`);
+        }
+    }
+};
 
 const dispatch = async (message: PanelRequest): Promise<unknown> => {
     switch (message.kind) {

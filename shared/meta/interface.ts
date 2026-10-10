@@ -1981,21 +1981,14 @@ export interface TamperState {
  * ============================================================================
  * 10. Agent 工作空间
  * ============================================================================
+ *
+ * 引擎与它的宿主接口都在 `extension/src/agent/`：Agent 是浏览器侧的能力
+ * （要 tabId、chrome.cookies、页面主世界执行），应用侧没有任何调用者。
+ *
+ * 这里只留 `AgentState` 与它引用的记录类型 —— 它们是**界面契约**，
+ * 插件侧边栏与悬浮球都按这个形状渲染，而 `shared/core/agent-export.ts`
+ * 也按 `AgentMessage[]` 导出会话 Markdown。
  */
-
-export interface AgentDeps {
-    getActiveWebview: () => WebviewElement | null;
-    /** 页面就绪广播：自动执行的脚本挂在这里，不另挂监听 */
-    onPageReady: (cb: (tabId: string, webview: WebviewElement) => void) => () => void;
-    /**
-     * 篡改引擎的完整状态。
-     *
-     * 要 state 不只是 actions：规则的真值由 useTamper 持有，`tamper` 的
-     * 部分更新必须先读到当前值再合并。Agent 这边**不另存副本** —— 两份真值
-     * 迟早会不一致。
-     */
-    tamper: TamperState;
-}
 
 export interface AgentState {
     messages: AgentMessage[];

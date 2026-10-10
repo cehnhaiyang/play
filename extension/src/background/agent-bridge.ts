@@ -1,0 +1,202 @@
+import { AgentEngine, memoryStorage } from '../agent/engine';
+import type { ChatPort, EngineSnapshot, EngineStorage } from '../agent/engine';
+import { pageHost } from '../offscreen/page-host';
+import { createChatPort } from './chat-port';
+
+/**
+ * Agent 在 service worker 里的接线。
+ *
+ * ## 引擎放哪：SW 还是 offscreen
+ *
+ * 拆成两半：
+ *
+ * - **引擎（状态机 + 工具派发）放 SW**。它要 `chrome.tabs` / `chrome.cookies` /
+ *   `chrome.debugger` 这一整套 API，而 offscreen 文档**没有** chrome.* 的大部分
+ *   命名空间（它是个普通页面）。放过去的话每个动作都要再转发一次。
+ * - **模型调用放 offscreen**。一次流式补全可能几分钟，而 SW 空闲约 30 秒被回收。
+ *
+ * 所以真正的风险是"SW 在 Agent 跑着的时候被回收"。对策是**只要引擎在跑就持续
+ * 唤醒**：每一步工具调用、每一次流式增量都会碰 chrome API，而 Chrome 的规则是
+ * "扩展 API 活动会重置空闲计时器"。轮内还有一道显式保活（见 keepAlive）。
+ *
+ * ## 消息必须按 requestId 分流
+ *
+ * 流式增量是**广播**的（响应通道只有一个终值，装不下持续增量），所以这个文件
+ * 会收到属于**任何一个**球的事件。按 requestId 对回本地登记的那次调用，
+ * 认不出的一律忽略 —— 否则 A 球的输出会出现在 B 球的对话里。
+ */
+
+/* ========================================================================== */
+/* 1. 存储端口                                                                */
+/* ========================================================================== */
+
+/**
+ * `chrome.storage.local` 上的引擎存储。
+ *
+ * 不用 `storage.session`：对话历史该活过浏览器重启 —— 用户关掉浏览器再打开，
+ * 上一次的排查过程还在，这是这个功能可用性的前提。
+ */
+const chromeStorage: EngineStorage = {
+    load: async <T,>(key: string, fallback: T): Promise<T> => {
+        const got = await chrome.storage.local.get(key);
+        return key in got ? (got[key] as T) : fallback;
+    },
+    save: async (key, value) => {
+        await chrome.storage.local.set({ [key]: value });
+    },
+};
+
+/* ========================================================================== */
+/* 2. 引擎实例                                                                */
+/* ========================================================================== */
+
+/**
+ * 全局单例。
+ *
+ * **只能有一个。** 引擎持有对话历史、脚本清单与执行队列；两个实例意味着两套
+ * 真值，而"哪一套是对的"没有答案。SW 被回收后重新求值本文件，`hydrate()`
+ * 从 storage 把历史读回来 —— 实例重建，但状态不丢。
+ */
+let engine: AgentEngine | null = null;
+
+/** 最近一次快照。球随时可能问"现在什么状态"，而引擎的推送是增量的 */
+let lastSnapshot: EngineSnapshot | null = null;
+
+/** 引擎是否正在跑一轮。用来决定保活定时器开不开 */
+let running = false;
+
+/**
+ * 保活。
+ *
+ * SW 的空闲回收按"最后一次扩展 API 活动"计时。Agent 的一步里可能有长时间
+ * 没有 chrome API 调用（模型正在生成），那时计时器会走满。所以轮内每 20 秒
+ * 主动碰一次 `chrome.storage` —— 它是最便宜的 API，不产生副作用。
+ *
+ * 轮结束就停：不跑的时候让它正常回收，常驻保活等于让扩展永远占着一个进程。
+ */
+let keepAliveTimer: number | null = null;
+
+const startKeepAlive = (): void => {
+    if (keepAliveTimer !== null) return;
+    keepAliveTimer = self.setInterval(() => {
+        void chrome.storage.local.get('agent-keepalive').catch(() => undefined);
+    }, 20000);
+};
+
+const stopKeepAlive = (): void => {
+    if (keepAliveTimer === null) return;
+    self.clearInterval(keepAliveTimer);
+    keepAliveTimer = null;
+};
+
+/** 把快照广播给球，并顺手更新保活状态 */
+const publish = (snapshot: EngineSnapshot): void => {
+    lastSnapshot = snapshot;
+    const nowRunning = snapshot.status !== 'idle' || snapshot.compacting;
+    if (nowRunning && !running) startKeepAlive();
+    if (!nowRunning && running) stopKeepAlive();
+    running = nowRunning;
+
+    void chrome.runtime.sendMessage({ target: 'ball', kind: 'agent-snapshot', snapshot })
+        .catch(() => undefined);
+};
+
+/** 取引擎，第一次调用时构造并恢复历史 */
+const getEngine = async (): Promise<AgentEngine> => {
+    if (engine) return engine;
+    const created = new AgentEngine({
+        host: pageHost,
+        storage: chromeStorage,
+        chat: createChatPort(ensureOffscreen),
+        onDelta: (delta) => {
+            void chrome.runtime.sendMessage({ target: 'ball', kind: 'agent-delta', delta })
+                .catch(() => undefined);
+        },
+        onSnapshot: publish,
+    });
+    engine = created;
+    await created.hydrate();
+    return created;
+};
+
+/* ========================================================================== */
+/* 3. offscreen 宿主文档                                                      */
+/* ========================================================================== */
+
+const OFFSCREEN_PATH = 'offscreen.html';
+
+/**
+ * 确保 offscreen 文档存在。
+ *
+ * 三种状态要分清，混在一起会让"创建"被反复调用：
+ *   · 不存在 → 创建；
+ *   · 存在且正常 → 直接返回；
+ *   · **正在创建中** → 等同一个 Promise。`createDocument` 是异步的，两次
+ *     并发调用都会看到"不存在"，然后第二次抛 "Only a single offscreen
+ *     document may be created"。
+ */
+let offscreenCreating: Promise<void> | null = null;
+
+export const ensureOffscreen = async (): Promise<void> => {
+    if (await chrome.offscreen.hasDocument()) return;
+    if (offscreenCreating) return offscreenCreating;
+
+    offscreenCreating = chrome.offscreen
+        .createDocument({
+            url: OFFSCREEN_PATH,
+            /*
+             * reasons 是必填且**必须是枚举里的值**。选 WORKERS 是因为它最贴近
+             * 实际用途：这个文档承载一个长跑的异步任务。
+             *
+             * ⚠️ 这个枚举值与真实用途不完全吻合（Chrome 没有"跑网络请求"这一项）。
+             * 它只是给用户看的说明，不影响权限 —— 但要知道这一处是迁就 API 形状。
+             */
+            reasons: ['WORKERS' as chrome.offscreen.Reason],
+            justification: '在扩展页面里执行长时间的模型调用，避免 service worker 空闲回收中断对话。',
+        })
+        .finally(() => {
+            offscreenCreating = null;
+        });
+
+    return offscreenCreating;
+};
+
+/* ========================================================================== */
+/* 4. 页面就绪 → 跑自动脚本                                                    */
+/* ========================================================================== */
+
+/**
+ * 页面就绪广播接进引擎。
+ *
+ * 注册在顶层，但**引擎是懒构造的** —— 这里只在引擎已经存在时转发。
+ * 未构造时说明用户还没用过 Agent，那些自动脚本本来也没有可执行的宿主。
+ */
+pageHost.onPageReady((tabId, url) => {
+    if (!engine) return;
+    void engine.onPageReady(tabId, url);
+});
+
+/* ========================================================================== */
+/* 5. 导出给消息路由用                                                         */
+/* ========================================================================== */
+
+export interface AgentBridge {
+    getEngine: () => Promise<AgentEngine>;
+    ensureOffscreen: () => Promise<void>;
+    snapshot: () => EngineSnapshot | null;
+}
+
+export const agentBridge: AgentBridge = {
+    getEngine,
+    ensureOffscreen,
+    snapshot: () => lastSnapshot,
+};
+
+/** 测试与降级路径用：不落盘、不发网络的引擎 */
+export const createMemoryEngine = (chat: ChatPort): AgentEngine => new AgentEngine({
+    host: pageHost,
+    storage: memoryStorage(),
+    chat,
+    onDelta: () => undefined,
+    onSnapshot: () => undefined,
+});

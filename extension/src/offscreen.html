@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="utf-8" />
+    <title>The Play — 宿主</title>
+</head>
+
+<body>
+    <!--
+        这个文档没有可见界面。
+
+        它存在的唯一理由是：模型调用需要一条不受 service worker 空闲回收影响、
+        也不受页面 CSP 约束的生命周期。脚本自己挂到 #root 上，不需要挂载点。
+    -->
+    <div id="root"></div>
+    <script type="module" src="./offscreen/host.ts"></script>
+</body>
+
+</html>

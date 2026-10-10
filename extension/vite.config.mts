@@ -57,6 +57,7 @@ export default defineConfig({
       },
       input: {
         panel: `${here}src/panel.html`,
+        offscreen: `${here}src/offscreen.html`,
         'service-worker': `${here}src/background/service-worker.ts`,
       },
       output: {
