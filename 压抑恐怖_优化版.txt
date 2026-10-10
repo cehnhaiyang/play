@@ -1,10 +1,9 @@
 # 压抑恐怖 —— SPG 工程（按引擎实际语法重写并扩展）
 #
 # 骨架：三全音（C–Gb）长音 + 错拍心跳 + 神经质刺音 + 丧钟。
-# 除心跳外每个声部都是 4 小节长（tempo 50 = 19.2 秒），mix 的 loop 才能严丝合缝地叠加；
-# 心跳只有 1 小节，靠 loop=8 铺满同样长度。呼吸层刻意留了 0.35 秒错位，见文件末尾说明。
-# 情绪走向：第 1-2 小节只有深渊长音与心跳；第 3 小节刺音进入、第 6 小节后消失；
-# 第 5 小节起丧钟与加快的心率加入，由三次钟声收束全曲。
+# 除两条心跳外，每个声部都是 4 小节长（tempo 50 下 4 小节 = 19.2 秒），mix 的 loop
+# 才能严丝合缝地叠加；心跳只有 1 小节（4.8 秒），靠 loop=8 铺满同样长度。
+# 全曲 8 小节：长音与心跳铺满，刺音占第 3-6 小节，丧钟与加快的心率从第 5 小节起。
 
 config {
   tempo: 50          # 慢到能听见"等待"，恐怖感主要来自这个速度
@@ -110,15 +109,18 @@ sequence(name="heartbeat") {
 }
 
 # 1 小节：同样的"咚—哒"压成三组，音高上移、力度变小 —— 心率快了，人却没力气了
+# 每组占 1 拍（8n + 16n + 16n），三组之后补 1 拍休止，整段正好 4 拍
 sequence(name="heartbeat_fast") {
-  hit("kick", "8n", tune=2, decay=0.85, snap=0.1, velocity=0.8)
-  hit("kick", "8n", tune=-1, decay=0.55, tone=-350, velocity=0.35)
-  rest("8n")
-  hit("kick", "8n", tune=2, decay=0.85, snap=0.1, velocity=0.75)
-  hit("kick", "8n", tune=-1, decay=0.55, tone=-350, velocity=0.32)
-  rest("8n")
-  hit("kick", "8n", tune=3, decay=0.8, snap=0.08, velocity=0.7)
-  hit("kick", "8n", tune=0, decay=0.5, tone=-350, velocity=0.3)
+  hit("kick", "8n",  tune=2,  decay=0.85, snap=0.1,  velocity=0.8)
+  hit("kick", "16n", tune=-1, decay=0.5,  tone=-350, velocity=0.35)
+  rest("16n")
+  hit("kick", "8n",  tune=2,  decay=0.85, snap=0.1,  velocity=0.75)
+  hit("kick", "16n", tune=-1, decay=0.5,  tone=-350, velocity=0.32)
+  rest("16n")
+  hit("kick", "8n",  tune=3,  decay=0.8,  snap=0.08, velocity=0.7)
+  hit("kick", "16n", tune=0,  decay=0.5,  tone=-350, velocity=0.3)
+  rest("16n")
+  rest("4n")
 }
 
 # 4 小节：长音之间留出真正的空白，噪声层才有"房间"的感觉
@@ -171,7 +173,7 @@ mix {
 }
 
 # ---------------------------------------------------------------- 调参笔记
-# 1. 所有音序都在同一时刻起步，听起来却不整齐，靠的是两处刻意设计：
+# 1. 长音、心跳、呼吸三层都从第 0 秒起步，听起来却不整齐，靠的是两处刻意设计：
 #    呼吸层 0.35 秒的错位，以及各音序内部的休止——恐怖音乐最忌讳声部同时换音。
 # 2. mix 的 loop 是"再演一遍"：每次循环从上一遍的终点接续，不叠加错位。
 #    想做出"一遍比一遍更紧"要用多次 track，或用 stagger。
