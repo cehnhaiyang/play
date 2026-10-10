@@ -2764,7 +2764,11 @@ export interface UsePlayReturn {
          * 调用方据此决定要不要弹「播放中」提示。
          */
         togglePlay: () => boolean;
-        seek: (time: number) => void;
+        /**
+         * 跳转到指定时刻。返回「本次是否真的跳了」：直播或时长未知的源上
+         * 跳转无效并返回 false，调用方据此决定要不要弹「+10s」提示。
+         */
+        seek: (time: number) => boolean;
         setVolume: (volume: number) => void;
         setPlaybackRate: (rate: number) => void;
         setPlaybackMode: (mode: PlaybackMode) => void;
@@ -2782,7 +2786,8 @@ export interface UsePlayReturn {
         addAiBook: (name: string, pages: AiBookEntryPage[]) => void;
         /** 绘本朗读语音缓存写回（按条目 id） */
         cacheAudioData: (fileId: string, base64: string) => void;
-        addStream: (url: string, name?: string, autoPlay?: boolean, mediaType?: MediaType) => void;
+        /** 追加一条网络流并跳转到它（自动播放由加载流程统一发起） */
+        addStream: (url: string, name?: string, mediaType?: MediaType) => void;
         addMultipleStreams: (streams: (Partial<VideoFile> & { url: string; title?: string })[], autoPlayFirst?: boolean, clearPrevious?: boolean) => void;
         appendStreams: (streams: (Partial<VideoFile> & { url: string; title?: string })[]) => void;
         /** 有序合并：同 groupId 的图集页按 page 升序归位（迟到/重试的页插回正确位置），当前看到的那页锚定不动 */

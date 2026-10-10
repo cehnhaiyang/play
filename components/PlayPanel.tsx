@@ -35,6 +35,15 @@ import { generateStoryFromImages, toImageInput, AIBOOK_MAX_SOURCE_IMAGES, genera
 interface PlayPanelProps {
     player: UsePlayReturn;
     onBackToBrowse: () => void;
+    /**
+     * 播放器是否在前台。
+     *
+     * PlayPanel 由 App 常驻挂载（切走只是 translate 出屏），所以窗口级快捷键
+     * 不加这道闸就会在浏览面板里继续生效：按 M 把播放器静音、按 F 把播放器
+     * 拉进全屏、按 ? 打开一个看不见的弹窗。播放本身要继续（后台出声是需要的），
+     * 只挡「用户以为在操作当前界面」的键盘输入。
+     */
+    isVisible: boolean;
 }
 
 // 枚举值为英文，此处统一中文化，避免 UI 裸奔英文
@@ -442,15 +451,12 @@ const useClickOutside = (
 
 /* 图标按钮 */
 
-type IconButtonTone = 'default' | 'accent' | 'danger' | 'teal' | 'amber' | 'ghost';
-type IconButtonSize = 'sm' | 'md' | 'lg' | 'xl';
+type IconButtonTone = 'default' | 'danger' | 'ghost';
+type IconButtonSize = 'sm' | 'md' | 'lg';
 
 const ICON_TONES: Record<IconButtonTone, string> = {
     default: 'text-slate-400 hover:text-white hover:bg-white/10',
-    accent: 'text-indigo-300 hover:text-white hover:bg-indigo-500/20',
     danger: 'text-slate-400 hover:text-rose-400 hover:bg-rose-500/15',
-    teal: 'text-teal-300 hover:text-white hover:bg-teal-500/20',
-    amber: 'text-amber-300 hover:text-white hover:bg-amber-500/20',
     ghost: 'text-slate-300 hover:text-white hover:bg-white/10',
 };
 
@@ -458,15 +464,6 @@ const ICON_SIZES: Record<IconButtonSize, string> = {
     sm: 'p-1.5 rounded-lg',
     md: 'p-2 rounded-xl',
     lg: 'p-2.5 rounded-xl',
-    xl: 'p-3 rounded-2xl',
-};
-
-/** 各尺寸对应的图标边长，保证图标与内边距同步放大 */
-const ICON_GLYPH: Record<IconButtonSize, string> = {
-    sm: 'w-3.5 h-3.5',
-    md: 'w-4 h-4',
-    lg: 'w-[18px] h-[18px]',
-    xl: 'w-5 h-5',
 };
 
 interface IconButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -474,15 +471,12 @@ interface IconButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> 
     tone?: IconButtonTone;
     /** 同时作为 title 与 aria-label */
     label: string;
-    /** 实心背景（主操作按钮用），覆盖 tone 的悬停底色 */
-    solid?: boolean;
 }
 
 const IconButton: React.FC<IconButtonProps> = ({
     size = 'md',
     tone = 'default',
     label,
-    solid = false,
     className = '',
     children,
     ...rest
@@ -493,7 +487,7 @@ const IconButton: React.FC<IconButtonProps> = ({
         aria-label={label}
         className={[
             'inline-flex items-center justify-center shrink-0 transition',
-            solid ? '' : ICON_TONES[tone],
+            ICON_TONES[tone],
             ICON_SIZES[size],
             'disabled:opacity-40 disabled:cursor-not-allowed',
             className,
@@ -503,9 +497,6 @@ const IconButton: React.FC<IconButtonProps> = ({
         {children}
     </button>
 );
-
-/** IconButton 配套的图标尺寸类，供调用方复用同一档位 */
-const iconGlyph = (size: IconButtonSize): string => ICON_GLYPH[size];
 
 /* 胶囊按钮 / 徽章                                                             */
 /* -------------------------------------------------------------------------- */
@@ -544,8 +535,6 @@ interface ModalProps {
     title: string;
     /** 标题左侧图标 */
     icon?: React.ReactNode;
-    /** 标题右侧、关闭按钮前的补充操作 */
-    headerExtra?: React.ReactNode;
     /** 底部操作区 */
     footer?: React.ReactNode;
     maxWidth?: string;
@@ -558,7 +547,6 @@ const Modal: React.FC<ModalProps> = ({
     onClose,
     title,
     icon,
-    headerExtra,
     footer,
     maxWidth = 'max-w-md',
     children,
@@ -621,7 +609,6 @@ const Modal: React.FC<ModalProps> = ({
                         <span className="truncate">{title}</span>
                     </h3>
                     <div className="flex items-center gap-1 shrink-0">
-                        {headerExtra}
                         <IconButton label="关闭 (Esc)" onClick={onClose}>
                             <X className="w-4 h-4" />
                         </IconButton>
@@ -743,7 +730,8 @@ const SHORTCUT_GROUPS: { title: string; items: { label: string; keys: string[] }
 const PAGED_SHORTCUTS: { label: string; keys: string[] }[] = [
     { label: '上一页', keys: ['P', '←'] },
     { label: '下一页', keys: ['N', '→'] },
-    { label: '播放 / 暂停轮播', keys: ['Space', 'K'] },
+    // 文档是静态页，没有播放态，Space/K 在文档上不生效（见 isSlideshowMedia）
+    { label: '播放 / 暂停轮播（文档除外）', keys: ['Space', 'K'] },
 ];
 
 const KeyCap: React.FC<{ children: React.ReactNode }> = ({ children }) => (
@@ -1424,7 +1412,7 @@ const StoryReader: React.FC<StoryReaderProps> = ({ file, pages, onCacheAudio, on
     );
 };
 
-export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) => {
+export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse, isVisible }) => {
     const { state, playlist, videoRef, currentFile, mediaError, mediaWarning, pageInfo, methods } = player;
 
     // 纯视频全屏容器：隔离左侧播放列表
@@ -1477,11 +1465,16 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         return Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, saved));
     });
     const sidebarRef = useRef<HTMLDivElement>(null);
+    // 拖拽中要摘掉 width 过渡，否则侧栏追不上光标。这个事实必须用 state 存：
+    // ref 不触发重渲染，写成 `resizeCleanupRef.current ? '' : 'transition-…'`
+    // 只在别的 state 恰好变化时才更新 —— 松手后过渡类要等到下一次重渲染才回来。
+    const [isResizing, setIsResizing] = useState(false);
     const resizeCleanupRef = useRef<(() => void) | null>(null);
     const endSidebarResize = useCallback(() => {
         resizeCleanupRef.current?.();
         resizeCleanupRef.current = null;
         document.body.classList.remove('tp-resizing');
+        setIsResizing(false);
     }, []);
     // 卸载时回收 window 监听（避免过期闭包残留）
     useEffect(() => () => endSidebarResize(), [endSidebarResize]);
@@ -1490,6 +1483,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         e.preventDefault();
         endSidebarResize();
         document.body.classList.add('tp-resizing');
+        setIsResizing(true);
 
         const apply = (clientX: number) => {
             const left = sidebarRef.current?.getBoundingClientRect().left ?? 0;
@@ -1722,26 +1716,38 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         e.preventDefault();
         dragDepthRef.current = 0;
         setIsDragging(false);
-        // 绘本生成器整屏覆盖时由它自己接管投放：这里再导一次会把同一批图片
-        // 同时塞进播放列表，用户拿到一本不该存在的绘本
-        if (showGenerator) return;
         const files = e.dataTransfer?.files;
         if (files && files.length > 0) void importFilesSmart(files);
-    }, [importFilesSmart, showGenerator]);
+    }, [importFilesSmart]);
 
-    // 拖出窗口松手/取消时 drop 不触发：窗口级兜底 + relatedTarget 为 null 判离开文档
+    // 拖出窗口松手/取消时 drop 不触发：窗口级兜底 + relatedTarget 为 null 判离开文档。
+    //
+    // 这里同时是「文件拖拽不会导航走」的唯一所有者：投放区只覆盖右侧主容器，
+    // 拖到侧栏（或任何容器之外）松手会落到浏览器默认行为 —— 直接把窗口导航到
+    // file://，整个界面被文件内容顶掉，且没有后退入口。在 window 上统一
+    // preventDefault 之后，落在投放区外的拖拽只会被忽略，不会毁掉界面。
     useEffect(() => {
         const reset = () => {
             dragDepthRef.current = 0;
             setIsDragging(false);
         };
+        const isFileDrag = (e: DragEvent) =>
+            Array.from(e.dataTransfer?.types || []).includes('Files');
+        // 只拦「带文件」的拖拽：书签排序等内部拖拽有自己的 dragover/drop 语义
+        const suppressNavigation = (e: DragEvent) => {
+            if (isFileDrag(e)) e.preventDefault();
+        };
         const onWindowDragLeave = (e: DragEvent) => {
             if (e.relatedTarget === null) reset();
         };
+        window.addEventListener('dragover', suppressNavigation);
+        window.addEventListener('drop', suppressNavigation);
         window.addEventListener('drop', reset);
         window.addEventListener('dragend', reset);
         window.addEventListener('dragleave', onWindowDragLeave);
         return () => {
+            window.removeEventListener('dragover', suppressNavigation);
+            window.removeEventListener('drop', suppressNavigation);
             window.removeEventListener('drop', reset);
             window.removeEventListener('dragend', reset);
             window.removeEventListener('dragleave', onWindowDragLeave);
@@ -1777,11 +1783,12 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
         methods.toggleFullscreen(playerContainerRef.current);
     }, [methods]);
 
-    // 快进/快退（带视觉提示）
+    // 快进/快退（带视觉提示）：seek 会拒绝无效跳转（直播/时长未知），
+    // 此时不弹「+10s」——弹了画面没动比不弹更让人困惑
     const handleSeekDelta = useCallback((delta: number) => {
         if (!videoRef.current) return;
         const target = Math.max(0, Math.min(state.duration || 0, state.currentTime + delta));
-        methods.seek(target);
+        if (!methods.seek(target)) return;
         showFeedback(delta > 0 ? `+${delta}s` : `${delta}s`, delta > 0 ? 'forward' : 'rewind');
     }, [methods, showFeedback, state.currentTime, state.duration, videoRef]);
 
@@ -1915,13 +1922,25 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
     // 图片轮播：绘本 12s/页（留阅读时间），普通图片 4s/页，均受倍速缩放
     useEffect(() => {
         if (currentFile?.mediaType !== 'image' || !state.isPlaying) return;
+
+        // 已在列表末项：轮播无从继续，立刻退出播放态，而不是等第一次 tick 才反应。
+        // nextPage 到头即停（不回绕），若仍留着 isPlaying，控制条会因「正在播放」
+        // 持续自动隐藏，而画面早已不动 —— 用户面对一张静止的图找不到控制条；
+        // 单张图片同理（没有下一页可翻）。等一次 tick 再暂停会白留几秒这种状态。
+        // 判据用整列表下标而非 pageInfo：后者在画廊内是组内口径，
+        // 拿它判会连「本画廊看完自动接下一部」也一并掐掉。
+        if (playlist.currentIndex >= playlist.files.length - 1) {
+            methods.pause();
+            return;
+        }
+
         const rate = Number.isFinite(state.playbackRate) && state.playbackRate > 0 ? state.playbackRate : 1;
         const baseMs = isStoryPage ? 12000 : 4000;
         const timer = setInterval(() => {
             methods.nextPage();
         }, Math.max(500, Math.round(baseMs / rate)));
         return () => clearInterval(timer);
-    }, [currentFile?.mediaType, currentFile?.id, state.isPlaying, state.playbackRate, methods, isStoryPage]);
+    }, [currentFile?.mediaType, currentFile?.id, state.isPlaying, state.playbackRate, methods, isStoryPage, playlist.currentIndex, playlist.files.length]);
 
     // 一键关闭所有浮层（Esc 用）
     const closeOverlaysRef = useRef(() => { });
@@ -1940,9 +1959,15 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
     mediaKindRef.current = currentFile?.mediaType;
     const playStateRef = useRef({ isPlaying: state.isPlaying, isMuted: state.isMuted, volume: state.volume });
     playStateRef.current = { isPlaying: state.isPlaying, isMuted: state.isMuted, volume: state.volume };
+    // 前台标志同样走 ref：否则每次切视图都要重绑 keydown 监听
+    const isVisibleRef = useRef(isVisible);
+    isVisibleRef.current = isVisible;
 
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
+            // 播放器不在前台时一律不接管键盘：这些键要留给当前界面
+            // （浏览面板的 Esc 关面板、输入框里的空格与字母都不该被吞掉）
+            if (!isVisibleRef.current) return;
             // Esc 优先关闭浮层（含输入框内），放输入守卫之前
             if (e.code === 'Escape') {
                 closeOverlaysRef.current();
@@ -2409,7 +2434,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                 ref={sidebarRef}
                 style={{ width: isSidebarOpen ? sidebarWidth : 0 }}
                 className={`relative bg-slate-900/95 backdrop-blur-xl border-r border-white/8 flex flex-col shrink-0 z-30 ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full overflow-hidden border-r-0 invisible'
-                    } ${resizeCleanupRef.current ? '' : 'transition-[width,transform] duration-300 ease-in-out'}`}
+                    } ${isResizing ? '' : 'transition-[width,transform] duration-300 ease-in-out'}`}
                 aria-hidden={!isSidebarOpen}
             >
                 {/* 顶部标题与收起/清空操作 */}
@@ -2762,9 +2787,11 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse }) 
                     </div>
                 </div>
 
-                {/* 画面正中央反馈浮标 (提示 +5s, -5s, 音量变化等) */}
+                {/* 画面正中央反馈浮标 (提示 +5s, -5s, 音量变化等)。
+                    key 用 badgeText.id：连续两次同向快进文案相同，不加 key 时
+                    React 复用同一个节点，入场动画不会重播，看起来像没响应。 */}
                 {badgeText && (
-                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-40 animate-in fade-in zoom-in-75 duration-100">
+                    <div key={badgeText.id} className="absolute inset-0 flex items-center justify-center pointer-events-none z-40 animate-in fade-in zoom-in-75 duration-100">
                         <div className="flex items-center gap-2.5 px-5 py-3 rounded-2xl bg-black/80 backdrop-blur-xl border border-white/15 text-white shadow-2xl">
                             {badgeText.icon === 'forward' && <FastForward className="w-6 h-6 text-indigo-400 animate-pulse" />}
                             {badgeText.icon === 'rewind' && <Rewind className="w-6 h-6 text-indigo-400 animate-pulse" />}

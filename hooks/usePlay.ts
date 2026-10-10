@@ -253,7 +253,7 @@ export const usePlay = (): UsePlayReturn => {
     // 播放
     const play = useCallback(async () => {
         const file = currentFileRef.current;
-        // 图集 / 文档走幻灯片模式：无 video 元素时直接翻转播放态
+        // 图集走幻灯片模式：无 video 元素时直接翻转播放态（文档是静态页，不算幻灯片）
         if (!videoRef.current) {
             if (file && isSlideshowMedia(file.mediaType)) {
                 setMediaError(null);
@@ -306,25 +306,32 @@ export const usePlay = (): UsePlayReturn => {
         return true;
     }, [play, pause]);
 
-    // 跳转（直播 / 无限时长直接忽略，避免抛异常）
-    // 暂停下快进/快退必须保持暂停：某些 Chromium 在 seek 后会恢复播放，
-    // 这里显式按住暂停态（先记 paused，设完 currentTime 后若被唤醒则按回去）
-    const seek = useCallback((time: number) => {
+    /**
+     * 跳转（直播 / 无限时长直接忽略，避免抛异常）。
+     *
+     * 返回「本次是否真的跳了」：直播与未加载出时长的源上跳转无效，
+     * 调用方据此决定要不要弹「+10s」提示 —— 弹了却没动等于骗人。
+     *
+     * 暂停下快进/快退必须保持暂停：某些 Chromium 在 seek 后会恢复播放，
+     * 这里显式按住暂停态（先记 paused，设完 currentTime 后若被唤醒则按回去）。
+     */
+    const seek = useCallback((time: number): boolean => {
         const video = videoRef.current;
-        if (!video) return;
+        if (!video) return false;
         const dur = video.duration;
-        if (!Number.isFinite(dur) || dur <= 0) return;
+        if (!Number.isFinite(dur) || dur <= 0) return false;
         const target = Math.max(0, Math.min(time, dur));
         const wasPaused = video.paused;
         try {
             video.currentTime = target;
         } catch {
-            return;
+            return false;
         }
         if (wasPaused && !video.paused) {
             try { video.pause(); } catch { /* ignore */ }
         }
         setState(prev => (wasPaused && prev.isPlaying ? { ...prev, currentTime: target, isPlaying: false } : { ...prev, currentTime: target }));
+        return true;
     }, []);
 
     // 音量
@@ -656,8 +663,8 @@ export const usePlay = (): UsePlayReturn => {
         setPlaylist({ files: updated, currentIndex: prev.files.length });
     }, []);
 
-    // 添加网络流
-    const addStream = useCallback((url: string, name?: string, autoPlay = true, mediaType?: MediaType) => {
+    // 添加网络流。跳转到新条目后由加载 effect 统一发起播放，此处不自己调 play()
+    const addStream = useCallback((url: string, name?: string, mediaType?: MediaType) => {
         const trimmed = url.trim();
         if (!trimmed) return;
         const streamFile = createStreamFile(trimmed, name, mediaType);
@@ -665,8 +672,6 @@ export const usePlay = (): UsePlayReturn => {
         const prev = playlistRef.current;
         const updated = [...prev.files, streamFile];
         setPlaylist({ files: updated, currentIndex: updated.length - 1 });
-        void autoPlay;
-        // 自动播放由下方 currentFile 加载 effect 统一触发，避免 setTimeout 竞态
     }, []);
 
     // 批量添加网络流/图集页面
@@ -928,7 +933,10 @@ export const usePlay = (): UsePlayReturn => {
         }
 
         if (!video) {
-            // 音频分支的隐藏 video 尚未挂载时先标缓冲，挂载后 effect 会重跑
+            // 防御性分支：音视频分支在**同一次提交**里就渲染了 video 元素，
+            // 而 effect 在提交之后才跑，所以正常路径下 videoRef 一定有值。
+            // 真走到这里说明渲染分支与 mediaType 判定脱节了（那是个 bug），
+            // 这里只保证不崩：标成缓冲而不是拿 null 去赋 src。
             setState(prev => ({ ...prev, isBuffering: true }));
             return;
         }
@@ -1059,7 +1067,7 @@ export const usePlay = (): UsePlayReturn => {
         if (Math.abs(video.playbackRate - state.playbackRate) > 0.001) {
             try { video.playbackRate = state.playbackRate; } catch { /* ignore */ }
         }
-    }, [state.volume, state.isMuted, state.playbackRate, currentFile]);
+    }, [state.volume, state.isMuted, state.playbackRate, mediaSourceKey]);
 
     // 绑定原生音视频事件：随挂载的 video 元素（分支切换会重挂载）重绑
     // 媒体切换 key 保证 image<->video 分支重挂载后监听不丢失

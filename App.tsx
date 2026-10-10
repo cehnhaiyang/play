@@ -60,7 +60,7 @@ const PlayerLayout: React.FC = () => {
   }, []);
 
   const handleSnifferPlay = useCallback((link: FoundLink) => {
-    player.methods.addStream(link.url, link.title, true, link.type);
+    player.methods.addStream(link.url, link.title, link.type);
     setView('player');
   }, [player.methods]);
 
@@ -180,7 +180,7 @@ const PlayerLayout: React.FC = () => {
         className={`fixed inset-0 z-30 flex flex-col transition-transform duration-300 ease-out will-change-transform bg-slate-950 ${view === 'player' ? 'translate-x-0' : 'translate-x-full'
           }`}
       >
-        <PlayPanel player={player} onBackToBrowse={() => setView('sniffer')} />
+        <PlayPanel player={player} onBackToBrowse={() => setView('sniffer')} isVisible={view === 'player'} />
       </div>
 
       {/* 悬浮球常驻挂载：切到播放器/音频工坊时只 display:none 藏起来，不卸载。

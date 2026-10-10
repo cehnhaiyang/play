@@ -284,6 +284,60 @@ const run = () => {
     assert.strictEqual(isAiBookFileName('aibook'), false);
   });
 
+  /* --------------------------- 媒体播放态判定 ---------------------------- */
+  /* 这三个谓词是「播放态」这件事的唯一所有者：逻辑层（play / togglePlay /
+     加载 effect）与 UI 层（控制条自动隐藏、底栏让位、播放键可用性）都读它们。
+     各写一份必然漂移成「能进播放态却没人自动隐藏控制条」。
+     必须真的调用而不是 grep 源码 —— 把实现改成 `() => false` 时，
+     只做文本匹配的断言依然全绿。 */
+
+  check('isSlideshowMedia: 只有图集是幻灯片', () => {
+    assert.strictEqual(constMod.isSlideshowMedia('image'), true);
+    // 文档能翻页但没有播放态：算进来会让它一打开就进播放态却永不翻页，
+    // 而控制条因「正在播放」自动隐藏，用户面对静止文档找不到控制条
+    assert.strictEqual(constMod.isSlideshowMedia('document'), false);
+    assert.strictEqual(constMod.isSlideshowMedia('video'), false);
+    assert.strictEqual(constMod.isSlideshowMedia('audio'), false);
+    assert.strictEqual(constMod.isSlideshowMedia('gallery'), false);
+    assert.strictEqual(constMod.isSlideshowMedia('other'), false);
+    assert.strictEqual(constMod.isSlideshowMedia(undefined), false);
+  });
+
+  check('isPlayableMedia: 与 isSlideshowMedia 的差别正好落在文档上', () => {
+    assert.strictEqual(constMod.isPlayableMedia('video'), true);
+    assert.strictEqual(constMod.isPlayableMedia('stream'), true);
+    assert.strictEqual(constMod.isPlayableMedia('audio'), true);
+    assert.strictEqual(constMod.isPlayableMedia('image'), true);
+    assert.strictEqual(constMod.isPlayableMedia('document'), false);
+    assert.strictEqual(constMod.isPlayableMedia('gallery'), false);
+    assert.strictEqual(constMod.isPlayableMedia('other'), false);
+    assert.strictEqual(constMod.isPlayableMedia(undefined), false);
+  });
+
+  check('isPagedMedia: 图集与文档都要翻页', () => {
+    assert.strictEqual(constMod.isPagedMedia('image'), true);
+    assert.strictEqual(constMod.isPagedMedia('document'), true);
+    assert.strictEqual(constMod.isPagedMedia('video'), false);
+    assert.strictEqual(constMod.isPagedMedia('stream'), false);
+    assert.strictEqual(constMod.isPagedMedia('audio'), false);
+    assert.strictEqual(constMod.isPagedMedia(undefined), false);
+  });
+
+  check('播放态三谓词互不矛盾（文档可翻页但不可播放）', () => {
+    const types = ['video', 'stream', 'audio', 'image', 'document', 'gallery', 'other'];
+    for (const t of types) {
+      const playable = constMod.isPlayableMedia(t);
+      const slideshow = constMod.isSlideshowMedia(t);
+      const paged = constMod.isPagedMedia(t);
+      // 幻灯片必然是「可播放」的子集：播放态即自动轮播开关
+      assert.ok(!slideshow || playable, `${t}: 幻灯片型媒体必须可播放`);
+      // 可播放的非音视频类型只可能是幻灯片（图集）
+      assert.ok(!(playable && paged && t !== 'image') || slideshow, `${t}: 可播放的分页媒体只能是图集`);
+    }
+    // 文档是唯一「能翻页但不能播放」的类型，这条差异是刻意的
+    assert.strictEqual(constMod.isPagedMedia('document') && !constMod.isPlayableMedia('document'), true);
+  });
+
   /* --------------------------------- 汇总 -------------------------------- */
 
   console.log(`AI 绘本：通过 ${passed} 项，失败 ${failed} 项`);
