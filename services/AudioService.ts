@@ -3237,8 +3237,14 @@ export class SPGParser {
           }
 
           case 'hit': {
-            // 鼓组名可以是位置参数，也可以用 drum= / name= 具名传入
-            const drumRaw = arg(['drum', 'name', 'kit'], 0) ?? '';
+            /**
+             * 鼓组名可以是位置参数，也可以用 `drum=` / `name=` 具名传入。
+             *
+             * 刻意不收 `kit=` 这个别名：`kit` 在鼓组语境里指"整套鼓"，
+             * 而这里要的是**单件**鼓（kick/hat/…）。留着它会让
+             * `hit(kit="kick")` 这种把集合当成员的写法通过，把错误的名字概念固化下来。
+             */
+            const drumRaw = arg(['drum', 'name'], 0) ?? '';
             if (!drumRaw) {
               throw new SPGError(
                 `${ctx}: hit 缺少鼓组名，如 hit("kick", "4n")。`
@@ -3248,7 +3254,7 @@ export class SPGParser {
             const drum = this.enum_(drumRaw, DRUM_NAMES, `${ctx} 鼓组`, lineNo);
             const duration = arg(['duration', 'dur', 'len'], 1) ?? '8n';
             const expr = this.parseExpression(named, lineNo, ctx, [
-              'drum', 'name', 'kit', 'tune', 'decay', 'tone', 'snap',
+              'drum', 'name', 'tune', 'decay', 'tone', 'snap',
               'duration', 'dur', 'len',
             ]);
             this.validateDuration(duration, tempo, ctx, lineNo);
@@ -3570,6 +3576,15 @@ export class EventScheduler {
         // 起音噪声不应在鼓组上叠加：鼓组本身已有独立的噪声层
         const attackNoise = isDrum ? 0 : (inst?.attackNoise ?? 0);
 
+        /**
+         * 声像基线与增益同源。
+         *
+         * 鼓组音色不属于任何乐器，套用"当前乐器"的 pan 会让整条鼓组跟着跑：
+         * 定义一个 `pan=-0.5` 的弦乐铺底，底鼓就一起偏到左边 —— 用户完全无从理解。
+         * 鼓组只认逐音符的 pan（以及 mix 轨道的 pan），与 gain 的处理保持一致。
+         */
+        const basePan = isDrum ? (expr.pan ?? 0) : (expr.pan ?? inst?.pan ?? 0);
+
         const event: ScheduledEvent = {
           time: finalTime,
           freq,
@@ -3580,7 +3595,7 @@ export class EventScheduler {
           filterEnvelope: inst?.filterEnvelope,
           filterEnvAmount: inst?.filterEnvAmount,
           lfo: inst?.lfo,
-          pan: clamp(clamp(expr.pan ?? inst?.pan ?? 0, -1, 1, 0) + trackPan, -1, 1, 0),
+          pan: clamp(basePan + trackPan, -1, 1, 0),
           gain,
           fm_wave: inst?.fm_wave,
           fm_index: inst?.fm_index,
@@ -4427,15 +4442,30 @@ export class AudioSynthesizer {
     const out = ctx.createGain();
     out.gain.value = amp;
 
+    /**
+     * 鼓组不走逐音符链路（滤波器/包络/声像都在 scheduleEvents 里），
+     * 所以 `pan` 必须在这里自己接——提示词明确建议"打击乐点缀 pan=±0.4"，
+     * 不接的话这个参数被解析、被存进事件，然后无声无息地丢掉：
+     * 用户按建议写了声像，听到的却永远在正中间。
+     */
+    const pan = clamp(event.pan ?? 0, -1, 1, 0);
+    let tail: AudioNode = out;
+    if (pan !== 0) {
+      const panner = ctx.createStereoPanner();
+      panner.pan.value = pan;
+      out.connect(panner);
+      tail = panner;
+    }
+
     if (spec.highpass) {
       const hp = ctx.createBiquadFilter();
       hp.type = 'highpass';
       hp.frequency.value = clamp(spec.highpass + toneShift, 20, 20000, spec.highpass);
       hp.Q.value = 0.7;
-      out.connect(hp);
+      tail.connect(hp);
       hp.connect(destination);
     } else {
-      out.connect(destination);
+      tail.connect(destination);
     }
 
     const endTime = t + decay + 0.15;

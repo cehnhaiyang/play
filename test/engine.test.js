@@ -216,6 +216,17 @@ check('hit 用 drum=/duration= 命名参数', () => {
   eq(c.duration, '4n');
 });
 
+/**
+ * `hit(kit=...)` 必须报错。
+ *
+ * `kit` 在鼓组语境里指"整套鼓"，而 hit 要的是**单件**鼓（kick/hat/…）。
+ * 把它当别名收下，等于默许"把集合当成员"的写法；未在提示词里出现过，
+ * 所以直接删掉这个别名、让未知参数校验拦住它。
+ */
+check('hit 不接受 kit= 别名（应报未知参数）', () => {
+  throws(() => parse(`sequence(name="s"){ hit(kit="kick", duration="4n") }`));
+});
+
 check('chord 用 pitches= 命名参数', () => {
   const r = parse(`sequence(name="s"){ chord(pitches=["C4","E4"], duration="2n") }`);
   const c = r.sequences.get('s').commands[0];
@@ -1729,6 +1740,47 @@ sequence(name="s", instrument="a"){ note("C4","4n") }
   assert(lfos.length > 0, '应建出效果链 LFO');
   const maxStop = Math.max(...lfos.map((n) => n.stopTime));
   assert(maxStop >= 3, `delay=3 时 LFO 不应在 3 秒前停止，实际 ${maxStop}`);
+});
+
+/**
+ * 鼓组必须真的按 pan 摆放声像。
+ *
+ * 提示词明确建议"打击乐点缀 pan=±0.4"，而 scheduleDrum 从不读 event.pan：
+ * 参数被解析、被存进事件，然后无声无息地丢掉，用户听到的永远在正中间。
+ */
+check('鼓组 pan 真的建出声像节点', () => {
+  const { ctx } = render(`sequence(name="d"){ hit("kick","4n", pan=-0.4) }`);
+  const panners = ctx._nodes.filter((n) => n.kind === 'StereoPannerNode');
+  eq(panners.length, 1, 'hit 的 pan 未生效（没有建声像节点）');
+  near(panners[0].pan.value, -0.4, 1e-9, '声像值');
+});
+
+check('鼓组 pan=0 时不建多余声像节点', () => {
+  const { ctx } = render(`sequence(name="d"){ hit("kick","4n") }`);
+  eq(ctx._nodes.filter((n) => n.kind === 'StereoPannerNode').length, 0);
+});
+
+/**
+ * 鼓组不该继承"当前乐器"的 pan —— 与增益是同一条不变量。
+ *
+ * 鼓组音色不属于任何乐器。套用乐器 pan 会让整条鼓组跟着跑：
+ * 定义一个 pan=-0.5 的弦乐铺底，底鼓就一起偏到左边，用户无从理解。
+ */
+check('鼓组不被乐器 pan 带偏', () => {
+  const { events } = compile(`
+define_instrument(name="pad"){ wave:"sawtooth" pan:-0.5 }
+sequence(name="d", instrument="pad"){ hit("kick","4n") }
+`);
+  const kick = events.find((e) => e.drum === 'kick');
+  eq(kick.pan, 0, '鼓组不应继承乐器声像');
+});
+
+check('鼓组仍接受 mix 轨道的 pan', () => {
+  const { events } = compile(`
+sequence(name="d"){ hit("kick","4n") }
+mix { track(source="d", pan=0.6) }
+`);
+  near(events[0].pan, 0.6, 1e-9, '轨道声像应生效');
 });
 
 /* ========================================================================== */
