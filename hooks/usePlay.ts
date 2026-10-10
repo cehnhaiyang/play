@@ -2,13 +2,13 @@ import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import Hls from 'hls.js';
 import { PlayerState, PlaylistState, PlaybackMode, ObjectFitMode, VideoFile, MediaType, AiBookEntryPage, PagePosition, UsePlayReturn } from '../meta';
 import {
+    canPlayback,
     createStreamFile,
     createVideoFile,
     detectGalleryFolders,
     dirOfFile,
     galleryNameFromMarker,
     generateId,
-    isSlideshowMedia,
     loadJSON,
     loadStr,
     revokeVideoFile,
@@ -227,6 +227,28 @@ export const usePlay = (): UsePlayReturn => {
     }, []);
 
     /**
+     * 把 video 元素与旧源解绑。
+     *
+     * 只清 src 不调 load() 不会真正断开：解码器与网络连接会挂到下一次赋值，
+     * 表现为「切走了还在后台下」。换源与清空列表都必须走这里，各写一份迟早漏掉 load()。
+     */
+    const detachVideo = useCallback(() => {
+        const video = videoRef.current;
+        if (!video) return;
+        try { video.pause(); video.removeAttribute('src'); video.load(); } catch { /* ignore */ }
+    }, []);
+
+    /**
+     * 列表清空后把播放器放干净：释放 HLS、解绑 video、复位播放态。
+     * 删除末项有三条路径（单删/批删/清空），这里是它们共同的所有者。
+     */
+    const releasePlayback = useCallback(() => {
+        destroyHls();
+        detachVideo();
+        setState(prev => ({ ...prev, isPlaying: false, isBuffering: false, currentTime: 0, duration: 0 }));
+    }, [destroyHls, detachVideo]);
+
+    /**
      * 统一发起播放并识别「自动播放被拦截」。
      * 浏览器/Electron 无用户手势时 play() 会被拒绝，此前一律静默 catch，
      * 表现为点开媒体后画面静止却无任何提示；这里把拦截单独暴露成可读错误，
@@ -255,7 +277,8 @@ export const usePlay = (): UsePlayReturn => {
         const file = currentFileRef.current;
         // 图集走幻灯片模式：无 video 元素时直接翻转播放态（文档是静态页，不算幻灯片）
         if (!videoRef.current) {
-            if (file && isSlideshowMedia(file.mediaType)) {
+            const list = playlistRef.current;
+            if (file && canPlayback(file.mediaType, list.currentIndex, list.files.length)) {
                 setMediaError(null);
                 setState(prev => ({ ...prev, isPlaying: true }));
             }
@@ -287,13 +310,15 @@ export const usePlay = (): UsePlayReturn => {
      * 切换播放/暂停。
      *
      * 返回「本次是否真的改变了播放态」：静态页（画廊占位/other）与文档没有播放态，
-     * 这里不响应。调用方据此决定要不要弹「播放中」提示 —— 让它按媒体类型自行判断
-     * 等于把同一个事实存两份，两边迟早对不上（文档可翻页，却没有播放态）。
+     * 已经在末项的幻灯片也无从推进（轮播 effect 会在同一帧把它按回暂停），
+     * 这些情况都不响应。调用方据此决定要不要弹「播放中」提示 —— 让它按媒体类型
+     * 自行判断等于把同一个事实存两份，两边迟早对不上（文档可翻页，却没有播放态）。
      */
     const togglePlay = useCallback((): boolean => {
         if (!videoRef.current) {
             const file = currentFileRef.current;
-            if (!file || !isSlideshowMedia(file.mediaType)) return false;
+            const list = playlistRef.current;
+            if (!file || !canPlayback(file.mediaType, list.currentIndex, list.files.length)) return false;
             setMediaError(null);
             setState(prev => ({ ...prev, isPlaying: !prev.isPlaying }));
             return true;
@@ -389,6 +414,19 @@ export const usePlay = (): UsePlayReturn => {
     const clearError = useCallback(() => setMediaError(null), []);
     const clearWarning = useCallback(() => setMediaWarning(null), []);
 
+    /**
+     * 幻灯片「原地重播」：索引不变时只把播放态按回 true。
+     *
+     * 末项无从推进，这里交给 canPlayback 统一否决 —— 否则按 N 会把播放态点亮，
+     * 紧接着轮播 effect 发现已在末项又按回暂停，用户看到播放键闪一下。
+     */
+    const resumeSlideshow = useCallback(() => {
+        const list = playlistRef.current;
+        const file = list.currentIndex >= 0 ? list.files[list.currentIndex] : null;
+        if (!file || !canPlayback(file.mediaType, list.currentIndex, list.files.length)) return;
+        setState(s => (s.isPlaying ? s : { ...s, isPlaying: true }));
+    }, []);
+
     // 下一首/曲目切换（纯计算 + 副作用外置，避免 updater 内副作用与 StrictMode 双调用）
     const nextTrack = useCallback((manual = false) => {
         const prev = playlistRef.current;
@@ -413,7 +451,7 @@ export const usePlay = (): UsePlayReturn => {
                 } catch { /* ignore */ }
             } else {
                 // 幻灯片单曲循环：原地重播即保持索引并确保播放态
-                setState(s => (s.isPlaying ? s : { ...s, isPlaying: true }));
+                resumeSlideshow();
             }
             return;
         }
@@ -437,12 +475,12 @@ export const usePlay = (): UsePlayReturn => {
                     attemptAutoplay(v);
                 } catch { /* ignore */ }
             } else {
-                setState(s => (s.isPlaying ? s : { ...s, isPlaying: true }));
+                resumeSlideshow();
             }
             return;
         }
         setPlaylist({ ...prev, currentIndex: nextIdx });
-    }, [pause, attemptAutoplay]);
+    }, [pause, attemptAutoplay, resumeSlideshow]);
 
     // 上一首
     const prevTrack = useCallback(() => {
@@ -500,17 +538,12 @@ export const usePlay = (): UsePlayReturn => {
         }
         setPlaylist({ files: newFiles, currentIndex: newIdx });
         if (newFiles.length === 0) {
-            destroyHls();
-            const v = videoRef.current;
-            if (v) {
-                try { v.pause(); v.removeAttribute('src'); v.load(); } catch { /* ignore */ }
-            }
-            setState(s => ({ ...s, isPlaying: false, isBuffering: false, currentTime: 0, duration: 0 }));
+            releasePlayback();
         } else if (removingCurrent) {
             // 切走正在播的项时清掉旧错误，加载副作用由 currentFile effect 接管
             setMediaError(null);
         }
-    }, [destroyHls]);
+    }, [releasePlayback]);
 
     // 批量移除（供画廊/分组整组删除）：单次 setState，避免逐个 removeTrack 读到过期 ref
     const removeTracks = useCallback((indexes: number[]) => {
@@ -536,30 +569,20 @@ export const usePlay = (): UsePlayReturn => {
         }
         setPlaylist({ files: newFiles, currentIndex: newIdx });
         if (newFiles.length === 0) {
-            destroyHls();
-            const v = videoRef.current;
-            if (v) {
-                try { v.pause(); v.removeAttribute('src'); v.load(); } catch { /* ignore */ }
-            }
-            setState(s => ({ ...s, isPlaying: false, isBuffering: false, currentTime: 0, duration: 0 }));
+            releasePlayback();
         } else if (removedCurrent) {
             setMediaError(null);
         }
-    }, [destroyHls]);
+    }, [releasePlayback]);
 
     // 清空列表
     const clearPlaylist = useCallback(() => {
         const prev = playlistRef.current;
         prev.files.forEach(revokeVideoFile);
         setPlaylist({ files: [], currentIndex: -1 });
-        destroyHls();
-        const v = videoRef.current;
-        if (v) {
-            try { v.pause(); v.removeAttribute('src'); v.load(); } catch { /* ignore */ }
-        }
         setMediaError(null);
-        setState(s => ({ ...s, isPlaying: false, isBuffering: false, currentTime: 0, duration: 0 }));
-    }, [destroyHls]);
+        releasePlayback();
+    }, [releasePlayback]);
 
     // 添加文件：先识别 .gallery 画廊文件夹（徽标 + 数字图片成组进组，
     // 头显示画廊名、底下 1/2/3…；徽标本身不进列表），其余散文件照常平铺
@@ -899,18 +922,8 @@ export const usePlay = (): UsePlayReturn => {
         // 只有这里能释放；放在分支之前可保证没有哪条 return 绕过它。
         destroyHls();
 
-        /**
-         * 把 video 元素与旧源解绑。
-         * 只清 src 不调 load() 不会真正断开：解码器与网络连接会挂到下一次赋值，
-         * 表现为「切走了还在后台下」。
-         */
-        const detach = () => {
-            if (!video) return;
-            try { video.pause(); video.removeAttribute('src'); video.load(); } catch { /* ignore */ }
-        };
-
         if (!file) {
-            detach();
+            detachVideo();
             // 列表被清空/删到空时横幅必须一起走：留着「已跳过 N 段」而播放器是空的，
             // 用户既看不懂也关不掉（此后没有任何媒体切换来触发清理）
             setMediaError(null);
@@ -920,15 +933,17 @@ export const usePlay = (): UsePlayReturn => {
         }
 
         // 非音视频流走图集 / 文档 / 其他展示分支：停掉旧视频。
-        // 只有图集是幻灯片播放态；文档/画廊占位/other 是静态页保持暂停，
-        // 否则暂停键误导 + 控制条自动隐藏，用户连点哪里播都找不到
+        // 播放态由 canPlayback 统一裁定：文档/画廊占位/other 是静态页保持暂停
+        // （否则暂停键误导 + 控制条自动隐藏，用户连点哪里播都找不到），
+        // 已在末项的图集同样不进入 —— 轮播无从继续，点亮后下一帧就被按回去。
         if (file.mediaType !== 'video' && file.mediaType !== 'stream' && file.mediaType !== 'audio') {
-            detach();
-            const slideshow = isSlideshowMedia(file.mediaType);
+            detachVideo();
+            const list = playlistRef.current;
+            const playable = canPlayback(file.mediaType, list.currentIndex, list.files.length);
             setMediaError(null);
             // 警告同样要清：图集页上残留上一部视频的「已跳过 N 段」是无意义的噪音
             setMediaWarning(null);
-            setState(prev => ({ ...prev, isPlaying: slideshow, isBuffering: false, currentTime: 0, duration: 0 }));
+            setState(prev => ({ ...prev, isPlaying: playable, isBuffering: false, currentTime: 0, duration: 0 }));
             return;
         }
 
@@ -971,7 +986,11 @@ export const usePlay = (): UsePlayReturn => {
             hls.on(Hls.Events.MANIFEST_PARSED, () => {
                 attemptAutoplay(video);
             });
-            let recoverAttempts = 0;
+            // 重试预算按错误类型分开。网络错误与解码错误是两件独立的事，
+            // 共用一个计数器时解码错误会吃掉网络重试的额度：长片里偶发两次解码
+            // 抖动之后，网络稍有波动就直接放弃，用户看到「已停止重试」。
+            let networkRetries = 0;
+            let mediaRetries = 0;
             // 已跳过的失效分片数：只用于汇总提示，不设上限——
             // 用户明确要求"确定坏掉的就跳过"，哪怕整片都缺也照跳，
             // 由播放器自然播到末尾结束，而不是替用户判定"这资源没救了"。
@@ -1018,8 +1037,8 @@ export const usePlay = (): UsePlayReturn => {
 
                 if (!data.fatal) return;
                 if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-                    if (recoverAttempts < 3) {
-                        recoverAttempts += 1;
+                    if (networkRetries < 3) {
+                        networkRetries += 1;
                         hls.startLoad();
                     } else {
                         setMediaError('网络错误：流媒体加载失败，已停止重试');
@@ -1027,8 +1046,8 @@ export const usePlay = (): UsePlayReturn => {
                         destroyHls();
                     }
                 } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-                    if (recoverAttempts < 3) {
-                        recoverAttempts += 1;
+                    if (mediaRetries < 3) {
+                        mediaRetries += 1;
                         hls.recoverMediaError();
                     } else {
                         setMediaError('媒体错误：该流无法解码');

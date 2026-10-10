@@ -338,6 +338,43 @@ const run = () => {
     assert.strictEqual(constMod.isPagedMedia('document') && !constMod.isPlayableMedia('document'), true);
   });
 
+  check('canPlayback: 无播放态的媒体一律不可播放', () => {
+    for (const t of ['document', 'gallery', 'other', undefined]) {
+      assert.strictEqual(constMod.canPlayback(t, 0, 10), false, `${t} 不该有播放态`);
+    }
+    // 音视频与流不受位置影响：末项照样能播（单曲循环 / 播完即停都要靠它）
+    for (const t of ['video', 'stream', 'audio']) {
+      assert.strictEqual(constMod.canPlayback(t, 0, 3), true, `${t} 首项可播`);
+      assert.strictEqual(constMod.canPlayback(t, 2, 3), true, `${t} 末项仍可播`);
+    }
+  });
+
+  check('canPlayback: 幻灯片只有还有下一页时才可播放', () => {
+    assert.strictEqual(constMod.canPlayback('image', 0, 3), true, '还有下一页');
+    assert.strictEqual(constMod.canPlayback('image', 1, 3), true, '中间页');
+    // 末项：轮播无从继续，点亮播放态会在同一帧被 effect 按回暂停
+    assert.strictEqual(constMod.canPlayback('image', 2, 3), false, '末项不可播放');
+    // 单张图片同理：没有下一页可翻
+    assert.strictEqual(constMod.canPlayback('image', 0, 1), false, '单张不可播放');
+    // 列表为空时索引为 -1：不能因为 -1 < -1 不成立就误判成可播
+    assert.strictEqual(constMod.canPlayback('image', -1, 0), false, '空列表不可播放');
+  });
+
+  check('canPlayback 与 isPlayableMedia 只在「末项幻灯片」上分叉', () => {
+    const types = ['video', 'stream', 'audio', 'image', 'document', 'gallery', 'other'];
+    for (const t of types) {
+      // 非末项位置：两者必须一致，否则播放键的置灰与动作的返回值会打架
+      assert.strictEqual(
+        constMod.canPlayback(t, 0, 4),
+        constMod.isPlayableMedia(t),
+        `${t}: 非末项位置两者应一致`,
+      );
+    }
+    // 唯一分叉点：末项图集。这是刻意的，不是漏判。
+    assert.strictEqual(constMod.isPlayableMedia('image'), true);
+    assert.strictEqual(constMod.canPlayback('image', 3, 4), false);
+  });
+
   /* --------------------------------- 汇总 -------------------------------- */
 
   console.log(`AI 绘本：通过 ${passed} 项，失败 ${failed} 项`);

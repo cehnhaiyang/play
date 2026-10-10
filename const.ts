@@ -326,6 +326,26 @@ export const isPlayableMedia = (mediaType: MediaType | undefined): boolean =>
 export const isPagedMedia = (mediaType: MediaType | undefined): boolean =>
     mediaType === 'image' || mediaType === 'document';
 
+/**
+ * 当前条目的播放态是否真的能生效。
+ *
+ * 比 {@link isPlayableMedia} 多问一句「有没有推进的可能」：幻灯片靠翻到下一页
+ * 前进，已经在末项时播放态无从生效 —— 轮播 effect 会在同一帧把它按回暂停，
+ * 于是播放键亮着却按不出结果，提示还会先报一句「播放中」再原地变回暂停。
+ *
+ * 播放键的可用性、`togglePlay()` 的返回值、轮播 effect 的末项守卫三者都读这里，
+ * 各写一份必然漂移成「按钮亮着但按下去立刻回弹」。
+ */
+export const canPlayback = (
+    mediaType: MediaType | undefined,
+    currentIndex: number,
+    fileCount: number,
+): boolean => {
+    if (!isPlayableMedia(mediaType)) return false;
+    if (isSlideshowMedia(mediaType)) return currentIndex < fileCount - 1;
+    return true;
+};
+
 /** 生成简短的随机 ID，用于列表项的唯一标识 */
 export const generateId = (): string => {
     try {

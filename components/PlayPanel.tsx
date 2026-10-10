@@ -10,6 +10,7 @@ import {
 import { PlaybackMode, ObjectFitMode, VideoFile, MediaType, UsePlayReturn, getElectronAPI, type AiStory } from '../meta';
 import {
     buildAiBookBlob,
+    canPlayback,
     collectPackSources,
     dataUrlToBlobUrl,
     downloadBlob,
@@ -18,7 +19,6 @@ import {
     isAiBookFileName,
     isGalleryPackFile,
     isPagedMedia,
-    isPlayableMedia,
     isValidMediaUrl,
     loadStr,
     packToGalleryBlob,
@@ -369,7 +369,10 @@ const DocumentDisplay: React.FC<{ file: VideoFile }> = ({ file }) => {
         return () => {
             cancelled = true;
         };
-    }, [file]);
+        // 依赖只列真正读取的两个源字段，不整个 file 对象：playlist 每次变化都会
+        // 重建条目，拿对象当依赖会让「读了一半的文档」因为别处的无关写入
+        // （朗读语音回写、分组名补齐）重新拉一遍并跳回「读取文档中...」
+    }, [file.file, file.url]);
 
     if (loading) {
         return (
@@ -1783,14 +1786,20 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse, is
         methods.toggleFullscreen(playerContainerRef.current);
     }, [methods]);
 
-    // 快进/快退（带视觉提示）：seek 会拒绝无效跳转（直播/时长未知），
-    // 此时不弹「+10s」——弹了画面没动比不弹更让人困惑
+    // 快进/快退（带视觉提示）。
+    // 基准取 video 元素的实时 currentTime：它是「当前播放位置」本身，而 state 里的
+    // 那份是给渲染用的镜像。上界不再自己算一遍交给 seek —— 它本来就按元素的真实
+    // duration 夹取，这里再夹一次等于同一个事实存两处，且换源瞬间 state.duration
+    // 还是上一部（或 0）的值，用旧界去夹新片会把目标算错。
+    // seek 会拒绝无效跳转（直播/时长未知），此时不弹「+10s」：
+    // 弹了画面没动比不弹更让人困惑
     const handleSeekDelta = useCallback((delta: number) => {
-        if (!videoRef.current) return;
-        const target = Math.max(0, Math.min(state.duration || 0, state.currentTime + delta));
-        if (!methods.seek(target)) return;
+        const video = videoRef.current;
+        if (!video) return;
+        const base = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+        if (!methods.seek(base + delta)) return;
         showFeedback(delta > 0 ? `+${delta}s` : `${delta}s`, delta > 0 ? 'forward' : 'rewind');
-    }, [methods, showFeedback, state.currentTime, state.duration, videoRef]);
+    }, [methods, showFeedback, videoRef]);
 
     // 单击延迟 260ms，双击取消单击，避免双击快进连带暂停
     const clickTimerRef = useRef<number | null>(null);
@@ -1806,8 +1815,8 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse, is
         [playlist.files, currentFile?.groupType, currentFile?.groupId]
     );
     const isStoryPage = !!currentFile && storyPages.length > 0;
-    // 文档能翻页但没有播放态：播放键置灰，翻页键照常可用
-    const playable = isPlayableMedia(currentFile?.mediaType);
+    // 是否有播放态：文档/静态页没有，已在末项的幻灯片也没有（轮播无从继续）
+    const playable = canPlayback(currentFile?.mediaType, playlist.currentIndex, playlist.files.length);
     const handleVideoAreaClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
         const target = e.target as HTMLElement;
         if (target.closest?.('button, a, input, textarea, select, pre')) return;
@@ -1927,9 +1936,9 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse, is
         // nextPage 到头即停（不回绕），若仍留着 isPlaying，控制条会因「正在播放」
         // 持续自动隐藏，而画面早已不动 —— 用户面对一张静止的图找不到控制条；
         // 单张图片同理（没有下一页可翻）。等一次 tick 再暂停会白留几秒这种状态。
-        // 判据用整列表下标而非 pageInfo：后者在画廊内是组内口径，
-        // 拿它判会连「本画廊看完自动接下一部」也一并掐掉。
-        if (playlist.currentIndex >= playlist.files.length - 1) {
+        // 判据与播放键的可用性同源（canPlayback 也用整列表下标，而非 pageInfo ——
+        // 后者在画廊内是组内口径，拿它判会连「本画廊看完自动接下一部」一起掐掉）。
+        if (!playable) {
             methods.pause();
             return;
         }
@@ -1940,7 +1949,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse, is
             methods.nextPage();
         }, Math.max(500, Math.round(baseMs / rate)));
         return () => clearInterval(timer);
-    }, [currentFile?.mediaType, currentFile?.id, state.isPlaying, state.playbackRate, methods, isStoryPage, playlist.currentIndex, playlist.files.length]);
+    }, [currentFile?.mediaType, currentFile?.id, state.isPlaying, state.playbackRate, methods, isStoryPage, playable]);
 
     // 一键关闭所有浮层（Esc 用）
     const closeOverlaysRef = useRef(() => { });
@@ -1962,6 +1971,14 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse, is
     // 前台标志同样走 ref：否则每次切视图都要重绑 keydown 监听
     const isVisibleRef = useRef(isVisible);
     isVisibleRef.current = isVisible;
+    // 「键盘不该归播放器管」的浮层：这几块都盖住了整个播放视口。
+    //
+    // 盖着的时候播放器仍算在前台，不挡的话方向键会去快进被盖住的视频、
+    // P/N 会换掉被盖住的条目、F 会把浮层一起全屏。判据是「是否遮住视口」——
+    // 倍速菜单只是底栏上的小浮层，不遮画面，开它时不该连播放键一起失灵。
+    // （浮层里的输入框另有 tag 守卫，与这里不重复。）
+    const isOverlayOpenRef = useRef(false);
+    isOverlayOpenRef.current = showGenerator || showUrlModal || showAcgModal || showShortcuts;
 
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
@@ -1973,6 +1990,8 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse, is
                 closeOverlaysRef.current();
                 return;
             }
+            // 浮层开着时键盘归浮层：下方所有键都在操作被盖住的播放器
+            if (isOverlayOpenRef.current) return;
             const target = e.target as HTMLElement;
             const tag = target.tagName;
             if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tag) || target.isContentEditable) {
@@ -1986,8 +2005,8 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse, is
             }
             const { methods: m, handleSeekDelta: seekDelta, handleToggleFullscreen: toggleFs, showFeedback: feedback } = shortcutsRef.current;
             const { isPlaying, isMuted, volume } = playStateRef.current;
-            const mediaKind = mediaKindRef.current;
-            const isPaged = mediaKind === 'image' || mediaKind === 'document';
+            // 与画面单击、底栏按钮同源判定：这里再写一遍 image/document 就是同一事实存两处
+            const isPaged = isPagedMedia(mediaKindRef.current);
 
             switch (e.code) {
                 case 'Space':
@@ -2391,6 +2410,10 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse, is
 
     // 判断是否为流媒体直播：duration 保留 Infinity 语义，未加载完成前不误判 VOD 为 LIVE
     const isLiveStream = currentFile?.mediaType === 'stream' && !Number.isFinite(state.duration);
+    // 快进/快退按钮的可用性。seek 在直播与时长未知的源上一定返回 false，
+    // 按钮留着可点就是「点了没反应」—— 与播放键置灰同一个道理。
+    // （键盘 J/L 与 ←/→ 走 seek 的返回值，不弹徽章即可，无需另判。）
+    const seekable = !pagedKind && playable && !isLiveStream && state.duration > 0;
 
     // 音频视图外圈进度环的填充比例（0~1）。duration 为 Infinity/NaN 时按 0 处理，
     // 否则 strokeDashoffset 会算成 NaN，整圈环直接消失。
@@ -3199,7 +3222,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse, is
                             </IconButton>
 
                             {!pagedKind && (
-                                <IconButton label="快退 10 秒 (J / ←)" size="lg" tone="ghost" className="tp-seek-btn" onClick={() => handleSeekDelta(-10)}>
+                                <IconButton label="快退 10 秒 (J / ←)" size="lg" tone="ghost" className="tp-seek-btn" disabled={!seekable} onClick={() => handleSeekDelta(-10)}>
                                     <Rewind className="w-4 h-4" />
                                 </IconButton>
                             )}
@@ -3210,14 +3233,14 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse, is
                                 onClick={methods.togglePlay}
                                 disabled={!playable}
                                 className="mx-0.5 p-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl shadow-lg shadow-indigo-600/40 transition hover:scale-105 active:scale-95 disabled:bg-white/5 disabled:text-slate-600 disabled:shadow-none disabled:hover:scale-100 disabled:cursor-not-allowed"
-                                title={!playable ? '该类型没有播放态' : state.isPlaying ? '暂停 (Space)' : '播放 (Space)'}
+                                title={!playable ? '当前条目没有可用的播放态' : state.isPlaying ? '暂停 (Space)' : '播放 (Space)'}
                                 aria-label={state.isPlaying ? '暂停' : '播放'}
                             >
                                 {state.isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 fill-current" />}
                             </button>
 
                             {!pagedKind && (
-                                <IconButton label="快进 10 秒 (L / →)" size="lg" tone="ghost" className="tp-seek-btn" onClick={() => handleSeekDelta(10)}>
+                                <IconButton label="快进 10 秒 (L / →)" size="lg" tone="ghost" className="tp-seek-btn" disabled={!seekable} onClick={() => handleSeekDelta(10)}>
                                     <FastForward className="w-4 h-4" />
                                 </IconButton>
                             )}
