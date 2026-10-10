@@ -296,12 +296,17 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
 // 文档/文本展示：大文件截断，PDF 不做文本转储
 const MAX_DOC_CHARS = 200_000;
 const DocumentDisplay: React.FC<{ file: VideoFile }> = ({ file }) => {
+    const isPdf = /\.pdf($|\?|#)/i.test(file.name) || /\.pdf($|\?|#)/i.test(file.url);
     const [content, setContent] = useState<string>('');
     const [loading, setLoading] = useState<boolean>(true);
     const [truncated, setTruncated] = useState<boolean>(false);
-    const isPdf = /\.pdf($|\?|#)/i.test(file.name) || /\.pdf($|\?|#)/i.test(file.url);
 
     useEffect(() => {
+        // PDF 的渲染分支只给一句「下载后查看」，正文一个字都不显示。此前照常
+        // 读文件/拉网络（大 PDF 会白读 20 万字符二进制）再丢掉，中途还亮一下
+        // 加载态。判据与下面的渲染分支同源，这里直接不进流程；
+        // 渲染侧同样把 PDF 分支排在最前，所以 loading 停在哪都无关紧要。
+        if (isPdf) return;
         let cancelled = false;
         setLoading(true);
         setTruncated(false);
@@ -374,15 +379,8 @@ const DocumentDisplay: React.FC<{ file: VideoFile }> = ({ file }) => {
         // （朗读语音回写、分组名补齐）重新拉一遍并跳回「读取文档中...」
     }, [file.file, file.url]);
 
-    if (loading) {
-        return (
-            <div className="flex items-center justify-center h-full text-slate-400 gap-2">
-                <div className="w-5 h-5 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-                <span className="text-sm">读取文档中...</span>
-            </div>
-        );
-    }
-
+    // PDF 分支必须排在 loading 之前：上面那个 effect 对 PDF 直接返回，永远不会
+    // 把 loading 置回 false，先判 loading 就会卡在「读取文档中...」转圈。
     if (isPdf) {
         return (
             <div className="flex flex-col items-center justify-center h-full text-slate-400 gap-3 p-8 text-center">
@@ -394,6 +392,15 @@ const DocumentDisplay: React.FC<{ file: VideoFile }> = ({ file }) => {
                         下载 PDF
                     </a>
                 )}
+            </div>
+        );
+    }
+
+    if (loading) {
+        return (
+            <div className="flex items-center justify-center h-full text-slate-400 gap-2">
+                <div className="w-5 h-5 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+                <span className="text-sm">读取文档中...</span>
             </div>
         );
     }
@@ -2408,12 +2415,16 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse, is
         showFeedback(`画面: ${OBJECT_FIT_LABEL[nextFit]}`);
     };
 
-    // 判断是否为流媒体直播：duration 保留 Infinity 语义，未加载完成前不误判 VOD 为 LIVE
-    const isLiveStream = currentFile?.mediaType === 'stream' && !Number.isFinite(state.duration);
-    // 快进/快退按钮的可用性。seek 在直播与时长未知的源上一定返回 false，
-    // 按钮留着可点就是「点了没反应」—— 与播放键置灰同一个道理。
-    // （键盘 J/L 与 ←/→ 走 seek 的返回值，不弹徽章即可，无需另判。）
-    const seekable = !pagedKind && playable && !isLiveStream && state.duration > 0;
+    // 「这个源没有尽头」：duration 保留 Infinity 语义（见 usePlay 的 durationchange），
+    // 元数据未就绪时是 0，所以不会把 VOD 误判成 LIVE。
+    // 不按 mediaType 判：嗅探器会把 fMP4 直播标成 video，按类型判会让它既拿不到
+    // LIVE 标记、又留着一条永远拖不动的进度条（ProgressBar 的 validDuration 为 0）。
+    const isLive = state.duration === Infinity;
+    // 快进/快退按钮的可用性：判据与 seek 的拒绝条件逐字相同（有限时长且为正）。
+    // 不按 mediaType 判 —— seek 只看元素真实的 duration，两处各判一份必然漂移成
+    // 「按钮亮着但点了没反应」。（键盘 J/L 与 ←/→ 走 seek 的返回值，无需另判。）
+    // isLive 就是 duration === Infinity，已被 Number.isFinite 排除，不再重复判。
+    const seekable = !pagedKind && playable && Number.isFinite(state.duration) && state.duration > 0;
 
     // 音频视图外圈进度环的填充比例（0~1）。duration 为 Infinity/NaN 时按 0 处理，
     // 否则 strokeDashoffset 会算成 NaN，整圈环直接消失。
@@ -3138,12 +3149,12 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse, is
                                     duration={state.duration}
                                     bufferedEnd={bufferedEnd}
                                     onSeek={methods.seek}
-                                    isLive={isLiveStream}
+                                    isLive={isLive}
                                 />
                             </div>
 
                             <span className="text-xs font-mono text-slate-500 shrink-0 tabular-nums">
-                                {isLiveStream ? 'LIVE' : formatTime(state.duration)}
+                                {isLive ? 'LIVE' : formatTime(state.duration)}
                             </span>
                         </div>
                     )}

@@ -129,9 +129,29 @@ export const usePlay = (): UsePlayReturn => {
     const hlsRef = useRef<Hls | null>(null);
 
     const [playlist, setPlaylist] = useState<PlaylistState>(restorePlaylist);
-    // ref 镜像：让切歌/删除索引计算保持纯函数，避免在 setState updater 内做副作用
+
+    /**
+     * 播放列表的**唯一写入点**：ref 与 state 同一次写入。
+     *
+     * 此前只用 setPlaylist 写 state，另挂一个 effect 把 state 回填进 ref —— 同一个
+     * 事实存了两处，而 ref 恒定落后 state 一个提交。所有增删又都是「读 ref → 算
+     * 新表 → 覆盖写」，于是同一轮里连着改两次时，第二次读到的是旧表、把第一次的
+     * 结果整个盖掉（导入时「散文件 + 解包画廊 + 多本绘本」都是连着调好几次）。
+     * 目前那几处调用之间恰好都有 await、React 来得及冲刷，才没暴露出来 ——
+     * 这正是「靠时序侥幸才对」：少一个 await 就丢数据，且不报任何错。
+     *
+     * 让 ref 成为写穿缓存后，它永远等于最后一次提交值，谁先跑完都不影响结果。
+     * 仍然不用 setState 的函数式 updater：索引计算夹着 revokeVideoFile 这类副作用，
+     * 塞进 updater 会在 StrictMode 下重放。
+     *
+     * 本函数依赖为空、引用恒定（与 setState 同性质），所以各调用处不把它列进依赖
+     * 数组 —— 若将来要给它加依赖，必须同时给所有调用处补上，否则闭包会静默过期。
+     */
     const playlistRef = useRef(playlist);
-    useEffect(() => { playlistRef.current = playlist; }, [playlist]);
+    const commitPlaylist = useCallback((next: PlaylistState) => {
+        playlistRef.current = next;
+        setPlaylist(next);
+    }, []);
 
     // 播放列表快照落盘（只写可重建项，本地 File/Blob 条目天然跳过）。
     // 防抖 1.5s：边下边播每页 append 都会改 playlist，同步写 localStorage 会把阅读滚动卡成幻灯片。
@@ -227,26 +247,20 @@ export const usePlay = (): UsePlayReturn => {
     }, []);
 
     /**
-     * 把 video 元素与旧源解绑。
+     * 把给定的 video 元素与旧源解绑。
      *
      * 只清 src 不调 load() 不会真正断开：解码器与网络连接会挂到下一次赋值，
-     * 表现为「切走了还在后台下」。换源与清空列表都必须走这里，各写一份迟早漏掉 load()。
+     * 表现为「切走了还在后台下」。
+     *
+     * 参数是**元素本身**而不是去读 videoRef：React 在提交阶段就把 ref 摘掉了，
+     * 而 effect 的清理函数要等到提交之后才跑，那时 `videoRef.current` 早已指向
+     * 新元素或 null。凡是「释放我刚才配置的那个元素」都必须把元素握在手里，
+     * 回头去 ref 里取只会拿到别人。
      */
-    const detachVideo = useCallback(() => {
-        const video = videoRef.current;
+    const detachElement = useCallback((video: HTMLVideoElement | null) => {
         if (!video) return;
         try { video.pause(); video.removeAttribute('src'); video.load(); } catch { /* ignore */ }
     }, []);
-
-    /**
-     * 列表清空后把播放器放干净：释放 HLS、解绑 video、复位播放态。
-     * 删除末项有三条路径（单删/批删/清空），这里是它们共同的所有者。
-     */
-    const releasePlayback = useCallback(() => {
-        destroyHls();
-        detachVideo();
-        setState(prev => ({ ...prev, isPlaying: false, isBuffering: false, currentTime: 0, duration: 0 }));
-    }, [destroyHls, detachVideo]);
 
     /**
      * 统一发起播放并识别「自动播放被拦截」。
@@ -269,7 +283,20 @@ export const usePlay = (): UsePlayReturn => {
         });
     }, []);
 
-    // 卸载时释放 HLS
+    /**
+     * 列表清空后把播放器放干净：释放 HLS、解绑 video、复位播放态。
+     * 删除末项有三条路径（单删/批删/清空），这里是它们共同的所有者。
+     *
+     * 这里必须**同步**做，不能只交给加载 effect：清空列表会同时 revoke 掉条目的
+     * Blob URL，而元素上还挂着那个地址，晚一步解绑就可能先收到一次媒体错误。
+     */
+    const releasePlayback = useCallback(() => {
+        destroyHls();
+        detachElement(videoRef.current);
+        setState(prev => ({ ...prev, isPlaying: false, isBuffering: false, currentTime: 0, duration: 0 }));
+    }, [destroyHls, detachElement]);
+
+
     useEffect(() => () => destroyHls(), [destroyHls]);
 
     // 播放
@@ -439,7 +466,7 @@ export const usePlay = (): UsePlayReturn => {
             do {
                 nextIdx = Math.floor(Math.random() * len);
             } while (nextIdx === prev.currentIndex);
-            setPlaylist({ ...prev, currentIndex: nextIdx });
+            commitPlaylist({ ...prev, currentIndex: nextIdx });
             return;
         }
         if (mode === PlaybackMode.SingleLoop && !manual) {
@@ -479,7 +506,7 @@ export const usePlay = (): UsePlayReturn => {
             }
             return;
         }
-        setPlaylist({ ...prev, currentIndex: nextIdx });
+        commitPlaylist({ ...prev, currentIndex: nextIdx });
     }, [pause, attemptAutoplay, resumeSlideshow]);
 
     // 上一首
@@ -489,7 +516,7 @@ export const usePlay = (): UsePlayReturn => {
         if (len === 0) return;
         const prevIdx = prev.currentIndex <= 0 ? len - 1 : prev.currentIndex - 1;
         if (prevIdx === prev.currentIndex) return;
-        setPlaylist({ ...prev, currentIndex: prevIdx });
+        commitPlaylist({ ...prev, currentIndex: prevIdx });
     }, []);
 
     // 顺序翻页：图集/文档阅读专用，不受播放模式影响。
@@ -504,7 +531,7 @@ export const usePlay = (): UsePlayReturn => {
         const nextIdx = delta === 1 ? Math.min(base + 1, len - 1) : Math.max(base - 1, 0);
         if (nextIdx === prev.currentIndex) return;
         setMediaError(null);
-        setPlaylist({ ...prev, currentIndex: nextIdx });
+        commitPlaylist({ ...prev, currentIndex: nextIdx });
     }, []);
     const nextPage = useCallback(() => stepPage(1), [stepPage]);
     const prevPage = useCallback(() => stepPage(-1), [stepPage]);
@@ -515,7 +542,7 @@ export const usePlay = (): UsePlayReturn => {
         if (index < 0 || index >= prev.files.length) return;
         if (index === prev.currentIndex) return;
         setMediaError(null);
-        setPlaylist({ ...prev, currentIndex: index });
+        commitPlaylist({ ...prev, currentIndex: index });
     }, []);
 
     // 移除曲目（修正：删除当前索引之前的项时 currentIndex 需同步前移）
@@ -536,7 +563,7 @@ export const usePlay = (): UsePlayReturn => {
         } else if (newIdx >= newFiles.length) {
             newIdx = newFiles.length - 1;
         }
-        setPlaylist({ files: newFiles, currentIndex: newIdx });
+        commitPlaylist({ files: newFiles, currentIndex: newIdx });
         if (newFiles.length === 0) {
             releasePlayback();
         } else if (removingCurrent) {
@@ -567,7 +594,7 @@ export const usePlay = (): UsePlayReturn => {
         } else if (newIdx >= newFiles.length) {
             newIdx = newFiles.length - 1;
         }
-        setPlaylist({ files: newFiles, currentIndex: newIdx });
+        commitPlaylist({ files: newFiles, currentIndex: newIdx });
         if (newFiles.length === 0) {
             releasePlayback();
         } else if (removedCurrent) {
@@ -579,7 +606,7 @@ export const usePlay = (): UsePlayReturn => {
     const clearPlaylist = useCallback(() => {
         const prev = playlistRef.current;
         prev.files.forEach(revokeVideoFile);
-        setPlaylist({ files: [], currentIndex: -1 });
+        commitPlaylist({ files: [], currentIndex: -1 });
         setMediaError(null);
         releasePlayback();
     }, [releasePlayback]);
@@ -627,7 +654,7 @@ export const usePlay = (): UsePlayReturn => {
         const prev = playlistRef.current;
         const updated = [...prev.files, ...newVideoFiles];
         const nextIdx = prev.currentIndex === -1 ? 0 : prev.currentIndex;
-        setPlaylist({ files: updated, currentIndex: nextIdx });
+        commitPlaylist({ files: updated, currentIndex: nextIdx });
     }, []);
 
     // 单文件 .gallery 解包入列（与 addFiles 的文件夹画廊分支同构，徽标不进列表）
@@ -651,7 +678,7 @@ export const usePlay = (): UsePlayReturn => {
         setMediaError(null);
         const prev = playlistRef.current;
         const updated = [...prev.files, ...newVideoFiles];
-        setPlaylist({ files: updated, currentIndex: prev.files.length });
+        commitPlaylist({ files: updated, currentIndex: prev.files.length });
     }, []);
 
     // AI 绘本成组入列：与画廊同构（成组 + 页码），差别在每页带 description 文案
@@ -683,7 +710,7 @@ export const usePlay = (): UsePlayReturn => {
         setMediaError(null);
         const prev = playlistRef.current;
         const updated = [...prev.files, ...newVideoFiles];
-        setPlaylist({ files: updated, currentIndex: prev.files.length });
+        commitPlaylist({ files: updated, currentIndex: prev.files.length });
     }, []);
 
     // 添加网络流。跳转到新条目后由加载 effect 统一发起播放，此处不自己调 play()
@@ -694,7 +721,7 @@ export const usePlay = (): UsePlayReturn => {
         setMediaError(null);
         const prev = playlistRef.current;
         const updated = [...prev.files, streamFile];
-        setPlaylist({ files: updated, currentIndex: updated.length - 1 });
+        commitPlaylist({ files: updated, currentIndex: updated.length - 1 });
     }, []);
 
     // 批量添加网络流/图集页面
@@ -719,11 +746,11 @@ export const usePlay = (): UsePlayReturn => {
         if (clearPrevious) {
             prev.files.forEach(revokeVideoFile);
             destroyHls();
-            setPlaylist({ files: streamFiles, currentIndex: 0 });
+            commitPlaylist({ files: streamFiles, currentIndex: 0 });
         } else {
             const updated = [...prev.files, ...streamFiles];
             const nextIdx = autoPlayFirst ? prev.files.length : (prev.currentIndex === -1 ? 0 : prev.currentIndex);
-            setPlaylist({ files: updated, currentIndex: nextIdx });
+            commitPlaylist({ files: updated, currentIndex: nextIdx });
         }
     }, [destroyHls]);
 
@@ -739,7 +766,7 @@ export const usePlay = (): UsePlayReturn => {
         });
         // 无变化就不 setState：朗读缓存命中时会走到这里，白白触发一次全列表重渲染
         if (!changed) return;
-        setPlaylist({ files, currentIndex: prev.currentIndex });
+        commitPlaylist({ files, currentIndex: prev.currentIndex });
     }, []);
 
     // 追加更多流/图集后续页（不打扰当前播放/阅读索引）
@@ -763,7 +790,7 @@ export const usePlay = (): UsePlayReturn => {
                 });
             });
         if (!toAdd.length) return;
-        setPlaylist({
+        commitPlaylist({
             files: [...prev.files, ...toAdd],
             currentIndex: prev.currentIndex === -1 ? 0 : prev.currentIndex
         });
@@ -801,7 +828,7 @@ export const usePlay = (): UsePlayReturn => {
             const existingUrls = new Set(prev.files.map(f => f.url));
             const toAdd = incoming.filter(f => f.url && !existingUrls.has(f.url));
             if (!toAdd.length) return;
-            setPlaylist({
+            commitPlaylist({
                 files: [...prev.files, ...toAdd],
                 currentIndex: prev.currentIndex === -1 ? 0 : prev.currentIndex,
             });
@@ -852,7 +879,7 @@ export const usePlay = (): UsePlayReturn => {
             currentIndex = files.length - 1;
         }
         setMediaError(null);
-        setPlaylist({ files, currentIndex });
+        commitPlaylist({ files, currentIndex });
     }, []);
 
     // 全屏 (支持传入指定播放器主容器元素实现真正的纯视频全屏)
@@ -923,7 +950,6 @@ export const usePlay = (): UsePlayReturn => {
         destroyHls();
 
         if (!file) {
-            detachVideo();
             // 列表被清空/删到空时横幅必须一起走：留着「已跳过 N 段」而播放器是空的，
             // 用户既看不懂也关不掉（此后没有任何媒体切换来触发清理）
             setMediaError(null);
@@ -932,12 +958,11 @@ export const usePlay = (): UsePlayReturn => {
             return;
         }
 
-        // 非音视频流走图集 / 文档 / 其他展示分支：停掉旧视频。
-        // 播放态由 canPlayback 统一裁定：文档/画廊占位/other 是静态页保持暂停
-        // （否则暂停键误导 + 控制条自动隐藏，用户连点哪里播都找不到），
-        // 已在末项的图集同样不进入 —— 轮播无从继续，点亮后下一帧就被按回去。
+        // 非音视频流走图集 / 文档 / 其他展示分支：播放态由 canPlayback 统一裁定。
+        // 文档/画廊占位/other 是静态页保持暂停（否则暂停键误导 + 控制条自动隐藏，
+        // 用户连点哪里播都找不到），已在末项的图集同样不进入 —— 轮播无从继续，
+        // 点亮后下一帧就被按回去。
         if (file.mediaType !== 'video' && file.mediaType !== 'stream' && file.mediaType !== 'audio') {
-            detachVideo();
             const list = playlistRef.current;
             const playable = canPlayback(file.mediaType, list.currentIndex, list.files.length);
             setMediaError(null);
@@ -1070,6 +1095,24 @@ export const usePlay = (): UsePlayReturn => {
         video.volume = stateRef.current.isMuted ? 0 : stateRef.current.volume;
         video.muted = stateRef.current.isMuted;
         try { video.playbackRate = stateRef.current.playbackRate; } catch { /* ignore */ }
+
+        /**
+         * 元素离场时解绑。
+         *
+         * 音视频分支与图集/文档分支互斥，切到后者时 React 会把 <video> 整个卸载。
+         * 摘除的媒体元素**不会自己断开**：规范只要求它暂停，src 与资源加载都还在，
+         * 于是后台继续拉流、继续占解码器，直到被回收。而真正能中止它的是
+         * `removeAttribute('src') + load()` —— 偏偏这时 videoRef.current 已被 React
+         * 在提交阶段置空，回头去 ref 里取只会拿到 null：原先各分支里的解绑在
+         * 「视频切图片」这条路径上一直是空转的。只有把元素握在闭包里才够得着它。
+         *
+         * 按「元素是否还是当前元素」筛一道：video→video 换源时 React 复用同一个
+         * 元素，此时若也解绑，清空 src 触发的 error 会落到紧随其后的新源上，
+         * 给每次换片都弹一条假的「媒体加载失败」。
+         */
+        return () => {
+            if (videoRef.current !== video) detachElement(video);
+        };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [mediaSourceKey, destroyHls]);
 
