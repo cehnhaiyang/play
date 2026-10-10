@@ -62,23 +62,15 @@ const main = async () => {
   console.log('\n=== 规则草稿同步 ===');
   const draftOk = require('./draft.test.js').run();
 
-  console.log('\n=== 浏览器外壳 ===');
-  const browserOk = require('./browser.test.js').run();
-
   console.log('\n=== 嗅探引擎 ===');
   const snifferOk = require('./sniffer.test.js').run();
 
   console.log('\n=== 运行日志 ===');
   const logsOk = require('./logs.test.js').run();
 
-  console.log('\n=== Edge 导入与书签树 ===');
-  const edgeMod = require('./edgeimport.test.js');
-  const edgeOk = edgeMod.run();
-  const edgeAsyncOk = await edgeMod.runAsync();
-
   if (!engineOk || !compatOk || !aibookOk || !aiproviderOk || !searchSyncOk || !searchAsyncOk
-    || !mainStaticOk || !tamperOk || !agentToolsOk || !draftOk || !browserOk
-    || !snifferOk || !logsOk || !edgeOk || !edgeAsyncOk) {
+    || !mainStaticOk || !tamperOk || !agentToolsOk || !draftOk
+    || !snifferOk || !logsOk) {
     process.exitCode = 1;
     console.log('\n存在失败用例。');
   } else {

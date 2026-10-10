@@ -82,18 +82,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
         /** 暂停 / 继续 / 取消 / 在文件夹中显示 / 打开 / 从列表移除 */
         downloadAction: (id, action) => ipcRenderer.invoke('browser-download-action', { id, action }),
     },
-    // --- Edge 数据导入（收藏夹 / 历史 / 图标 / 自动填充 / Cookie） ---
-    // 两步：detect 只读文件大小与条目数（快、不会被锁影响），import 才开 SQLite
-    // 与解密。Cookie 走纯离线解密（APPB → SYSTEM DPAPI → 主密钥，不启动 Edge），
-    // 详见 electron/edgeImportService.js 顶部注释。
-    edge: {
-        /** 探测本机 Edge 与各 profile 的数据量 */
-        detect: () => ipcRenderer.invoke('edge-detect'),
-        /** 执行导入。options.include 逐项开关；返回逐项结果与 warnings */
-        run: (options) => ipcRenderer.invoke('edge-import', options),
-        /** 导入过程中的阶段提示（"正在读取收藏夹…"）。返回取消订阅函数 */
-        onProgress: (callback) => subscribe('edge-import-progress', callback),
-    },
     // --- 种子文件获取（只有落盘需要主进程：文件系统权限） ---
     // 搜索不经过这里：搜索引擎完整地待在 services/SearchService，
     // 用渲染层 fetch 直接请求各站点，代理配在 Chromium 会话上、自动生效。

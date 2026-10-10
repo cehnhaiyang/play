@@ -14,17 +14,19 @@ const tls = require('tls');
 /* -------------------------------------------------------------------------- */
 // 抓取该站时使用的 UA 与默认请求头。
 //
-// UA 初值由内核版本派生（见 userAgent.js），与浏览器会话天然一致；
-// main.js 拿到会话 UA 后会调 setUserAgent 再对齐一次——cf_clearance 与 UA 绑定，
-// Node 直抓必须与"拿到凭证的那个浏览器"完全一致，否则表现为"验证过了但搜索仍 403"。
-const { kernelUserAgent } = require('./userAgent');
+// UA 由 main.js 在启动时推入（`setUserAgent`）：它读引擎自己那一份
+// （`app.userAgentFallback`，会话就绪后再对齐会话实际值）。这里**不自造** UA——
+// cf_clearance 与 UA 绑定，Node 直抓必须与"拿到凭证的那个浏览器"完全一致，
+// 自造一份就是两个来源，表现为"验证过了但搜索仍 403"。
+//
+// 本模块不 require electron：那会让它无法被 test/ 直接 require 求值。
 const HEADERS = {
-    'User-Agent': kernelUserAgent(),
+    'User-Agent': '',
     Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
 };
 
-/** 把 UA 换成浏览器会话的真实值（由 main.js 在拿到会话 UA 后调用） */
+/** 把 UA 换成浏览器会话的真实值（由 main.js 在启动与会话就绪后调用） */
 function setUserAgent(value) {
     const next = String(value || '').trim();
     if (!next || next === HEADERS['User-Agent']) return false;

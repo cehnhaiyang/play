@@ -74,9 +74,6 @@ import type {
     BookmarkNode,
     BookmarkBarVisibility,
     CookieItem,
-    EdgeDetectResult,
-    EdgeImportResult,
-    EdgeAccountEntry,
     HeaderRule,
     MergeStats,
     NavigationError,
@@ -695,12 +692,11 @@ const BookmarkBar: React.FC<{
     tree: BookmarkNode;
     onNavigate: (url: string) => void;
     onOpenManager: () => void;
-    onOpenImport: () => void;
     onVisibilityChange: (value: BookmarkBarVisibility) => void;
     visibility: BookmarkBarVisibility;
     onRemove: (id: string) => void;
     onOpenInNewTab: (url: string) => void;
-}> = ({ tree, onNavigate, onOpenManager, onOpenImport, onVisibilityChange, visibility, onRemove, onOpenInNewTab }) => {
+}> = ({ tree, onNavigate, onOpenManager, onVisibilityChange, visibility, onRemove, onOpenInNewTab }) => {
     const [openFolderId, setOpenFolderId] = useState<string | null>(null);
     const [overflowOpen, setOverflowOpen] = useState(false);
     const barRef = useRef<HTMLDivElement | null>(null);
@@ -807,13 +803,6 @@ const BookmarkBar: React.FC<{
             </div>
 
             <button
-                onClick={onOpenImport}
-                className="ml-1 flex h-6 w-6 shrink-0 items-center justify-center rounded text-slate-500 transition hover:bg-white/8 hover:text-indigo-300"
-                title="从 Edge 导入"
-            >
-                <Download className="h-3.5 w-3.5" />
-            </button>
-            <button
                 onClick={onOpenManager}
                 className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-slate-500 transition hover:bg-white/8 hover:text-slate-200"
                 title="书签管理器"
@@ -847,12 +836,6 @@ const BookmarkBar: React.FC<{
                             className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-slate-300 transition hover:bg-white/8"
                         >
                             <Layers className="h-3 w-3" /> 书签管理器
-                        </button>
-                        <button
-                            onClick={() => { onOpenImport(); setOpenFolderId(null); }}
-                            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-slate-300 transition hover:bg-white/8"
-                        >
-                            <Download className="h-3 w-3" /> 从 Edge 导入
                         </button>
                     </div>
                 </div>
@@ -1044,8 +1027,7 @@ const BookmarkManager: React.FC<{
     onUpdateUrl: (id: string, url: string) => void;
     onAddFolder: (parentId: string, title: string) => void;
     onMove: (id: string, targetFolderId: string, index?: number) => void;
-    onOpenImport: () => void;
-}> = ({ tree, onClose, onNavigate, onRemove, onRename, onUpdateUrl, onAddFolder, onMove, onOpenImport }) => {
+}> = ({ tree, onClose, onNavigate, onRemove, onRename, onUpdateUrl, onAddFolder, onMove }) => {
     const [selectedId, setSelectedId] = useState(tree.id);
     const [query, setQuery] = useState('');
     const [dragId, setDragId] = useState<string | null>(null);
@@ -1115,12 +1097,6 @@ const BookmarkManager: React.FC<{
                         className="w-full rounded-md border border-white/10 bg-slate-900/70 py-1 pl-7 pr-2 text-[11px] text-slate-200 outline-none placeholder:text-slate-600 focus:border-indigo-400/40"
                     />
                 </div>
-                <button
-                    onClick={onOpenImport}
-                    className="flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 text-[10px] text-slate-300 transition hover:border-indigo-400/40 hover:text-indigo-200"
-                >
-                    <Download className="h-3 w-3" /> 从 Edge 导入
-                </button>
                 <button onClick={onClose} className="flex h-6 w-6 items-center justify-center rounded text-slate-500 transition hover:bg-white/8 hover:text-slate-200">
                     <X className="h-3.5 w-3.5" />
                 </button>
@@ -1343,305 +1319,6 @@ const FolderTreeRow: React.FC<{
             <FolderOpen className="h-3.5 w-3.5 shrink-0 text-slate-400" />
             <span className="min-w-0 flex-1 truncate">{node.title}</span>
             <span className="shrink-0 font-mono text-[9px] text-slate-600">{countNodes(node)}</span>
-        </div>
-    );
-};
-
-/* ========================================================================== */
-/*                              Edge 导入面板                                   */
-/* ========================================================================== */
-
-/** 导入项开关的清单。**唯一真值** —— 文案、默认值、请求参数都从这里生成 */
-const EDGE_IMPORT_ITEMS: { key: string; label: string; hint: string; always?: boolean }[] = [
-    { key: 'bookmarks', label: '收藏夹', hint: '含文件夹层级与网站图标', always: true },
-    { key: 'favicons', label: '网站图标', hint: '从 Edge 的图标库取 16/32px 图' },
-    { key: 'history', label: '浏览历史', hint: '最近 3000 条' },
-    { key: 'autofill', label: '自动填充', hint: '表单里填过的名字与值' },
-    { key: 'accounts', label: '账号', hint: '各站点保存的用户名（不含密码）' },
-    { key: 'cookies', label: 'Cookie（含登录态）', hint: '需要完全退出 Edge' },
-    { key: 'searchEngine', label: '默认搜索引擎', hint: '只读取，不自动切换' },
-];
-
-/** 导入来的账号落盘键。裸键，与书签那几个键同一命名空间 */
-const EDGE_ACCOUNTS_STORE_KEY = 'react-player-edge-accounts';
-
-/**
- * 导入来的账号存在 localStorage 里。
- *
- * 只显示在导入面板的结果里是不够的 —— 面板一关数字就没了，用户没法确认
- * 到底导进来了什么，也没法拿去用。而账号是明文（密码才是解不开的那个），
- * 存下来没有额外的安全损失：它们本来就在本机的 Edge 库里明文躺着。
- */
-const loadStoredAccounts = (): EdgeAccountEntry[] => {
-    const saved = loadJSON<EdgeAccountEntry[]>(EDGE_ACCOUNTS_STORE_KEY, [], '');
-    return Array.isArray(saved) ? saved : [];
-};
-
-/**
- * Edge 导入面板。
- *
- * 三处刻意的设计：
- *
- *  1. **密码不可导入且写明原因**。不是漏做 —— Edge 的密码库是 v20
- *     （App-Bound Encryption），离线解密目前只做 Cookie（含登录态），
- *     密码的派生细节未验证。给一个点了没反应的开关比不做更糟。
- *  2. **逐项显示结果**。每个来源要么显示条数，要么显示失败原因。
- *     静默跳过会让用户以为"Edge 里就这些"。
- *  3. **Cookie 那条会明确提示先退出 Edge**。实测 Edge 关掉窗口后仍有后台进程
- *     持有 Cookies 库的独占锁（三种读法全 EBUSY），不提示的话用户只会看到
- *     一条莫名其妙的失败。
- */
-const EdgeImportPanel: React.FC<{
-    onClose: () => void;
-    onImported: (result: EdgeImportResult) => MergeStats | null;
-}> = ({ onClose, onImported }) => {
-    const [detected, setDetected] = useState<EdgeDetectResult | null>(null);
-    const [profileId, setProfileId] = useState('Default');
-    const [enabled, setEnabled] = useState<Record<string, boolean>>({
-        bookmarks: true, favicons: true, history: true, autofill: true, accounts: true, cookies: true, searchEngine: true,
-    });
-    const [running, setRunning] = useState(false);
-    const [progress, setProgress] = useState('');
-    const [result, setResult] = useState<EdgeImportResult | null>(null);
-    /** 本次实际合并进书签树的统计（与 Edge 侧条数是两回事：重复导入时 Edge 条数不变） */
-    const [merge, setMerge] = useState<MergeStats | null>(null);
-    const [error, setError] = useState('');
-    const [accounts, setAccounts] = useState<EdgeAccountEntry[]>(loadStoredAccounts);
-    const [showAccounts, setShowAccounts] = useState(false);
-
-    useEffect(() => {
-        const api = getElectronAPI();
-        if (!api?.edge) { setError('读取不到 Edge 导入桥（preload 未加载），请重启应用。'); return; }
-        api.edge.detect()
-            .then((data) => {
-                setDetected(data);
-                if (data.profiles.length > 0) setProfileId(data.profiles[0].id);
-            })
-            .catch((e) => setError(e instanceof Error ? e.message : '探测 Edge 失败'));
-    }, []);
-
-    useEffect(() => {
-        const api = getElectronAPI();
-        if (!api?.edge) return;
-        return api.edge.onProgress((message) => setProgress(message));
-    }, []);
-
-    const run = async () => {
-        const api = getElectronAPI();
-        if (!api?.edge) return;
-        setRunning(true);
-        setError('');
-        setProgress('');
-        try {
-            const data = await api.edge.run({ profileId, include: enabled });
-            setResult(data);
-            // 账号要落盘才留得住 —— 面板一关数字就没了，用户无法确认导进来了什么
-            if (data.ok && data.accounts.length > 0) {
-                setAccounts(data.accounts);
-                saveJSON(EDGE_ACCOUNTS_STORE_KEY, data.accounts, '');
-            }
-            if (data.ok) setMerge(onImported(data));
-        } catch (e) {
-            setError(e instanceof Error ? e.message : '导入失败');
-        } finally {
-            setRunning(false);
-            setProgress('');
-        }
-    };
-
-    const profile = detected?.profiles.find((item) => item.id === profileId);
-
-    return (
-        <div className="absolute inset-0 z-40 flex items-center justify-center bg-slate-950/80 p-6 backdrop-blur-sm">
-            <div className="flex max-h-full w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-white/10 bg-slate-900/98 shadow-2xl">
-                <div className="flex shrink-0 items-center gap-2 border-b border-white/8 px-4 py-3">
-                    <Download className="h-4 w-4 text-indigo-300" />
-                    <span className="text-xs font-bold text-slate-200">从 Edge 导入</span>
-                    <div className="flex-1" />
-                    <button onClick={onClose} className="flex h-6 w-6 items-center justify-center rounded text-slate-500 transition hover:bg-white/8 hover:text-slate-200">
-                        <X className="h-3.5 w-3.5" />
-                    </button>
-                </div>
-
-                <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-3">
-                    {error && (
-                        <div className="mb-3 flex items-start gap-2 rounded-lg border border-rose-500/25 bg-rose-500/8 px-3 py-2 text-[11px] text-rose-200">
-                            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                            <span>{error}</span>
-                        </div>
-                    )}
-
-                    {!detected && !error && (
-                        <div className="flex items-center gap-2 py-6 text-[11px] text-slate-500">
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" /> 正在探测 Edge…
-                        </div>
-                    )}
-
-                    {detected && !detected.available && (
-                        <div className="rounded-lg border border-amber-500/25 bg-amber-500/8 px-3 py-2 text-[11px] text-amber-200">
-                            {detected.reason || '没有找到 Edge。'}
-                        </div>
-                    )}
-
-                    {detected?.available && (
-                        <>
-                            <div className="mb-3 rounded-lg border border-white/8 bg-white/3 px-3 py-2">
-                                <div className="text-[11px] font-bold text-slate-200">
-                                    {detected.label} <span className="font-mono text-[10px] text-slate-500">{detected.version}</span>
-                                </div>
-                                <div className="mt-0.5 break-all font-mono text-[9px] text-slate-600">{detected.userDataDir}</div>
-                            </div>
-
-                            {detected.profiles.length > 1 && (
-                                <div className="mb-3">
-                                    <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">配置文件</div>
-                                    <div className="flex flex-wrap gap-1.5">
-                                        {detected.profiles.map((item) => (
-                                            <button
-                                                key={item.id}
-                                                onClick={() => setProfileId(item.id)}
-                                                className={`rounded-md border px-2 py-1 text-[10px] transition ${profileId === item.id
-                                                    ? 'border-indigo-400/50 bg-indigo-500/15 text-indigo-200'
-                                                    : 'border-white/10 text-slate-400 hover:border-white/20 hover:text-slate-200'
-                                                    }`}
-                                            >
-                                                {item.name} · {item.bookmarkCount} 书签
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-
-                            {profile && (
-                                <div className="mb-3 grid grid-cols-2 gap-1.5 text-[10px] text-slate-400">
-                                    <div className="rounded border border-white/8 px-2 py-1">收藏夹 <span className="font-mono text-slate-200">{profile.bookmarkCount}</span> 条 / <span className="font-mono text-slate-200">{profile.folderCount}</span> 个文件夹</div>
-                                    <div className="rounded border border-white/8 px-2 py-1">Cookie <span className={profile.hasCookies ? 'text-emerald-300' : 'text-slate-500'}>{profile.hasCookies ? '有' : '无'}</span></div>
-                                </div>
-                            )}
-
-                            <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">导入内容</div>
-                            <div className="space-y-1">
-                                {EDGE_IMPORT_ITEMS.map((item) => (
-                                    <label
-                                        key={item.key}
-                                        className={`flex cursor-pointer items-start gap-2 rounded-lg border border-white/8 px-2.5 py-1.5 transition hover:bg-white/4 ${item.always ? 'opacity-70' : ''}`}
-                                    >
-                                        <input
-                                            type="checkbox"
-                                            checked={item.always ? true : Boolean(enabled[item.key])}
-                                            disabled={Boolean(item.always)}
-                                            onChange={(event) => setEnabled((prev) => ({ ...prev, [item.key]: event.target.checked }))}
-                                            className="mt-0.5 h-3 w-3 shrink-0 accent-indigo-500"
-                                        />
-                                        <span className="min-w-0 flex-1">
-                                            <span className="block text-[11px] text-slate-200">{item.label}</span>
-                                            <span className="block text-[9px] text-slate-500">{item.hint}</span>
-                                        </span>
-                                    </label>
-                                ))}
-                            </div>
-
-                            <div className="mt-2 flex items-start gap-2 rounded-lg border border-white/8 bg-white/3 px-2.5 py-2 text-[10px] text-slate-500">
-                                <KeyRound className="mt-0.5 h-3 w-3 shrink-0 text-slate-600" />
-                                <span>
-                                    <span className="text-slate-400">密码无法导入（账号可以）。</span>
-                                    Edge 里用户名是明文存储的，所以上面「账号」那一项能正常导入；
-                                    但密码库用 App-Bound Encryption（v20）加密，密钥锁在系统级
-                                    DPAPI 里，只有 Edge 进程本身能解，浏览器调试接口也不提供密码。
-                                    这不是本应用的取舍，是 Windows 上的设计边界。
-                                </span>
-                            </div>
-
-                            {result && (
-                                <div className="mt-3 rounded-lg border border-white/8 bg-white/3 px-3 py-2">
-                                    <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">导入结果</div>
-                                    <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px]">
-                                        <span className="text-slate-400">收藏夹</span>
-                                        <span className="font-mono text-slate-200">{result.stats.bookmarks} 条 / {result.stats.folders} 文件夹</span>
-                                        <span className="text-slate-400">网站图标</span>
-                                        <span className="font-mono text-slate-200">{result.stats.favicons}</span>
-                                        <span className="text-slate-400">浏览历史</span>
-                                        <span className="font-mono text-slate-200">{result.stats.history}</span>
-                                        <span className="text-slate-400">自动填充</span>
-                                        <span className="font-mono text-slate-200">{result.stats.autofill}</span>
-                                        <span className="text-slate-400">账号</span>
-                                        <span className="font-mono text-slate-200">{result.stats.accounts}</span>
-                                        <span className="text-slate-400">Cookie</span>
-                                        <span className="font-mono text-slate-200">
-                                            {result.stats.cookies}
-                                            {typeof result.stats.cookiesApplied === 'number' && result.stats.cookiesApplied !== result.stats.cookies
-                                                ? `（写入 ${result.stats.cookiesApplied}）`
-                                                : ''}
-                                        </span>
-                                    </div>
-                                    {merge && (
-                                        <div className="mt-2 border-t border-white/8 pt-2 text-[10px] text-slate-400">
-                                            本次合并：新增 <span className="font-mono text-emerald-300">{merge.added}</span> 条，
-                                            跳过 <span className="font-mono text-slate-200">{merge.skipped}</span> 条（已存在）
-                                        </div>
-                                    )}
-                                    {result.warnings.length > 0 && (
-                                        <div className="mt-2 space-y-1 border-t border-white/8 pt-2">
-                                            {result.warnings.map((warning, index) => (
-                                                <div key={index} className="flex items-start gap-1.5 text-[10px] text-amber-300">
-                                                    <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-                                                    <span>{warning.message}</span>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    )}
-
-                                    {/* 账号列表可展开：只报一个数字，用户没法确认
-                                        到底导进来了哪些站点、哪些用户名 */}
-                                    {accounts.length > 0 && (
-                                        <div className="mt-2 border-t border-white/8 pt-2">
-                                            <button
-                                                onClick={() => setShowAccounts((prev) => !prev)}
-                                                className="flex w-full items-center gap-1 text-[10px] text-slate-400 transition hover:text-slate-200"
-                                            >
-                                                <ChevronDown className={`h-3 w-3 transition-transform ${showAccounts ? 'rotate-180' : ''}`} />
-                                                {showAccounts ? '收起账号列表' : `查看导入的 ${accounts.length} 个账号`}
-                                            </button>
-                                            {showAccounts && (
-                                                <div className="custom-scrollbar mt-1.5 max-h-52 space-y-0.5 overflow-y-auto">
-                                                    {accounts.map((entry, index) => (
-                                                        <div key={index} className="flex items-baseline gap-2 rounded px-1.5 py-1 hover:bg-white/5">
-                                                            <span className="min-w-0 flex-1 truncate text-[10px] text-slate-200">{entry.username}</span>
-                                                            <span className="min-w-0 flex-[1.2] truncate text-right font-mono text-[9px] text-slate-500">
-                                                                {safeHostname(entry.origin)}
-                                                            </span>
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            )}
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-                        </>
-                    )}
-                </div>
-
-                <div className="flex shrink-0 items-center gap-2 border-t border-white/8 px-4 py-3">
-                    {progress && (
-                        <span className="flex items-center gap-1.5 text-[10px] text-slate-400">
-                            <Loader2 className="h-3 w-3 animate-spin" /> {progress}
-                        </span>
-                    )}
-                    <div className="flex-1" />
-                    <button onClick={onClose} className="rounded-lg border border-white/10 px-3 py-1.5 text-[11px] text-slate-300 transition hover:bg-white/6">
-                        关闭
-                    </button>
-                    <button
-                        onClick={run}
-                        disabled={running || !detected?.available}
-                        className="flex items-center gap-1.5 rounded-lg bg-indigo-500/90 px-3 py-1.5 text-[11px] font-bold text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                        {running ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
-                        {running ? '导入中…' : result ? '再导入一次' : '开始导入'}
-                    </button>
-                </div>
-            </div>
         </div>
     );
 };
@@ -2084,8 +1761,8 @@ const BrowserView: React.FC<{
                                     ref={getWebviewRef(tab.id)}
                                     src={tab.initialUrl}
                                     className="h-full w-full border-none bg-white"
-                                    // 不写 useragent 属性：UA 一律**不改写**，唯一来源见
-                                    // electron/userAgent.js（读引擎自己那一份，与 sec-ch-ua /
+                                    // 不写 useragent 属性：UA 一律**不改写**，唯一来源是
+                                    // 引擎自己那一份（与 sec-ch-ua /
                                     // navigator.userAgentData 天然一致）。
                                     // 渲染层这里再写一份字面量，就等于把"UA 头 / navigator /
                                     // sec-ch-ua"三处身份重新拆成两个进程各自维护——上次就是这么
@@ -5032,8 +4709,6 @@ export const BrowsePanel: React.FC<BrowsePanelProps> = ({
     const [showDownloads, setShowDownloads] = useState(false);
     /** 书签管理器（全屏覆盖层） */
     const [showBookmarkManager, setShowBookmarkManager] = useState(false);
-    /** Edge 导入面板（居中弹窗） */
-    const [showEdgeImport, setShowEdgeImport] = useState(false);
     const addressInputRef = useRef<HTMLInputElement | null>(null);
     /**
      * 待填入 Agent 输入框的文本（右键「让 Agent 分析这个元素」产生）。
@@ -5134,45 +4809,6 @@ export const BrowsePanel: React.FC<BrowsePanelProps> = ({
         createdAt: 0,
     }), [bookmarkTree]);
 
-    /**
-     * Edge 导入结果落地。
-     *
-     * 这里只并**收藏夹**进树 —— 历史、自动填充、Cookie 各有各的去处
-     * （Cookie 由主进程直接写进会话，账号由导入面板自己落盘并列出），
-     * 书签树里没有它们的位置。
-     *
-     * `extras`（Edge 里非空的其它根，例如「移动收藏夹」）挂到「其他收藏夹」
-     * 下面而不是丢掉：那些是用户的真实数据，只是不在主栏上。
-     *
-     * 返回实际合并的统计（新增 / 因已存在跳过），调用方拿去展示 —— 重复导入时
-     * Edge 侧条数不变（"收藏夹 1336 条"），没有这行用户会以为"导了个寂寞"。
-     */
-    const applyEdgeImport = useCallback((result: EdgeImportResult): MergeStats | null => {
-        if (!result.bookmarks) return null;
-
-        // 分流而不是合并：Edge 的「收藏夹栏」进本应用的收藏夹栏，
-        // 「其他收藏夹」与其余非空根进「其他收藏夹」。全部倒进栏上会让
-        // 横栏瞬间塞满用户本来就没打算放出来的东西。
-        const toBar = result.bookmarks.bar.children || [];
-        const toOther = [
-            ...(result.bookmarks.other.children || []),
-            ...result.bookmarks.extras,
-        ];
-
-        const total: MergeStats = { added: 0, skipped: 0 };
-        if (toBar.length > 0) {
-            const s = mergeImported('bar', toBar);
-            total.added += s.added;
-            total.skipped += s.skipped;
-        }
-        if (toOther.length > 0) {
-            const s = mergeImported('other', toOther);
-            total.added += s.added;
-            total.skipped += s.skipped;
-        }
-        return total;
-    }, [mergeImported]);
-
     return (
         <div className="flex h-full w-full bg-slate-950" aria-hidden={!isVisible}>
             {/* 左：浏览器本体。侧边栏是它的兄弟节点，所以开合只挤压这一栏的宽度，
@@ -5222,7 +4858,6 @@ export const BrowsePanel: React.FC<BrowsePanelProps> = ({
                         onOpenInNewTab={(url) => tabActions.openInNewTab(url)}
                         onRemove={removeBookmark}
                         onOpenManager={() => setShowBookmarkManager(true)}
-                        onOpenImport={() => setShowEdgeImport(true)}
                     />
                 )}
 
@@ -5277,14 +4912,6 @@ export const BrowsePanel: React.FC<BrowsePanelProps> = ({
                                 targetId === bookmarkRoot.id ? bookmarkTree.bar.id : targetId,
                                 index,
                             )}
-                            onOpenImport={() => { setShowBookmarkManager(false); setShowEdgeImport(true); }}
-                        />
-                    )}
-
-                    {showEdgeImport && (
-                        <EdgeImportPanel
-                            onClose={() => setShowEdgeImport(false)}
-                            onImported={applyEdgeImport}
                         />
                     )}
                 </div>

@@ -251,25 +251,21 @@ function run() {
     checks += 1;
     const mainSrc = fs.readFileSync(path.join(ELECTRON_DIR, 'main.js'), 'utf8');
     const browseSrc = fs.readFileSync(path.join(ROOT, 'components', 'BrowsePanel.tsx'), 'utf8');
-    const uaSrc = fs.readFileSync(path.join(ELECTRON_DIR, 'userAgent.js'), 'utf8');
     const identityProblems = [];
 
-    // 1) 身份源只读不写：拿不到 app（纯 Node 里 require）必须返回空串，
-    //    绝不凭 process.versions 造一个"看起来像 Chrome 稳定版"的 UA
-    const { kernelUserAgent } = require(path.join(ELECTRON_DIR, 'userAgent.js'));
-    const engineUa = kernelUserAgent();
-    if (engineUa !== '') {
-        identityProblems.push(`纯 Node 环境不该拿得到 UA，却拿到：${engineUa}`);
-    }
-    if (/process\.versions\.(chrome|electron)/.test(uaSrc)) {
-        identityProblems.push('userAgent.js 又按 process.versions 拼 UA 了（拼出来就是假 Chrome 稳定版）');
+    // 1) 不许凭 process.versions 拼一个"看起来像 Chrome 稳定版"的 UA。
+    //    UA 的唯一来源是引擎自己（app.userAgentFallback / 会话实际值）。
+    for (const file of fs.readdirSync(ELECTRON_DIR).filter((f) => f.endsWith('.js'))) {
+        const src = fs.readFileSync(path.join(ELECTRON_DIR, file), 'utf8');
+        if (/process\.versions\.(chrome|electron)/.test(src)) {
+            identityProblems.push(`electron/${file} 按 process.versions 拼 UA 了（拼出来就是假 Chrome 稳定版）`);
+        }
     }
 
     // 2) 任何进程都不许再出现硬编码 UA 字面量
     const uaLiteral = /(["'`])Mozilla\/5\.0[^"'`\n]*Chrome\/\d/;
     const scannedIdentityFiles = {
         'electron/main.js': mainSrc,
-        'electron/userAgent.js': uaSrc,
         'electron/acgmhoService.js': fs.readFileSync(path.join(ELECTRON_DIR, 'acgmhoService.js'), 'utf8'),
         // 外部浏览器模块也在扫描范围内：它是后来人最容易顺手加 UA 覆写的地方
         'electron/externalBrowserSolver.js': fs.existsSync(path.join(ELECTRON_DIR, 'externalBrowserSolver.js'))
@@ -282,10 +278,9 @@ function run() {
     }
 
     // 3) 全仓库不许再有"对 session/webContents 覆写 UA"这一类调用
-    //    （本地那个 setUserAgent 只是把值推给站点模块，不动浏览器，所以不算）
+    //    （main.js 的 setUserAgent 只是把值推给站点模块，不动浏览器，所以不算）
     const overrideFiles = {
         'electron/main.js': mainSrc,
-        'electron/userAgent.js': uaSrc,
         'electron/browserService.js': fs.existsSync(path.join(ELECTRON_DIR, 'browserService.js'))
             ? fs.readFileSync(path.join(ELECTRON_DIR, 'browserService.js'), 'utf8') : '',
         'components/BrowsePanel.tsx': browseSrc,

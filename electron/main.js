@@ -2,70 +2,19 @@ const { app, BrowserWindow, ipcMain, shell, webContents, dialog } = require('ele
 const { probeGallery, downloadGallery, saveGalleryImages, fetchGalleryPages, normalizeGid, galleryTaskKey, galleryKeyMatches, GALLERY_CHANNELS, fetchChannelList, buildChannelListResult, channelListUrl, deriveListPageUrl, isCloudflareChallengePage, isCloudflareErrorPage, setUserAgent: pushUserAgentToSite } = require('./acgmhoService');
 const { fetchHtmlWithRealBrowser } = require('./externalBrowserSolver');
 const { getSettings, saveProxyPort, saveAiConfig, testAiConnection } = require('./settings');
-const { detectEdgeProfiles, importEdgeData } = require('./edgeImportService');
 const {
     setupBrowserSession, setupBrowserIpc, attachBrowserInput, attachGuestExtras, guardWebviewAttach,
 } = require('./browserService');
-const { kernelUserAgent } = require('./userAgent');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
 const net = require('net');
 const tls = require('tls');
-const { spawn, spawnSync, execSync } = require('child_process');
+const { spawn } = require('child_process');
 const { pipeline } = require('stream/promises');
 const { createWriteStream } = require('fs');
 const ffmpegStatic = require('ffmpeg-static');
-
-/* ========================================================================== */
-/*                          启动自提权（管理员运行）                            */
-/* ========================================================================== */
-/*
- * 用户决策：整个程序以管理员身份运行 —— Edge 的 App-Bound Cookie 密钥
- * 第一层 DPAPI 只能在 SYSTEM 上下文解开，而拿到 SYSTEM 令牌需要管理员。
- *
- * 行为：
- *   - 已提权（`net session` 成功）→ 直接往下走；
- *   - 未提权 → 用 `Start-Process -Verb RunAs` 以管理员重启自己，
- *     然后当前进程退出（子进程继承 `THEPLAY_ELEVATED=1`，不会再套娃）；
- *   - UAC 被拒绝 → **直接退出**（用户决策：不降级运行，
- *     免得界面上每个功能都"看起来能点、一点就报权限不足"）。
- *
- * 这段必须在 `app.whenReady()` 之前执行，且不能依赖任何界面。
- * 测试不 require main.js（mainstatic 只读源码），这里不影响测试。
- */
-(function ensureElevated() {
-    if (process.platform !== 'win32') return;
-    if (process.env.THEPLAY_ELEVATED === '1') return;
-    /*
-     * 以下两种情况说明 main.js 是被当库加载/求值，不是真正的程序启动，
-     * 此时绝不能弹 UAC，直接跳过：
-     *   - require.main !== module：测试桩用 new Function 求值 main.js 源码
-     *     （见 scripts/proxy-check.js、scripts/proxy-sync-check.js），
-     *     传进来的 module 是假对象；
-     *   - 执行体是纯 node：真启动时 execPath 是 electron.exe（dev）
-     *     或打包后的程序，文件名不可能是 node。
-     */
-    try {
-        if (typeof require.main !== 'undefined' && require.main !== module) return;
-        if (/^node(\.exe)?$/i.test(path.basename(process.execPath))) return;
-    } catch (_e) { return; }
-    try {
-        execSync('net session', { stdio: 'ignore' });
-        return;
-    } catch (_e) { /* 未提权，往下走重启流程 */ }
-    let relaunched = false;
-    try {
-        process.env.THEPLAY_ELEVATED = '1';
-        const quotedArgs = process.argv.slice(1).map((a) => `"${String(a).replace(/"/g, '')}"`).join(' ');
-        const argPart = quotedArgs ? ` -ArgumentList ${quotedArgs}` : '';
-        const ps = `Start-Process -FilePath "${process.execPath}"${argPart} -WorkingDirectory "${process.cwd()}" -Verb RunAs`;
-        const r = spawnSync('powershell.exe', ['-NoProfile', '-Command', ps], { windowsHide: true });
-        relaunched = !r.error && r.status === 0;
-    } catch (_e) { relaunched = false; }
-    app.exit(relaunched ? 0 : 1);
-})();
 
 /* ========================================================================== */
 /*                          全局网络层（进程级设施）                          */
@@ -857,12 +806,12 @@ function installGlobalInterception() {
 /* -------------------------------------------------------------------------- */
 /*                              浏览器会话身份                                  */
 /* -------------------------------------------------------------------------- */
-// UA 的唯一来源见 electron/userAgent.js：**不改写**，读引擎自己那一份。
-// cf_clearance 与 UA 绑定，所以 Node 直抓用的必须是"拿到凭证的那个浏览器的 UA"，
-// 而不是另一份手写的字符串——历史上 Node 用 Chrome/126、浏览器用 Chromium 120，
-// 三处（UA 头 / navigator / sec-ch-ua）互相矛盾，Cloudflare 校验直接判失败。
+// UA 的唯一来源是引擎自己（`app.userAgentFallback`；会话就绪后改用会话实际值）。
+// **绝不改写**：cf_clearance 与 UA 绑定，所以 Node 直抓用的必须是"拿到凭证的那个
+// 浏览器的 UA"，而不是另一份手写的字符串——历史上 Node 用 Chrome/126、浏览器用
+// Chromium 120，三处（UA 头 / navigator / sec-ch-ua）互相矛盾，CF 校验直接判失败。
 //
-// 职责划分：站点模块（acgmhoService）仍持有它抓取时用的 UA，因为抓页面的是它。
+// 职责划分：站点模块（acgmhoService）持有它抓取时用的 UA，因为抓页面的是它。
 // 这里只做两件事：记住浏览器会话当前用的 UA，并在它变化时推给站点模块对齐。
 // 不在这边再存一份请求头——两份状态迟早不同步，而"Node 用旧 UA、浏览器用新 UA"
 // 的表现就是"验证过了但搜索仍 403"，极难定位。
@@ -918,7 +867,10 @@ app.commandLine.appendSwitch(
 
 let mainWindow = null;
 
-const USER_AGENT = kernelUserAgent();
+const USER_AGENT = String(app.userAgentFallback || '');
+// 站点模块的 Node 直抓与此同源：app.userAgentFallback 在 ready 之前就可读，
+// 会话就绪后 syncAcgmhoProxy 会再推一次会话实际值（两者通常相同）。
+pushUserAgentToSite(USER_AGENT);
 /**
  * 必须交给 ffmpeg 才能得到可用文件的后缀。
  *
@@ -1587,7 +1539,6 @@ let galleryHandlersReady = false;
 let downloadHandlersReady = false;
 let torrentHandlersReady = false;
 let settingsHandlersReady = false;
-let edgeImportHandlersReady = false;
 
 // 搜索限流冷却：站点对搜索接口限流（实测约 10 次连续请求触发，超限返回
 // "搜索过于频繁"提示页，约 20s 后恢复；期间继续重试会不断刷新限流窗口）。
@@ -3253,7 +3204,7 @@ function createWindow() {
             // 原先把非白名单域的 UA 一刀切改成旧版 Chrome、并删掉三个 Client Hints，
             // 结果是"UA 声称 122 / sec-ch-ua 报内核 152 / navigator 又是第三个值"——
             // Google 据此判定"浏览器或应用可能不安全"，Cloudflare 把它当伪造流量。
-            // 现在 UA 与 Client Hints 全部交回 Chromium 自己发，天然同源（见 userAgent.js）。
+            // 现在 UA 与 Client Hints 全部交回 Chromium 自己发，天然同源。
 
             if (/(^|\.)bilivideo\.com$/i.test(hostname) || /(^|\.)hdslb\.com$/i.test(hostname)) {
                 requestHeaders.Referer = 'https://www.bilibili.com/';
@@ -3317,7 +3268,6 @@ function createWindow() {
     setupTorrentHandlers();
     setupTorrentFileHandlers();
     setupSettingsHandlers();
-    setupEdgeImportHandlers();
     // 浏览器外壳能力的 IPC（下载记录 / 下载操作）。窗口 getter 用闭包注入，
     // 不让 browserService 反向 require main.js —— 那会形成循环依赖，
     // 而循环 require 只报 warning 不报错，症状是第一次用到才炸。
@@ -3458,67 +3408,8 @@ function setupSettingsHandlers() {
     });
 }
 
-/**
- * Edge 数据导入 IPC。
- *
- * 分两步而不是一步：
- *
- *   - `edge-detect` 只读 Local State 与 Bookmarks 的大小/条目数，快且不会被锁影响；
- *   - `edge-import` 才打开 SQLite 与解密。耗时操作放在用户点「导入」之后，
- *     而不是打开设置面板就做。
- *
- * Cookie 的写回放在这里而不是服务里：服务不 require electron（那样才能被测试
- * 直接 require），而 cookies.set 是 session 的能力。
- */
-function setupEdgeImportHandlers() {
-    if (edgeImportHandlersReady) return;
-    edgeImportHandlersReady = true;
-
-    ipcMain.handle('edge-detect', async () => detectEdgeProfiles());
-
-    ipcMain.handle('edge-import', async (event, options) => {
-        const report = (message) => {
-            try { event.sender.send('edge-import-progress', message); } catch (_e) { /* 窗口关了就算了 */ }
-        };
-
-        const result = await importEdgeData(options, report);
-        if (!result.ok || result.cookies.length === 0) return result;
-
-        // 写回 Cookie：目标 session 必须与 <webview> 用的一致。
-        // webview 没有配 partition，用的就是 defaultSession。
-        const session = require('electron').session.defaultSession;
-        const failed = [];
-        for (const cookie of result.cookies) {
-            try {
-                await session.cookies.set({
-                    url: cookie.url,
-                    name: cookie.name,
-                    value: cookie.value,
-                    domain: cookie.domain,
-                    path: cookie.path,
-                    secure: cookie.secure,
-                    httpOnly: cookie.httpOnly,
-                    sameSite: cookie.sameSite,
-                    ...(cookie.expirationDate ? { expirationDate: cookie.expirationDate } : {}),
-                });
-            } catch (e) {
-                failed.push(cookie.domain + cookie.name);
-            }
-        }
-
-        result.stats.cookiesApplied = result.cookies.length - failed.length;
-        if (failed.length > 0) {
-            result.warnings.push({
-                category: 'cookies',
-                message: `有 ${failed.length} 条 Cookie 被会话拒绝（多为过期或域不匹配），其余已写入。`,
-            });
-        }
-        return result;
-    });
-}
-
 app.whenReady().then(async () => {
-    // 会话 UA 一个字节都不改（理由见 electron/userAgent.js：只改 UA 不改 UA-CH＝谎报，
+    // 会话 UA 一个字节都不改（只改 UA 不改 UA-CH＝谎报，
     // Cloudflare 会据此把挑战升级成点多少次都不放行的死循环）。
     // Node 直抓那条路的 UA 由下面的 syncAcgmhoProxy 读会话实际值后对齐。
     // 启动即同步代理配置：留空则直连，配了端口则建隧道。
