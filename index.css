@@ -76,7 +76,7 @@
     animation-name: ui-zoom-in;
 }
 
-/* AudioPanel 用了 4 处 animate-fade-in（AudioToolbox ×3、index ×1），
+/* AudioPanel.tsx 用了 4 处 animate-fade-in（工具箱 ×3、面板 ×1），
    但 Tailwind v4 与本项目都没定义过它 —— 与 animate-in 同源问题。
    这里直接映射到上面的 ui-fade-in，让那 4 处真的淡入。 */
 .animate-fade-in {
