@@ -2016,22 +2016,16 @@ export class SPGParser {
     return t.length > 0 ? { value: this.unquote(t), line: f.line } : null;
   }
 
-  private fieldValue(
-    fields: Map<string, { value: string; line: number }>, key: string
-  ): string | null {
-    return this.field(fields, key)?.value ?? null;
-  }
-
   /** 取数值字段；缺失返回 null，非数字抛带行号的错误 */
   private fieldNumber(
     fields: Map<string, { value: string; line: number }>,
-    key: string, ctx: string, fallbackLine: number
+    key: string, ctx: string
   ): number | null {
     const f = this.field(fields, key);
     if (f === null) return null;
     const v = this.strictFloat(f.value);
     if (!Number.isFinite(v)) {
-      throw new SPGError(`${ctx}: 参数 ${key} 需要数字（收到 "${f.value}"）`, f.line || fallbackLine);
+      throw new SPGError(`${ctx}: 参数 ${key} 需要数字（收到 "${f.value}"）`, f.line);
     }
     return v;
   }
@@ -2042,7 +2036,6 @@ export class SPGParser {
   ): number {
     return fields.get(key.toLowerCase())?.line ?? fallbackLine;
   }
-
   /**
    * 拒绝未知的具名参数。
    *
@@ -2742,7 +2735,7 @@ export class SPGParser {
         : undefined;
 
       const pickNum = (key: string, baseVal: number | undefined, fallback?: number): number | undefined => {
-        const v = this.fieldNumber(fields, key, ctx, bodyLine);
+        const v = this.fieldNumber(fields, key, ctx);
         if (v !== null) return v;
         if (baseVal !== undefined) return baseVal;
         return fallback;
@@ -2788,7 +2781,7 @@ export class SPGParser {
 
       // 时长类参数为负数没有任何物理意义，合成器会静默按 0 处理
       for (const k of ['glide', 'pitch_decay', 'loop_point']) {
-        const v = this.fieldNumber(fields, k, ctx, bodyLine);
+        const v = this.fieldNumber(fields, k, ctx);
         if (v !== null && v < 0) {
           throw new SPGError(
             `${ctx}: 参数 ${k} 不能为负数（收到 ${v}）`, this.fieldLine(fields, k, bodyLine)

@@ -813,6 +813,7 @@ define_instrument(name="lead") {
 **可用预设**：${presetList()}
 
 **波形 wave**：sine | square | sawtooth | triangle | white_noise | pink_noise | brown_noise
+（另有 \`custom\`：必须同时给 \`harmonics\`，否则编译失败）
 
 **全部乐器参数**（都可选，未写的用预设值或默认值）：
 - \`wave\` 主波形
@@ -832,7 +833,8 @@ define_instrument(name="lead") {
   　→ 底鼓/定音鼓的"鼓皮张力下坠"，正值先高后低
 - \`attack_noise\` 0~1　起音处的极短噪声爆发 → 弓弦摩擦、气息、拨片触弦
 - \`harmonics\` 谐波振幅数组，如 \`harmonics: [1, 0.5, 0.33, 0.25]\`
-  　→ 用真实谐波叠加自定义音色（管风琴音栓、玻璃、人声共振峰），设置后 wave 被忽略
+  　→ 用真实谐波叠加自定义音色（管风琴音栓、玻璃、人声共振峰），设置后 wave 被忽略。
+  　**不能与噪声波形（white_noise 等）同用** —— 噪声没有振荡器可挂谐波，会编译失败
 - \`velocity_sensitivity\` 0~1　力度对音量的影响程度
 - \`velocity_to_filter\` 力度对滤波截止的影响(Hz) → **强奏更亮**，管弦乐的关键
 - \`effect_chain\` **乐器级效果链**，只作用于该乐器（写法同全局 effect_chain）
