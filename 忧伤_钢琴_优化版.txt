@@ -37,7 +37,7 @@ define_instrument(name="felt_piano") {
   filter_envelope: adsr(0.010, 1.1, 0.22, 0.9)
   filter_env_amount: 1400   // 加在 1600Hz 基线上：起音瞬间冲到 3000Hz，再回落到约 1900Hz
 
-  lfo: sine(freq=0.32, amount=4.0, target=frequency, ramp=2.5)  // target=frequency 的单位是音分，即 ±4 音分漂移
+  lfo: sine(freq=0.32, amount=4.0, target=frequency, ramp=1.0)  // target=frequency 的单位是音分，即 ±4 音分漂移
   attack_noise: 0.06        // 极轻的槌头摩擦声，比任何滤波器都更像真钢琴
 
   velocity_sensitivity: 0.85
