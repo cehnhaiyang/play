@@ -5323,10 +5323,12 @@ export class BrowserAudioEngine {
   }
 
   /**
-   * `startRendering()` 卡住时既不 resolve 也不 reject（渲染线程分配失败、
-   * 脉冲响应过长都会这样）。此时调用方的 await 永远挂着，界面停在"导出中"，
-   * 而导出期间工具栏是禁用的 —— 用户连重试都做不到。
-   * 加一个有界等待，把"永不结束"变成一条能读的错误。
+   * `startRendering()` 在渲染线程失败时可能既不 resolve 也不 reject。
+   * 此时调用方的 await 永远挂着，界面停在"导出中"，而导出期间工具栏是禁用的 ——
+   * 用户连重试都做不到。加一个有界等待，把"永不结束"变成一条能读的错误。
+   *
+   * 注意它管不到脉冲生成：那一步在 scheduleEvents 里同步跑完，
+   * 主线程被它占住时这个定时器根本没机会注册。脉冲长度由 MAX_REVERB_DECAY 兜底。
    */
   private renderWithTimeout(ctx: OfflineAudioContext): Promise<AudioBuffer> {
     return new Promise((resolve, reject) => {
