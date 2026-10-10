@@ -10,10 +10,14 @@ import React, {
 } from 'react';
 import {
     ArchiveBoxArrowDownIcon,
+    ArrowDownIcon,
     ArrowLeftIcon,
     ArrowUpTrayIcon,
     Bars3Icon,
     BeakerIcon,
+    CheckIcon,
+    ChevronRightIcon,
+    ClipboardDocumentIcon,
     CpuChipIcon,
     CubeIcon,
     ExclamationTriangleIcon,
@@ -27,6 +31,7 @@ import {
     StopIcon,
     TrashIcon,
     UserCircleIcon,
+    XMarkIcon,
 } from '@heroicons/react/24/solid';
 import {
     ArrowDownTrayIcon,
@@ -63,6 +68,110 @@ interface AudioPanelProps {
 type AnalyzerResult = NonNullable<ReturnType<typeof useAudio>['state']['analyzerResult']>;
 
 /* ========================================================================== */
+/*                                 视觉令牌                                   */
+/* ========================================================================== */
+
+/* 面板此前每一处卡片都自己拼一遍 zinc 组合，结果同时存在 zinc-800/900/950
+   三种描边与三种底色，彼此之间并不构成层级。这里收敛成一套：
+   层级只靠描边亮度与内间距区分，底色一律是同一层半透明白。 */
+
+/** 浮起的表面。整个面板只有这一种 */
+const SURFACE = 'rounded-2xl border border-white/8 bg-white/[0.03] backdrop-blur-sm';
+/** 可点击表面的悬停态 */
+const SURFACE_HOVER = 'transition-colors hover:border-white/16 hover:bg-white/[0.06]';
+/** 键盘焦点环：面板内所有可点元素共用，避免各处 focus 表现不一 */
+const FOCUS_RING =
+    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950';
+const BTN_BASE =
+    'inline-flex items-center justify-center gap-1.5 rounded-lg text-xs font-semibold transition active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40';
+/** 主操作：新建、运行、导出这类"推进流程"的动作 */
+const BTN_PRIMARY = `${BTN_BASE} ${FOCUS_RING} bg-gradient-to-r from-cyan-500 to-blue-500 text-white shadow-lg shadow-cyan-500/25 hover:from-cyan-400 hover:to-blue-400`;
+/** 次要操作：与主操作同排但不抢注意力 */
+const BTN_GHOST = `${BTN_BASE} ${FOCUS_RING} border border-white/10 bg-white/[0.04] text-zinc-300 hover:border-white/20 hover:bg-white/[0.08] hover:text-white`;
+/** 小标签：字段名、单位、分区标题共用 */
+const LABEL = 'text-[10px] font-bold uppercase tracking-wider text-zinc-500';
+
+/**
+ * 相对时间。项目卡片此前显示 `toLocaleDateString()`，只到"天"，
+ * 同一天改过的几个项目看起来完全一样，而"哪个是刚才动过的"恰恰是列表里
+ * 最需要一眼看出的信息。
+ */
+const relativeTime = (ts: number): string => {
+    const diff = Date.now() - ts;
+    const minute = 60_000;
+    if (diff < minute) return '刚刚';
+    if (diff < 60 * minute) return `${Math.floor(diff / minute)} 分钟前`;
+    if (diff < 24 * 60 * minute) return `${Math.floor(diff / (60 * minute))} 小时前`;
+    const days = Math.floor(diff / (24 * 60 * minute));
+    if (days < 30) return `${days} 天前`;
+    return new Date(ts).toLocaleDateString();
+};
+
+interface CodeSummary {
+    lines: number;
+    tempo: number | null;
+    key: string | null;
+    parts: number;
+}
+
+/**
+ * 从源码里取几个能代表这首曲子的数字，供项目卡片展示。
+ * 用正则而不是走一遍解析器：卡片在列表里要渲染几十次，解析器成本高得多，
+ * 而这里只做展示，读到什么算什么，读不到就不显示。
+ */
+const summarizeCode = (code: string): CodeSummary => {
+    const tempoMatch = /^\s*(?:tempo|bpm)\s*:\s*(\d+)/m.exec(code);
+    const keyMatch = /^\s*key\s*:\s*"([^"]+)"/m.exec(code);
+    return {
+        lines: code ? code.split('\n').length : 0,
+        tempo: tempoMatch ? Number(tempoMatch[1]) : null,
+        key: keyMatch ? keyMatch[1] : null,
+        parts: (code.match(/^\s*sequence\s*\(/gm) || []).length,
+    };
+};
+
+/**
+ * 项目指纹：由项目 id 派生的一串竖条。
+ *
+ * 纯装饰 —— 它不读音频，只用 id 的哈希做种子，让每个项目在列表里有一个
+ * 稳定且互不相同的图形标识。种子取自 id 而非随机数，所以同一项目每次
+ * 渲染、每次重启都长得一样，不会闪。
+ */
+const ProjectGlyph: React.FC<{ seed: string; bars?: number; className?: string }> = ({
+    seed,
+    bars = 28,
+    className = '',
+}) => {
+    const heights = useMemo(() => {
+        let hash = 2166136261;
+        for (let i = 0; i < seed.length; i++) {
+            hash = Math.imul(hash ^ seed.charCodeAt(i), 16777619);
+        }
+        const out: number[] = [];
+        for (let i = 0; i < bars; i++) {
+            // xorshift：够用且可复现，不需要真正的随机源
+            hash ^= hash << 13;
+            hash ^= hash >>> 17;
+            hash ^= hash << 5;
+            out.push(0.16 + ((hash >>> 0) % 1000) / 1000 * 0.84);
+        }
+        return out;
+    }, [seed, bars]);
+
+    return (
+        <div className={`flex items-end gap-[2px] h-8 ${className}`} aria-hidden="true">
+            {heights.map((h, i) => (
+                <span
+                    key={i}
+                    className="flex-1 rounded-full bg-gradient-to-t from-cyan-500/25 to-cyan-300/70"
+                    style={{ height: `${h * 100}%` }}
+                />
+            ))}
+        </div>
+    );
+};
+
+/* ========================================================================== */
 /*                                 示波器                                     */
 /* ========================================================================== */
 
@@ -70,6 +179,9 @@ interface VisualizerProps {
     analyser: AnalyserNode | null;
     isActive: boolean;
 }
+
+/** 空闲时画在示波器中央的那条平线，同时也是画布的底色 */
+const SCOPE_BG = '#0b0f14';
 
 const Visualizer: React.FC<VisualizerProps> = ({ analyser, isActive }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -104,13 +216,13 @@ const Visualizer: React.FC<VisualizerProps> = ({ analyser, isActive }) => {
             const height = canvas.clientHeight || 1;
 
             // 1. Fade out background (creating trails)
-            ctx.fillStyle = isActive ? 'rgba(26, 32, 44, 0.3)' : 'rgb(26, 32, 44)';
+            ctx.fillStyle = isActive ? 'rgba(11, 15, 20, 0.3)' : SCOPE_BG;
             ctx.fillRect(0, 0, width, height);
 
             if (!isActive) {
                 // Draw a flat line when idle
                 ctx.beginPath();
-                ctx.strokeStyle = '#2d3748';
+                ctx.strokeStyle = '#1e293b';
                 ctx.moveTo(0, height / 2);
                 ctx.lineTo(width, height / 2);
                 ctx.stroke();
@@ -190,10 +302,21 @@ const Visualizer: React.FC<VisualizerProps> = ({ analyser, isActive }) => {
     }, [analyser, isActive]);
 
     return (
-        <div className="w-full h-full bg-gray-850 rounded-lg overflow-hidden border border-gray-750 shadow-inner relative">
+        <div className="w-full h-full rounded-xl overflow-hidden relative" style={{ background: SCOPE_BG }}>
             <canvas ref={canvasRef} className="w-full h-full block" />
+
+            {/* 网格：给波形一个可读的纵向参照，纯静态，不参与绘制循环 */}
+            <div className="absolute inset-0 pointer-events-none opacity-[0.14] bg-[linear-gradient(rgba(148,163,184,0.6)_1px,transparent_1px),linear-gradient(90deg,rgba(148,163,184,0.6)_1px,transparent_1px)] bg-[length:100%_25%,8.333%_100%]" />
+
             {/* Overlay Scanline Effect */}
             <div className="absolute inset-0 pointer-events-none bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.25)_50%),linear-gradient(90deg,rgba(255,0,0,0.06),rgba(0,255,0,0.02),rgba(0,0,255,0.06))] z-10 bg-[length:100%_4px,6px_100%]" />
+
+            {/* 播放时沿顶边扫过的一道流光，静止状态下不存在 */}
+            {isActive && (
+                <div className="absolute inset-x-0 top-0 h-px overflow-hidden pointer-events-none z-20">
+                    <div className="spg-sheen h-px w-1/3 bg-gradient-to-r from-transparent via-cyan-300 to-transparent" />
+                </div>
+            )}
         </div>
     );
 };

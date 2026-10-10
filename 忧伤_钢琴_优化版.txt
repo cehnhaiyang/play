@@ -35,9 +35,9 @@ define_instrument(name="felt_piano") {
   envelope: adsr(0.006, 2.4, 0.14, 3.2, curve=exp)
   filter: lowpass(1600, 0.6)
   filter_envelope: adsr(0.010, 1.1, 0.22, 0.9)
-  filter_env_amount: 1400   // 起音时"开盖"1400Hz，之后收回 1600Hz 附近
+  filter_env_amount: 1400   // 加在 1600Hz 基线上：起音瞬间冲到 3000Hz，再回落到约 1900Hz
 
-  lfo: sine(freq=0.32, amount=4.0, target=frequency, ramp=2.5)
+  lfo: sine(freq=0.32, amount=4.0, target=frequency, ramp=2.5)  // target=frequency 的单位是音分，即 ±4 音分漂移
   attack_noise: 0.06        // 极轻的槌头摩擦声，比任何滤波器都更像真钢琴
 
   velocity_sensitivity: 0.85
@@ -112,7 +112,7 @@ effect_chain {
 // 音序
 // ===========================================================================
 
-// 引子：一小节一个柱式和弦，开放式排列（根音 + 五度 + 三度），不加低音区密集音
+// 引子：一小节一个柱式和弦，声部按"根音 — 五度 — 三度"摊开，G7 再加一个七音 B3
 sequence(name="intro_chords", instrument="felt_piano", gain=0.85, humanize=0.18) {
   chord(["C3", "G3", "Eb4"], "1n", strum=0.08, velocity=0.42)
   chord(["Ab2", "Eb3", "C4"], "1n", strum=0.08, velocity=0.40)
@@ -146,7 +146,7 @@ sequence(name="main_arps", instrument="felt_piano", gain=0.62, humanize=0.20) {
 }
 
 // 主旋律 A1：从五度 G4 落到三度 Eb4，第二小节叹息式下行，末句停在导音 B3 不解决
-// 每一个音都是所在和弦的和弦音或七/九音，没有一处与和声打架
+// 除第 6 小节的 F4（Ab 和弦上的六度倚音，向下解决到 Eb4）外全是和弦音
 sequence(name="melody_a", instrument="felt_piano", gain=1.0, humanize=0.22) {
   note("G4", "2n", velocity=0.76, gate=1.06)
   note("Eb4", "2n", velocity=0.66)
