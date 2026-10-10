@@ -1,10 +1,10 @@
 /// <reference lib="dom" />
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type React from 'react';
-import { Project, Message, AppState, ParserError, SPGWarning } from '../meta';
+import { Project, Message, AppState, ParserError, SPGWarning, getElectronAPI } from '../meta';
 import {
     loadProjects, saveProjects, createNewProject,
-    BrowserAudioEngine, exportProjectBundle, bufferToWave,
+    BrowserAudioEngine, bufferToWave,
 } from '../services/AudioService';
 import { generateSyntax, fixSyntax } from '../services/AiService';
 import { downloadBlob, loadJSON, removeStored, saveJSON } from '../const';
@@ -78,6 +78,26 @@ const AUDIO_DEFAULTS = {
     ACTIVE_PROJECT_KEY: 'audio-active-project',
 };
 
+/**
+ * 把刚生成的 SPG 源码留档到项目根的 .spg 目录。
+ *
+ * 在**拿到代码的这一刻**就写，而不是等用户点什么按钮：落盘是留档，
+ * 不该成为一个需要记得去做的操作。
+ *
+ * 失败只记 console：代码已经在编辑器里了，留档失败不该让用户以为生成失败。
+ * 桥没加载（preload 故障）时同样静默 —— 这条路径不承担诊断职责。
+ */
+const archiveSpg = (code: string, name: string): void => {
+    const api = getElectronAPI();
+    if (!api?.spg) return;
+    void api.spg.save({ code, name }).then(
+        (res) => {
+            if (!res.success) console.warn('SPG 留档失败:', res.message);
+        },
+        (err: unknown) => console.warn('SPG 留档异常:', err)
+    );
+};
+
 export const useAudio = ({
     initialProjectId = null,
 }: UseAudioParams = {}): UseAudioReturn => {
@@ -144,6 +164,19 @@ export const useAudio = ({
         () => projects.find((project) => project.id === activeProjectId) || null,
         [activeProjectId, projects]
     );
+
+    /**
+     * 留档时用的工程名。
+     *
+     * 走 ref 而不是把 activeProject 塞进 sendMessage 的依赖：那两个回调
+     * 经 actions 的 useMemo 流向对话区，而 activeProject 的引用每次编辑代码
+     * 都会变（updateActiveProject 产生新的 projects 数组），加进依赖等于
+     * 每敲一个字就重建一次回调。名字只用于拼文件名，读到最新值即可。
+     */
+    const activeProjectNameRef = useRef('未命名');
+    useEffect(() => {
+        activeProjectNameRef.current = activeProject?.name || '未命名';
+    }, [activeProject]);
 
     const createProject = useCallback(() => {
         const newProject = createNewProject();
@@ -297,8 +330,7 @@ export const useAudio = ({
                 }
 
                 const wavBlob = await audioEngine.renderOffline();
-                const zipBlob = await exportProjectBundle(code, wavBlob);
-                downloadBlob(zipBlob, `${name.replace(/\s+/g, '_')}_${Date.now()}.zip`);
+                downloadBlob(wavBlob, `${name.replace(/\s+/g, '_')}.wav`);
 
                 setAppState(AppState.READY);
             } catch (error: unknown) {
@@ -529,6 +561,7 @@ export const useAudio = ({
         setIsChatProcessing(true);
         try {
             const code = await generateSyntax(content);
+            archiveSpg(code, activeProjectNameRef.current);
             const replyMessage: Message = {
                 role: 'model',
                 content: '已为您生成音频配置代码。正在自动加载到编辑器...',
@@ -557,6 +590,7 @@ export const useAudio = ({
         setIsChatProcessing(true);
         try {
             const fixedCode = await fixSyntax(brokenCode, error);
+            archiveSpg(fixedCode, activeProjectNameRef.current);
             const replyMessage: Message = {
                 role: 'model',
                 content: '修复完成！正在应用新代码。',

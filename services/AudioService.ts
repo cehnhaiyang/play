@@ -12,7 +12,6 @@
  * 因此不得引用 React，也不得有模块级副作用。
  */
 
-import JSZip from 'jszip';
 import type {
   ArpCommand, ArpPattern, ChordCommand, ChordSymbol, DrumName, DrumSpec,
   EffectDef, EffectType, Envelope, EnvelopeCurve, ExpandedOscillatorType,
@@ -189,7 +188,7 @@ export function fillNoise(data: Float32Array, color: NoiseColor, rand: () => num
   }
 }
 
-/* ==================== WAV 编码与工程包导出 ==================== */
+/* ==================== WAV 编码 ==================== */
 
 /** 16 位 PCM 单声道/立体声 WAV。`len` 超过实际渲染长度时按实际长度截断，避免写出静音尾巴。 */
 export function bufferToWave(abuffer: AudioBuffer, len: number): Blob {
@@ -237,27 +236,6 @@ export function bufferToWave(abuffer: AudioBuffer, len: number): Blob {
 
   return new Blob([buffer], { type: 'audio/wav' });
 }
-
-/** 把源码与渲染结果打成一个 zip 交付给用户 */
-export const exportProjectBundle = async (sourceCode: string, audioBlob: Blob): Promise<Blob> => {
-  const zip = new JSZip();
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-
-  zip.file(`project_${timestamp}.spg`, sourceCode);
-  zip.file(`audio_${timestamp}.wav`, audioBlob);
-
-  const readme = `Sound Particle Project
-Created at: ${new Date().toLocaleString()}
-
-How to use:
-1. Open https://sound-particle.app (or your hosted URL)
-2. Click "Import Project"
-3. Select the .spg file from this archive
-`;
-  zip.file('README.txt', readme);
-
-  return await zip.generateAsync({ type: 'blob' });
-};
 
 /* ==================== 和弦符号 ==================== */
 

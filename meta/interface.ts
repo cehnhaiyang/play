@@ -2013,6 +2013,26 @@ export interface ElectronAPI {
     torrent?: ElectronTorrentAPI;
     /** 单文件 .gallery 打包保存 API (可选模块) */
     galleryPack?: ElectronGalleryPackAPI;
+    /** SPG 源码留档 API (可选模块) */
+    spg?: ElectronSpgAPI;
+}
+
+/**
+ * LLM 生成的 SPG 源码留档。
+ *
+ * 无对话框、无返回值依赖：生成完即落盘到项目根的 .spg 目录，
+ * 用户不需要为此做任何操作。落点由主进程决定（渲染层没有文件系统权限）。
+ */
+export interface ElectronSpgAPI {
+    /**
+     * 写入一份 SPG 源码。
+     * `name` 只用于拼文件名，主进程会做文件名净化。
+     */
+    save: (payload: { code: string; name?: string }) => Promise<{
+        success: boolean;
+        filePath?: string;
+        message?: string;
+    }>;
 }
 
 /**

@@ -1963,7 +1963,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                             <button
                                 onClick={handleExportBundle}
                                 disabled={isExporting}
-                                title="导出工程包（.spg + WAV）"
+                                title="导出为 WAV 音频"
                                 className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-cyan-300 transition-colors hover:bg-cyan-500/15 hover:text-cyan-200 disabled:opacity-50"
                             >
                                 {isExporting ? (

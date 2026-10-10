@@ -2089,6 +2089,40 @@ function setupGalleryHandlers() {
     });
 }
 
+/**
+ * 把 LLM 刚生成的 SPG 源码落盘到项目根的 .spg 目录。
+ *
+ * 为什么必须由主进程做：渲染层没有文件系统权限。
+ *
+ * 落点用 app.getAppPath() 而不是 __dirname —— 打包后 __dirname 在
+ * resources/app.asar 内，asar 是只读归档，写入必然抛错（见 flowLog 的历史教训）。
+ * getAppPath() 在开发时就是项目根，正好落在 D:\the-play\.spg。
+ *
+ * 文件名取工程名 + 时间戳：同一工程反复生成不能互相覆盖，
+ * 而只按时间戳命名则过两天就认不出哪个文件对应哪个工程。
+ * 写盘是异步的且失败不影响生成结果 —— 生成物已经在编辑器里了，
+ * 落盘只是留档，不该因为它失败而让用户以为生成失败。
+ */
+async function handleSpgSave(_event, payload) {
+    try {
+        const code = String(payload?.code || '');
+        if (!code.trim()) return { success: false, message: '代码为空，未落盘。' };
+
+        const dir = path.join(app.getAppPath(), '.spg');
+        await fs.promises.mkdir(dir, { recursive: true });
+
+        const base = sanitizeFileName(String(payload?.name || '未命名'));
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+        const target = path.join(dir, `${base}_${stamp}.spg`);
+
+        await fs.promises.writeFile(target, code, 'utf8');
+        return { success: true, filePath: target };
+    } catch (error) {
+        console.error('spg-save failed:', error);
+        return { success: false, message: error instanceof Error ? error.message : '落盘失败' };
+    }
+}
+
 function setupDownloadHandlers() {
     if (downloadHandlersReady) return;
     downloadHandlersReady = true;
@@ -2096,6 +2130,7 @@ function setupDownloadHandlers() {
     ipcMain.handle('download-media', handleMediaDownload);
     ipcMain.handle('cancel-media-download', async (_event, url) => cancelMediaDownload(url));
     ipcMain.handle('gallery-save-pack', handleGalleryPackSave);
+    ipcMain.handle('spg-save', handleSpgSave);
 }
 
 // 单文件包另存为（.gallery 画廊 ZIP / .aibook 绘本 JSON）：
