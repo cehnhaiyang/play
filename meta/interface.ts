@@ -2788,7 +2788,7 @@ export interface UsePlayReturn {
         cacheAudioData: (fileId: string, base64: string) => void;
         /** 追加一条网络流并跳转到它（自动播放由加载流程统一发起） */
         addStream: (url: string, name?: string, mediaType?: MediaType) => void;
-        addMultipleStreams: (streams: (Partial<VideoFile> & { url: string; title?: string })[], autoPlayFirst?: boolean, clearPrevious?: boolean) => void;
+        addMultipleStreams: (streams: (Partial<VideoFile> & { url: string; title?: string })[], autoPlayFirst?: boolean) => void;
         appendStreams: (streams: (Partial<VideoFile> & { url: string; title?: string })[]) => void;
         /** 有序合并：同 groupId 的图集页按 page 升序归位（迟到/重试的页插回正确位置），当前看到的那页锚定不动 */
         mergeOrderedStreams: (streams: (Partial<VideoFile> & { url: string; title?: string })[], groupId?: string) => void;

@@ -1902,8 +1902,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, onBackToBrowse, is
                     // 多图集建画廊分组；音视频纯直推不进分组
                     ? resolved.streams.map((s, i) => ({ ...s, groupId: `acg:${probe.gid}`, groupName: probe.title, groupType: 'gallery' as const, page: i + 1 }))
                     : resolved.streams,
-                true,
-                false
+                true
             );
             setShowAcgModal(false);
             setIsAcgLoading(false);

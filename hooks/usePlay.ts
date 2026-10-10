@@ -727,7 +727,7 @@ export const usePlay = (): UsePlayReturn => {
 
     // 批量添加网络流/图集页面
     // autoPlayFirst=true 时跳到本批第一项（不清旧列表也会跳，推送新画廊不再靠清空实现“自动播新”）
-    const addMultipleStreams = useCallback((streams: (Partial<VideoFile> & { url: string; title?: string })[], autoPlayFirst = true, clearPrevious = false) => {
+    const addMultipleStreams = useCallback((streams: (Partial<VideoFile> & { url: string; title?: string })[], autoPlayFirst = true) => {
         if (!streams.length) return;
         const streamFiles = streams.map(s => {
             const displayName = s.name || s.title || `Resource ${generateId()}`;
@@ -744,16 +744,10 @@ export const usePlay = (): UsePlayReturn => {
         });
         setMediaError(null);
         const prev = playlistRef.current;
-        if (clearPrevious) {
-            prev.files.forEach(revokeVideoFile);
-            destroyHls();
-            commitPlaylist({ files: streamFiles, currentIndex: 0 });
-        } else {
-            const updated = [...prev.files, ...streamFiles];
-            const nextIdx = autoPlayFirst ? prev.files.length : (prev.currentIndex === -1 ? 0 : prev.currentIndex);
-            commitPlaylist({ files: updated, currentIndex: nextIdx });
-        }
-    }, [destroyHls]);
+        const updated = [...prev.files, ...streamFiles];
+        const nextIdx = autoPlayFirst ? prev.files.length : (prev.currentIndex === -1 ? 0 : prev.currentIndex);
+        commitPlaylist({ files: updated, currentIndex: nextIdx });
+    }, []);
 
     // 绘本朗读的语音缓存写回：同一页重复点「朗读」不再重新合成
     const cacheAudioData = useCallback((fileId: string, base64: string) => {

@@ -77,8 +77,8 @@ const PlayerLayout: React.FC = () => {
         groupType: 'gallery' as const,
         page: p.page,
       }));
-      // 追加成新分组并跳到本批第一页，不再清空旧列表（旧行为每次推送都清空）
-      player.methods.addMultipleStreams(streamItems, true, false);
+      // 追加成新分组并跳到本批第一页，不清空旧列表
+      player.methods.addMultipleStreams(streamItems, true);
       setView('player');
     },
     [player.methods]
@@ -94,7 +94,7 @@ const PlayerLayout: React.FC = () => {
       title: p.title,
       mediaType: p.mediaType || getMediaType(p.title, undefined, p.url),
     }));
-    player.methods.addMultipleStreams(streamItems, true, false);
+    player.methods.addMultipleStreams(streamItems, true);
     setView('player');
   }, [player.methods]);
 
