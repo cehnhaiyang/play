@@ -733,7 +733,7 @@ const SHORTCUT_GROUPS: { title: string; items: { label: string; keys: string[] }
 const PAGED_SHORTCUTS: { label: string; keys: string[] }[] = [
     { label: '上一页', keys: ['P', '←'] },
     { label: '下一页', keys: ['N', '→'] },
-    // 文档是静态页，没有播放态，Space/K 在文档上不生效（见 isSlideshowMedia）
+    // 文档是静态页，没有播放态，Space/K 在文档上不生效（由 togglePlay 的返回值回答）
     { label: '播放 / 暂停轮播（文档除外）', keys: ['Space', 'K'] },
 ];
 
