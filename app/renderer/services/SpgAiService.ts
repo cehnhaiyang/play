@@ -515,20 +515,17 @@ export const generateSyntax = async (userDescription: string): Promise<Generated
  * **不是"重新生成"**：用户给的是已成型的曲子，要的是同一首曲子在混音、
  * 演奏法与结构收束上更好，而不是另一首。所以这条通道与 `generateSyntax`
  * 分开 —— 两者虽然都返回一份可编译代码，但目标相反：一个从零创造，
- * 一个必须保住原曲的身份。合成一个函数就会变成 §5 那种双义返回。
+ * 一个必须保住原曲的身份。合成一个函数就得在内部再按方向分一次叉。
  *
- * 作品名与 `fixSyntax` 同样**只摘不取**：迭代不改工程名。
+ * 作品名与 `fixSyntax` 同样**只摘不取**：迭代不改工程名，工程沿用原文件名。
  */
-export const refineSyntax = async (code: string, instruction: string): Promise<string> => {
+export const refineSyntax = async (code: string): Promise<string> => {
     const text = await chat({
         system: withSyntaxDoc(SPG_REFINE_PROMPT),
-        messages: [{
-            role: 'user',
-            content: instruction.trim()
-                ? `优化要求：${instruction.trim()}\n\n待优化的作品：\n${code}`
-                : `请在守住原曲风格的前提下优化这份作品。\n\n待优化的作品：\n${code}`,
-        }],
-        temperature: 0.4,
+        messages: [{ role: 'user', content: `待优化的作品：\n${code}` }],
+        // 温度比生成低：这里要的是"同一个人的同一首曲子"，不是新灵感。
+        // 生成用 0.7 是为了多样性，迭代用 0.7 只会让模型忍不住重写。
+        temperature: 0.3,
         reasoningEffort: 'max',
     });
     return parseReply(text).code;

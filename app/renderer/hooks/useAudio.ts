@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type React from 'react';
 import { Project, Message, AppState, ParserError, SPGWarning, getElectronAPI } from '../../../shared/meta';
 import { loadProjects, saveProjects, createNewProject, BrowserAudioEngine, bufferToWave, } from '../services/AudioService';
-import { generateSyntax, fixSyntax } from '../services/SpgAiService';
+import { generateSyntax, fixSyntax, refineSyntax } from '../services/SpgAiService';
 import { downloadBlob, loadJSON, removeStored, saveJSON } from '../../../shared/core';
 
 interface UseAudioParams {
@@ -42,6 +42,8 @@ interface UseAudioReturn {
         fixerProcessing: boolean;
         // 对话辅助
         isChatProcessing: boolean;
+        /** 正在迭代优化一份外部 .spg 文件 */
+        isRefining: boolean;
     };
     actions: {
         // 工程操作
@@ -68,6 +70,8 @@ interface UseAudioReturn {
         // 对话操作
         sendMessage: (content: string) => Promise<{ success: boolean; code?: string; replyMessage: Message }>;
         triggerFix: (brokenCode: string, error: string) => Promise<{ success: boolean; code?: string; replyMessage: Message }>;
+        /** 基于一份已有的 .spg 文件迭代优化；结果进**新**工程，原工程一字不动 */
+        refineSpg: (file: File) => Promise<{ success: boolean; projectId?: string; code?: string; message?: string }>;
     };
 }
 
@@ -553,6 +557,7 @@ export const useAudio = ({
 
     // 4. 对话与代码修复状态
     const [isChatProcessing, setIsChatProcessing] = useState(false);
+    const [isRefining, setIsRefining] = useState(false);
 
     const sendMessage = useCallback(async (content: string) => {
         setIsChatProcessing(true);
@@ -614,6 +619,58 @@ export const useAudio = ({
         }
     }, []);
 
+    /**
+     * 迭代优化一份**已有的 .spg 文件**。
+     *
+     * 结果落进**新工程**，原工程一字不动：迭代的卖点是"保有原曲"，
+     * 那就不能把原稿覆盖掉 —— 用户点完按钮发现原曲没了，
+     * 优化得再好也是净损失。原稿本身也只存在于工程里（.spg 归档是生成时写的），
+     * 没有第二份可以回退。
+     *
+     * 与 sendMessage 分成两个入口，而不是给它加个"带文件"参数：
+     * 生成是"从一句话创造"，迭代是"在给定作品上改动"，目标相反。
+     * 合成一个函数后，两个方向的提示词与落点都得在函数内部再分一次叉。
+     */
+    const refineSpg = useCallback(async (file: File) => {
+        setIsRefining(true);
+        try {
+            const source = await file.text();
+            if (!source.trim()) {
+                return { success: false, message: '文件是空的，没有可优化的内容。' };
+            }
+
+            const code = await refineSyntax(source);
+            const baseName = file.name.replace(/\.(spg|txt)$/i, '') || '迭代作品';
+            // 留档沿用原文件名：优化版与原稿在 .spg 目录里靠时间戳区分，
+            // 而不是靠改名 —— 改名会让"这是同一首曲子的第几版"看不出来
+            archiveSpg(code, baseName);
+
+            const project = createNewProject();
+            project.name = `${baseName} 优化版`;
+            project.code = code;
+            project.messages.push({
+                role: 'model',
+                content: `已基于「${file.name}」迭代优化，原工程保持不变。正在自动加载到编辑器...`,
+                timestamp: Date.now(),
+            });
+            setProjects((prev) => [project, ...prev]);
+            setActiveProjectId(project.id);
+
+            return { success: true, projectId: project.id, code };
+        } catch (error: unknown) {
+            console.error('SPG 迭代优化失败:', error);
+            const message = error instanceof Error ? error.message : '';
+            return {
+                success: false,
+                message: message.includes('无法连接') || message.includes('AI 服务')
+                    ? `错误：${message}`
+                    : '迭代优化失败，请重试。',
+            };
+        } finally {
+            setIsRefining(false);
+        }
+    }, []);
+
     // 5. 组装出参
     const state = useMemo(
         () => ({
@@ -632,6 +689,7 @@ export const useAudio = ({
             fixerGain,
             fixerProcessing,
             isChatProcessing,
+            isRefining,
         }),
         [
             projects,
@@ -649,6 +707,7 @@ export const useAudio = ({
             fixerGain,
             fixerProcessing,
             isChatProcessing,
+            isRefining,
         ]
     );
 
@@ -674,6 +733,7 @@ export const useAudio = ({
             applyFix,
             sendMessage,
             triggerFix,
+            refineSpg,
         }),
         [
             createProject,
@@ -691,6 +751,7 @@ export const useAudio = ({
             applyFix,
             sendMessage,
             triggerFix,
+            refineSpg,
         ]
     );
 

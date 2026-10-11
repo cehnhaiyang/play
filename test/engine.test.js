@@ -2017,7 +2017,7 @@ check('修复提示词明确排除作品名规则', () => {
   // 不显式排除，模型每修一次就可能往用户已经改过的标题上覆盖一次。
   const fixStart = aiSource.indexOf('const SPG_FIX_PROMPT');
   assert(fixStart > 0, '找不到 SPG_FIX_PROMPT');
-  const fixEnd = aiSource.indexOf('const buildFixPrompt', fixStart);
+  const fixEnd = aiSource.indexOf('const withSyntaxDoc', fixStart);
   assert(fixEnd > fixStart, '找不到 SPG_FIX_PROMPT 的结束位置');
   const fixSection = aiSource.slice(fixStart, fixEnd);
   assert(/作品名/.test(fixSection), '修复提示词必须显式声明不处理作品名');
@@ -2048,8 +2048,95 @@ check('生成回调把作品名写进工程标题（代码形状断言，非行�
   // 没给作品名时不得清空标题 —— 那会把用户自己起的名字抹掉
   assert(/if\s*\(\s*title\s*\)/.test(sendBody), '没给作品名时应保持原标题，不能无条件写入');
   // 修复只改语法，不碰标题
-  const fixBody = hookSrc.slice(sendEnd, hookSrc.indexOf('// 5. 组装出参', sendEnd));
+  const fixBody = hookSrc.slice(sendEnd, hookSrc.indexOf('const refineSpg', sendEnd));
   assert(!/updateActiveProject/.test(fixBody), 'triggerFix 不得改写工程标题');
+});
+
+/* -------------------------------------------------------------------------- */
+/*                       迭代优化通道：提示词 ↔ 落点 ↔ 原稿                     */
+/* -------------------------------------------------------------------------- */
+
+check('迭代提示词必须锁死原曲身份（调性/和声/曲式/旋律）', () => {
+  // "优化"在模型的默认理解里就是"重写"。用户拿回的若是一首陌生的曲子，
+  // 功能就是负价值 —— 而这类失败不报错、不告警，只能靠提示词里的硬约束挡。
+  const start = aiSource.indexOf('const SPG_REFINE_PROMPT');
+  assert(start > 0, '找不到 SPG_REFINE_PROMPT');
+  const end = aiSource.indexOf('const withSyntaxDoc', start);
+  assert(end > start, '找不到 SPG_REFINE_PROMPT 的结束位置');
+  const refine = aiSource.slice(start, end);
+
+  // 每一条"不许动"都对应一类会被静默改掉的音乐身份
+  for (const [pattern, what] of [
+    [/tempo/, '速度'],
+    [/和声骨架/, '和声骨架'],
+    [/曲式与时间轴/, '曲式与时间轴'],
+    [/主旋律的音高与节奏/, '主旋律'],
+    [/不要换乐器/, '乐器音色身份'],
+  ]) {
+    assert(pattern.test(refine), `迭代提示词必须锁死${what}，否则模型会把它一起"优化"掉`);
+  }
+  // 迭代不改工程名。必须钉在**输出纪律**那一节：这条规则在提示词里出现两次
+  // （"不许动的部分"与"输出纪律"），而只有后者是模型最后读到的执行条款。
+  // 只断言"提示词里某处提到了不改名"会漏掉"输出纪律被改成允许改名" ——
+  // 那样提示词自相矛盾，模型两边都可能听，实测确认过这一点。
+  const discipline = refine.slice(refine.indexOf('==================== 输出纪律 ===================='));
+  assert(discipline.length > 0 && discipline.length < refine.length, '找不到迭代提示词的输出纪律一节');
+  assert(/不要.*作品名|作品名.*不要|不改工程名|不重命名/.test(discipline),
+    '输出纪律必须明确不改作品名，否则模型会顺手把工程名一起改掉');
+  // 输出必须是完整代码而不是 diff，否则落进编辑器的东西编译不过
+  assert(/完整的优化后代码/.test(refine), '迭代提示词必须要求输出完整代码');
+  // 这条是"不许发明语法"的执行方式：与生成/修复共用同一份语法文档
+  assert(/withSyntaxDoc\(SPG_REFINE_PROMPT\)/.test(aiSource),
+    '迭代必须经 withSyntaxDoc 带上完整语法文档');
+});
+
+check('修复与迭代都必须带上完整语法文档', () => {
+  // 只给"改一改"的指令而不给语法，模型只能凭印象猜合法写法 ——
+  // 这正是此前自动修复反复失败的原因。凡是让模型改 SPG 代码的通道
+  // 都得经过 withSyntaxDoc，否则它会退化成一次凭记忆的重写。
+  const calls = [...aiSource.matchAll(/system:\s*([^,\n]+),/g)].map((m) => m[1].trim());
+  assert(calls.includes('SPG_SYSTEM_PROMPT'), '生成通道应直接用 SPG_SYSTEM_PROMPT');
+  assert(calls.filter((c) => /withSyntaxDoc\(/.test(c)).length >= 2,
+    `修复与迭代都应经 withSyntaxDoc，实际只有 ${calls.filter((c) => /withSyntaxDoc\(/.test(c)).length} 处`);
+  assert(!/buildFixPrompt/.test(aiSource), 'buildFixPrompt 已被 withSyntaxDoc 取代，不得残留');
+});
+
+check('迭代结果落进新工程，原工程一字不动（代码形状断言，非行为验证）', () => {
+  // 原稿只存在于工程里，没有第二份可以回退。覆盖它就等于把用户的曲子弄丢了，
+  // 而"保有原曲"正是这个功能的卖点 —— 所以落点必须是新建工程。
+  const hookSrc = fs.readFileSync(
+    path.join(__dirname, '..', 'app', 'renderer', 'hooks', 'useAudio.ts'), 'utf8');
+  const start = hookSrc.indexOf('const refineSpg = useCallback');
+  assert(start > 0, '找不到 refineSpg');
+  const end = hookSrc.indexOf('// 5. 组装出参', start);
+  assert(end > start, '找不到 refineSpg 的结束位置');
+  const body = hookSrc.slice(start, end);
+
+  assert(/refineSyntax\(/.test(body), 'refineSpg 应调用 refineSyntax');
+  assert(/createNewProject\(\)/.test(body), '迭代结果必须进新工程');
+  assert(/setProjects\(\(prev\)\s*=>\s*\[project,/.test(body), '新工程应加入工程列表');
+  // 覆盖原稿的两条路径都必须不出现：改名式更新与代码式更新
+  assert(!/updateActiveProject/.test(body), 'refineSpg 不得改写任何既有工程');
+  assert(/archiveSpg\(code,/.test(body), '优化结果同样要留档到 .spg');
+});
+
+check('迭代入口不复用导入入口（两个入口各有各的落点）', () => {
+  // 导入是"把这份代码放进工作台"，迭代是"让 AI 在它基础上改一版"。
+  // 合并成一个 input 后，handler 内部要按意图分叉，而两个落点不同
+  // （导入覆盖当前工程、迭代新建工程）—— 分叉写错就是把原稿覆盖掉。
+  const panelSrc = fs.readFileSync(
+    path.join(__dirname, '..', 'app', 'renderer', 'components', 'AudioPanel.tsx'), 'utf8');
+  const importRef = /ref=\{fileInputRef\}/.test(panelSrc);
+  const refineRef = /ref=\{refineInputRef\}/.test(panelSrc);
+  assert(importRef && refineRef, '导入与迭代应是两个独立的文件选择器');
+  assert(/onChange=\{handleFileImport\}/.test(panelSrc), '导入 input 应绑 handleFileImport');
+  assert(/onChange=\{handleRefineImport\}/.test(panelSrc), '迭代 input 应绑 handleRefineImport');
+  // 迭代失败必须报出来：模型要跑一段时间，界面只有按钮转圈，
+  // 不报错的话用户看到的就是"点了一下，什么都没发生"
+  const refineStart = panelSrc.indexOf('const handleRefineImport');
+  assert(refineStart > 0, '找不到 handleRefineImport');
+  const refineBody = panelSrc.slice(refineStart, panelSrc.indexOf('handleCompileAndPlay = useCallback', refineStart));
+  assert(/setParserError\(/.test(refineBody), '迭代失败必须给出可见的错误');
 });
 
 /* ========================================================================== */

@@ -11,6 +11,7 @@ import React, {
 import {
     ArchiveBoxArrowDownIcon,
     ArrowLeftIcon,
+    ArrowTrendingUpIcon,
     ArrowUpTrayIcon,
     Bars3Icon,
     BeakerIcon,
@@ -1393,6 +1394,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
 
     // Refs
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const refineInputRef = useRef<HTMLInputElement>(null);
     const chatInterfaceRef = useRef<ChatInterfaceRef>(null);
 
     // --- Workspace Logic ---
@@ -1526,6 +1528,35 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
     }, [audioActions, resetWorkspace]);
 
     /**
+     * 迭代优化一份外部 .spg 文件。
+     *
+     * 与"导入 .spg"是两个入口，不合并：导入是"把这份代码放进工作台"，
+     * 迭代是"让 AI 在它基础上改一版"。合并的话，用户想迭代一份还没进工程的
+     * 文件就得先导入、再找按钮，中间还多出一个他自己不会去用的工程。
+     *
+     * 优化结果进新工程（原文件对应的工程不受影响），所以这里也直接切到工作区。
+     */
+    const handleRefineImport = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+        const file = event.target.files?.[0];
+        event.target.value = '';
+        if (!file) return;
+
+        audioActions.stop();
+        resetWorkspace();
+        const result = await audioActions.refineSpg(file);
+
+        if (result.success && result.code) {
+            setView('workspace');
+            handleCompileAndPlay(result.code, { autoFix: true });
+            return;
+        }
+
+        // 失败必须说出来：迭代要等模型跑完，界面只是按钮转圈，
+        // 不报错的话用户看到的就是"点了一下，什么都没发生"
+        audioActions.setParserError({ message: result.message || '迭代优化失败', line: 0 });
+    }, [audioActions, handleCompileAndPlay, resetWorkspace]);
+
+    /**
      * 工作区快捷键。
      *
      * Ctrl/Cmd+Enter 运行是这类工具最通用的约定（VS Code、Jupyter 同款），
@@ -1598,6 +1629,19 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                     <div className="flex flex-wrap gap-3">
                         <button onClick={handleSwitchToLab} className={`${BTN_GHOST} px-4 py-2.5 text-[13px]`}>
                             <BeakerIcon className="w-4 h-4" /> 实验室
+                        </button>
+                        <button
+                            onClick={() => refineInputRef.current?.click()}
+                            disabled={audioState.isRefining}
+                            title="选一份已有的 .spg，让 AI 在保住原曲风格的前提下优化一版"
+                            className={`${BTN_GHOST} px-4 py-2.5 text-[13px] disabled:opacity-50`}
+                        >
+                            {audioState.isRefining ? (
+                                <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/25 border-t-cyan-300" />
+                            ) : (
+                                <ArrowTrendingUpIcon className="w-4 h-4" />
+                            )}
+                            {audioState.isRefining ? '优化中…' : '迭代优化'}
                         </button>
                         <button onClick={() => fileInputRef.current?.click()} className={`${BTN_GHOST} px-4 py-2.5 text-[13px]`}>
                             <ArrowUpTrayIcon className="w-4 h-4" /> 导入 .spg
@@ -2082,6 +2126,15 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                 type="file"
                 ref={fileInputRef}
                 onChange={handleFileImport}
+                accept=".spg,.txt"
+                className="hidden"
+            />
+            {/* 迭代优化的文件选择器与上面那个分开：两者都会写工程列表，
+                但一个只导入、一个要调模型，用同一个 input 就得在 handler 里分叉 */}
+            <input
+                type="file"
+                ref={refineInputRef}
+                onChange={handleRefineImport}
                 accept=".spg,.txt"
                 className="hidden"
             />
