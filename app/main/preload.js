@@ -41,9 +41,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     galleryPack: {
         savePack: (options) => ipcRenderer.invoke('gallery-save-pack', options),
     },
-    /** 把 LLM 生成的 SPG 源码直接留档到项目根的 .spg 目录（无对话框、无确认） */
+    /** SPG 源码留档与读取：落点固定在项目根的 .spg 目录 */
     spg: {
         save: (payload) => ipcRenderer.invoke('spg-save', payload),
+        pick: () => ipcRenderer.invoke('spg-pick'),
     },
     // --- Tamper API ---
     getCookies: (url) => ipcRenderer.invoke('get-cookies', url),

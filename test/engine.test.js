@@ -2084,7 +2084,7 @@ check('工作台里没有会话容器（创作/迭代/修复各有独立入口�
     '对话框不得被外层条件短路，可见性由它自己的 open 参数决定');
   assert(/onSubmit=\{handleCreateProject\}/.test(panelSrc), '对话框应提交给 handleCreateProject');
   // 迭代与修复的入口必须还在（删会话容器不能顺手删掉它们）
-  assert(/onChange=\{handleRefineImport\}/.test(panelSrc), '迭代优化入口不得被一起删掉');
+  assert(/onClick=\{handleRefineImport\}/.test(panelSrc), '迭代优化入口不得被一起删掉');
   assert(/onClick=\{handleManualFix\}/.test(panelSrc), '手动修复入口不得被一起删掉');
 });
 
@@ -2179,23 +2179,63 @@ check('迭代结果落进新工程，原工程一字不动（代码形状断言�
   assert(/archiveSpg\(code,/.test(body), '优化结果同样要留档到 .spg');
 });
 
-check('迭代入口不复用导入入口（两个入口各有各的落点）', () => {
-  // 导入是"把这份代码放进工作台"，迭代是"让 AI 在它基础上改一版"。
-  // 合并成一个 input 后，handler 内部要按意图分叉，而两个落点不同
-  // （导入覆盖当前工程、迭代新建工程）—— 分叉写错就是把原稿覆盖掉。
+check('导入与迭代都从项目根的 .spg 目录取件（系统文件框，非 <input type=file>）', () => {
+  // `<input type="file">` 无法指定初始目录，只会停在上次去过的地方；
+  // 而 .spg 是固定落点（生成时就写在那儿），用户每次都得自己导航回去。
+  // 所以取件必须走主进程的 dialog —— 一旦退回 input，这个便利就没了。
   const panelSrc = fs.readFileSync(
     path.join(__dirname, '..', 'app', 'renderer', 'components', 'AudioPanel.tsx'), 'utf8');
-  const importRef = /ref=\{fileInputRef\}/.test(panelSrc);
-  const refineRef = /ref=\{refineInputRef\}/.test(panelSrc);
-  assert(importRef && refineRef, '导入与迭代应是两个独立的文件选择器');
-  assert(/onChange=\{handleFileImport\}/.test(panelSrc), '导入 input 应绑 handleFileImport');
-  assert(/onChange=\{handleRefineImport\}/.test(panelSrc), '迭代 input 应绑 handleRefineImport');
+  // 只针对 .spg 取件那两个 input：实验室里还有三个给音频工具用的
+  // `<input type="file">`，它们与本次改动无关，不该被这条断言扫到
+  assert(!/accept="\.spg,\.txt"/.test(panelSrc),
+    '导入/迭代不得再用 <input type="file">：它无法把初始目录指到 .spg');
+  assert(!/fileInputRef|refineInputRef/.test(panelSrc), '两个隐藏 input 的 ref 应已删除');
+
+  // 取件是两条路径共用的同一步（同一目录、同一过滤、同一读文件逻辑），
+  // 差别只在拿到源码之后干什么 —— 所以共用一个函数，落点各自保留
+  const pickStart = panelSrc.indexOf('const pickSpgSource');
+  assert(pickStart > 0, '找不到共用的取件步骤 pickSpgSource');
+  const pickBody = panelSrc.slice(pickStart, panelSrc.indexOf('const handleFileImport', pickStart));
+  assert(/audioActions\.pickSpgSource\(/.test(pickBody), '取件应走 pickSpgSource（主进程弹框）');
+  // 取件失败要说出来：用户点的是按钮，静默返回就是"点了没反应"
+  assert(/setParserError\(/.test(pickBody), '取件失败必须给出可见的错误');
+
+  // 入口按钮必须真的绑到 handler 上。只查标识符存在的话，
+  // 把按钮删掉、或改成空 onClick，标识符依然在文件里（实测确认过）。
+  assert(/onClick=\{handleFileImport\}/.test(panelSrc), '导入按钮应绑 handleFileImport');
+  assert(/onClick=\{handleRefineImport\}/.test(panelSrc), '迭代按钮应绑 handleRefineImport');
+
   // 迭代失败必须报出来：模型要跑一段时间，界面只有按钮转圈，
   // 不报错的话用户看到的就是"点了一下，什么都没发生"
   const refineStart = panelSrc.indexOf('const handleRefineImport');
   assert(refineStart > 0, '找不到 handleRefineImport');
   const refineBody = panelSrc.slice(refineStart, panelSrc.indexOf('handleCompileAndPlay = useCallback', refineStart));
   assert(/setParserError\(/.test(refineBody), '迭代失败必须给出可见的错误');
+  // 落点仍必须分开：导入是"放进工作台"，迭代是"AI 改一版进新工程"
+  assert(/importProjectFromFile\(/.test(panelSrc), '导入应走 importProjectFromFile');
+  assert(/refineSpg\(/.test(refineBody), '迭代应走 refineSpg');
+});
+
+check('取件通道把初始目录钉在项目根的 .spg（主进程 ↔ 桥 ↔ 渲染层三处对齐）', () => {
+  // 三处必须同时存在，缺一处就表现为"点了按钮没反应"：
+  // 主进程没注册 handler → 调用永远 pending；preload 没暴露 → 渲染层拿不到方法。
+  const mainSrc = fs.readFileSync(
+    path.join(__dirname, '..', 'app', 'main', 'main.js'), 'utf8');
+  const pickStart = mainSrc.indexOf('async function handleSpgPick');
+  assert(pickStart > 0, '主进程缺少 handleSpgPick');
+  const pickBody = mainSrc.slice(pickStart, mainSrc.indexOf('\nfunction setupDownloadHandlers', pickStart));
+  // 落点与 handleSpgSave 必须是同一个目录：一个写、一个读，指到两处就是"存了却找不到"
+  assert(/path\.join\(app\.getAppPath\(\), '\.spg'\)/.test(pickBody),
+    '取件的初始目录必须是项目根的 .spg');
+  assert(/dialog\.showOpenDialog/.test(pickBody), '取件必须弹系统文件框');
+  assert(/readFile\(/.test(pickBody), '内容要在主进程读出来：渲染层读不了文件');
+  assert(/cancelled/.test(pickBody), '取消要与失败分开：取消不该报错');
+  assert(/ipcMain\.handle\('spg-pick'/.test(mainSrc), 'spg-pick 必须在主进程注册');
+
+  const preloadSrc = fs.readFileSync(
+    path.join(__dirname, '..', 'app', 'main', 'preload.js'), 'utf8');
+  assert(/pick:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('spg-pick'\)/.test(preloadSrc),
+    'preload 必须暴露 spg.pick，否则渲染层拿不到这个方法');
 });
 
 /* ========================================================================== */

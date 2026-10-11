@@ -10,6 +10,18 @@ interface UseAudioParams {
     initialProjectId?: string | null;
 }
 
+/**
+ * 一份从 .spg 目录读进来的源码。
+ *
+ * 内容由主进程随路径一起给（渲染层读不了文件），所以这里只有名字和正文，
+ * 没有 File 对象 —— 用 File 就得靠 FileReader 异步读，而内容其实早就在手上了。
+ */
+export interface SpgSource {
+    /** 文件名（含后缀），用于推导工程名与留档名 */
+    name: string;
+    content: string;
+}
+
 interface UseAudioReturn {
     state: {
         // 工程管理
@@ -53,7 +65,16 @@ interface UseAudioReturn {
         createProject: (description: string) => Promise<{ success: boolean; projectId?: string; message?: string }>;
         deleteProject: (id: string) => void;
         updateActiveProject: (updates: Partial<Project>) => void;
-        importProjectFromFile: (file: File, callback: (newId: string) => void) => void;
+        /**
+         * 从项目根的 .spg 目录挑一份源码。
+         *
+         * 走主进程的系统文件框而不是 `<input type="file">`：后者无法指定初始目录，
+         * 只会停在上次去过的地方，而 .spg 是固定落点，用户每次都得自己导航回去。
+         *
+         * 返回 `source` 为空表示没拿到东西，`message` 非空表示失败（取消不算失败）。
+         */
+        pickSpgSource: () => Promise<{ source?: SpgSource; message?: string }>;
+        importProjectFromFile: (source: SpgSource, callback: (newId: string) => void) => void;
         setActiveProjectId: React.Dispatch<React.SetStateAction<string | null>>;
         // 引擎操作
         compileAndPlay: (sourceCode: string) => Promise<{ success: boolean; error?: ParserError }>;
@@ -71,8 +92,8 @@ interface UseAudioReturn {
         applyFix: () => Promise<void>;
         // 修复操作
         triggerFix: (brokenCode: string, error: string) => Promise<{ success: boolean; code?: string; message?: string }>;
-        /** 基于一份已有的 .spg 文件迭代优化；结果进**新**工程，原工程一字不动 */
-        refineSpg: (file: File) => Promise<{ success: boolean; projectId?: string; code?: string; message?: string }>;
+        /** 基于一份已有的 .spg 源码迭代优化；结果进**新**工程，原稿一字不动 */
+        refineSpg: (source: SpgSource) => Promise<{ success: boolean; projectId?: string; code?: string; message?: string }>;
     };
 }
 
@@ -247,20 +268,33 @@ export const useAudio = ({
         );
     }, [activeProjectId]);
 
-    const importProjectFromFile = useCallback((file: File, callback: (newId: string) => void) => {
-        const reader = new FileReader();
-        reader.onload = (event) => {
-            const content = (event.target?.result as string) || '';
+    const importProjectFromFile = useCallback((source: SpgSource, callback: (newId: string) => void) => {
+        const newProject = createNewProject();
+        newProject.name = source.name.replace(/\.(spg|txt)$/i, '') || 'Imported Project';
+        newProject.code = source.content;
 
-            const newProject = createNewProject();
-            newProject.name = file.name.replace(/\.(spg|txt)$/i, '') || 'Imported Project';
-            newProject.code = content;
+        setProjects((prev) => [newProject, ...prev]);
+        setActiveProjectId(newProject.id);
+        callback(newProject.id);
+    }, []);
 
-            setProjects((prev) => [newProject, ...prev]);
-            setActiveProjectId(newProject.id);
-            callback(newProject.id);
-        };
-        reader.readAsText(file);
+    /**
+     * 弹系统文件框挑一份 .spg 源码，初始目录固定为项目根的 .spg。
+     *
+     * 失败与取消分开返回：取消是用户的正常操作，调用方不该弹错误。
+     * 桥没加载时（preload 故障）也要说一句 —— 这条路径是用户主动点的按钮，
+     * 静默失败就是"点了没反应"。
+     */
+    const pickSpgSource = useCallback(async () => {
+        const api = getElectronAPI();
+        if (!api?.spg?.pick) return { message: '文件选择不可用：桥接未加载。' };
+
+        const res = await api.spg.pick();
+        if (res.cancelled) return {};
+        if (!res.success || typeof res.content !== 'string') {
+            return { message: res.message || '读取文件失败。' };
+        }
+        return { source: { name: res.name || '未命名.spg', content: res.content } };
     }, []);
 
     // 2. 声音引擎状态
@@ -586,23 +620,22 @@ export const useAudio = ({
     }, []);
 
     /**
-     * 迭代优化一份**已有的 .spg 文件**。
+     * 迭代优化一份**已有的 .spg 源码**。
      *
-     * 结果落进**新工程**，原工程一字不动：迭代的卖点是"保有原曲"，
+     * 结果落进**新工程**，原稿一字不动：迭代的卖点是"保有原曲"，
      * 那就不能把原稿覆盖掉 —— 用户点完按钮发现原曲没了，
      * 优化得再好也是净损失。原稿本身也只存在于工程里（.spg 归档是生成时写的），
      * 没有第二份可以回退。
      */
-    const refineSpg = useCallback(async (file: File) => {
+    const refineSpg = useCallback(async (source: SpgSource) => {
         setIsRefining(true);
         try {
-            const source = await file.text();
-            if (!source.trim()) {
+            if (!source.content.trim()) {
                 return { success: false, message: '文件是空的，没有可优化的内容。' };
             }
 
-            const code = await refineSyntax(source);
-            const baseName = file.name.replace(/\.(spg|txt)$/i, '') || '迭代作品';
+            const code = await refineSyntax(source.content);
+            const baseName = source.name.replace(/\.(spg|txt)$/i, '') || '迭代作品';
             // 留档沿用原文件名：优化版与原稿在 .spg 目录里靠时间戳区分，
             // 而不是靠改名 —— 改名会让"这是同一首曲子的第几版"看不出来
             archiveSpg(code, baseName);
@@ -675,6 +708,7 @@ export const useAudio = ({
             createProject,
             deleteProject,
             updateActiveProject,
+            pickSpgSource,
             importProjectFromFile,
             setActiveProjectId,
             compileAndPlay,
@@ -696,6 +730,7 @@ export const useAudio = ({
             createProject,
             deleteProject,
             updateActiveProject,
+            pickSpgSource,
             importProjectFromFile,
             setActiveProjectId,
             compileAndPlay,

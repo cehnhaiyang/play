@@ -2005,6 +2005,45 @@ async function handleSpgSave(_event, payload) {
     }
 }
 
+/**
+ * 让用户从项目根的 .spg 目录里挑一份 SPG 源码。
+ *
+ * 为什么必须由主进程弹这个框：渲染层的 `<input type="file">` **没有任何办法
+ * 指定初始目录**，它只会停在上一次去过的地方。而 .spg 是固定落点
+ * （生成时由 handleSpgSave 写在项目根），用户每次都要自己导航回去。
+ *
+ * 内容在这里一并读出来：渲染层没有文件系统权限，只给路径它读不了。
+ * 空文件照常返回 —— "文件是空的"是一句该由调用方按用途说的话。
+ */
+async function handleSpgPick(event) {
+    try {
+        const dir = path.join(app.getAppPath(), '.spg');
+        const win = (event && event.sender && !event.sender.isDestroyed())
+            ? BrowserWindow.fromWebContents(event.sender)
+            : (mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined);
+        const opts = {
+            title: '选择 SPG 脚本',
+            defaultPath: dir,
+            properties: ['openFile'],
+            filters: [
+                { name: 'SPG 脚本', extensions: ['spg', 'txt'] },
+                { name: '全部文件', extensions: ['*'] },
+            ],
+        };
+        const { canceled, filePaths } = win
+            ? await dialog.showOpenDialog(win, opts)
+            : await dialog.showOpenDialog(opts);
+        if (canceled || !filePaths.length) return { success: false, cancelled: true };
+
+        const filePath = filePaths[0];
+        const content = await fs.promises.readFile(filePath, 'utf8');
+        return { success: true, filePath, name: path.basename(filePath), content };
+    } catch (error) {
+        console.error('spg-pick failed:', error);
+        return { success: false, message: error instanceof Error ? error.message : '读取文件失败' };
+    }
+}
+
 function setupDownloadHandlers() {
     if (downloadHandlersReady) return;
     downloadHandlersReady = true;
@@ -2013,6 +2052,7 @@ function setupDownloadHandlers() {
     ipcMain.handle('cancel-media-download', async (_event, url) => cancelMediaDownload(url));
     ipcMain.handle('gallery-save-pack', handleGalleryPackSave);
     ipcMain.handle('spg-save', handleSpgSave);
+    ipcMain.handle('spg-pick', handleSpgPick);
 }
 
 // 单文件包另存为（.gallery 画廊 ZIP / .aibook 绘本 JSON）：

@@ -247,6 +247,10 @@ export const BRIDGE_ENDPOINTS = {
         route: 'app',
         reason: '写入项目根的 .spg 目录，插件没有任意路径写权限。',
     },
+    'spg-pick': {
+        route: 'app',
+        reason: '要弹系统文件框并把初始目录指到项目根的 .spg，还要读出文件内容 —— 两件事都只有主进程能做。',
+    },
     'gallery-save-pack': {
         route: 'app',
         reason: '要弹系统"另存为"对话框并写入用户选定路径。',

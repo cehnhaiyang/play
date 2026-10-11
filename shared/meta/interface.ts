@@ -1479,10 +1479,11 @@ export interface ElectronAPI {
 }
 
 /**
- * LLM 生成的 SPG 源码留档。
+ * SPG 源码留档与读取。
  *
- * 无对话框、无返回值依赖：生成完即落盘到项目根的 .spg 目录，
- * 用户不需要为此做任何操作。落点由主进程决定（渲染层没有文件系统权限）。
+ * 两个方向的落点都是**项目根的 .spg 目录**，由主进程决定（渲染层没有文件系统权限）。
+ * 保存无对话框：生成完即落盘，用户不需要为此做任何操作。读取要弹系统文件框 ——
+ * 因为 `<input type="file">` 无法指定初始目录，只能停在用户上次去过的地方。
  */
 export interface ElectronSpgAPI {
     /**
@@ -1492,6 +1493,20 @@ export interface ElectronSpgAPI {
     save: (payload: { code: string; name?: string }) => Promise<{
         success: boolean;
         filePath?: string;
+        message?: string;
+    }>;
+    /**
+     * 从 .spg 目录里挑一份源码并读出内容。
+     *
+     * 内容随返回值一起给：渲染层拿到路径也读不了文件。
+     * `cancelled` 与失败要分开 —— 用户主动取消不该报错。
+     */
+    pick: () => Promise<{
+        success: boolean;
+        cancelled?: boolean;
+        filePath?: string;
+        name?: string;
+        content?: string;
         message?: string;
     }>;
 }
