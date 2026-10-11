@@ -651,6 +651,106 @@ function run() {
         for (const p of effortProblems) console.log(`          ${p}`);
     }
 
+    /**
+     * 悬浮球面板缩放的几何。
+     *
+     * `frameForResize` / `clampPanel` 是**纯函数**，不碰 Electron API，
+     * 所以能在这里直接调用 —— 必须调用而不是查源码：这两处的错法全都
+     * 是"算得出一个数、但那个数是错的"，正则匹配永远看不出来。
+     *
+     * 实测事故：把手有 16px 宽，指针落在把手里的哪个像素是不确定的。
+     * 早期版本用 `指针 − 尺寸` 反推左上角，于是**一按下窗口就先跳最多 16px**。
+     * 下面第一条断言盯的就是它。
+     */
+    checks += 1;
+    const orbMod = require(path.join(ELECTRON_DIR, 'orbs.js'));
+    const orbProblems = [];
+
+    const close = (a, b) => Math.abs(a - b) < 0.51;
+    const eqFrame = (label, got, want) => {
+        for (const k of ['x', 'y', 'width', 'height']) {
+            if (!close(got?.[k], want[k])) {
+                orbProblems.push(`${label}：${k} 期望 ${want[k]}，实际 ${got?.[k]}`);
+            }
+        }
+    };
+
+    // 无 Electron 环境时 workAreaFor 兜底成 1920x1080，下面按它算
+    const AREA = { x: 0, y: 0, width: 1920, height: 1080 };
+    const MARGIN = 8;
+
+    if (typeof orbMod.frameForResize !== 'function' || typeof orbMod.clampPanel !== 'function') {
+        orbProblems.push('orbs.js 没有导出 frameForResize / clampPanel（几何无法被断言）');
+    } else {
+        const base = { x: 400, y: 300, width: 380, height: 520 };
+
+        // 1) 按下不跳：指针没动，窗口就必须一个像素都不动
+        eqFrame('按下时不动', orbMod.frameForResize('sniff',
+            { x: 1000, y: 1000 }, { pointer: { x: 1000, y: 1000 }, frame: base }), base);
+
+        // 2) 增量语义：指针移多少，尺寸变多少，位置不动（还有空间时）
+        eqFrame('指针右下移 100/50', orbMod.frameForResize('sniff',
+            { x: 1100, y: 1050 }, { pointer: { x: 1000, y: 1000 }, frame: base }),
+            { x: 400, y: 300, width: 480, height: 570 });
+
+        // 3) 下限：往左上拖过头，尺寸被最小尺寸挡住
+        const floored = orbMod.frameForResize('sniff',
+            { x: 100, y: 100 }, { pointer: { x: 1000, y: 1000 }, frame: base });
+        if (floored.width !== 300 || floored.height !== 320) {
+            orbProblems.push(`缩放下限失效：拖到 ${floored.width}x${floored.height}，应为 300x320`);
+        }
+
+        // 4) 上限：面板不许比工作区还大，否则把手会被挤出屏幕
+        const capped = orbMod.frameForResize('sniff',
+            { x: 99999, y: 99999 }, { pointer: { x: 1000, y: 1000 }, frame: base });
+        if (capped.width > AREA.width - MARGIN * 2 || capped.height > AREA.height - MARGIN * 2) {
+            orbProblems.push(`缩放上限失效：${capped.width}x${capped.height} 超出工作区`);
+        }
+        if (capped.x + capped.width > AREA.width - MARGIN || capped.y + capped.height > AREA.height - MARGIN) {
+            orbProblems.push(`缩放后越出工作区：右下角 ${capped.x + capped.width},${capped.y + capped.height}`);
+        }
+
+        /*
+         * 5) 贴右边之后继续往右拖，面板必须**还能变大**（改成向左长）。
+         *
+         * 这一条是"球的默认位置在右下角"逼出来的：面板围着球心铺开，右边缘
+         * 一开始就贴着工作区右缘。死钉左上角的话可增长空间是 0，
+         * 用户看到的是"把手拖得动，面板一动不动"。
+         */
+        const atRightEdge = { x: AREA.width - MARGIN - 380, y: 300, width: 380, height: 520 };
+        const grown = orbMod.frameForResize('sniff',
+            { x: atRightEdge.x + atRightEdge.width + 100, y: 1000 },
+            { pointer: { x: atRightEdge.x + atRightEdge.width, y: 1000 }, frame: atRightEdge });
+        if (grown.width <= atRightEdge.width) {
+            orbProblems.push(`贴右边后无法继续加宽：${atRightEdge.width} → ${grown.width}（应为"向左长"）`);
+        }
+        if (grown.x + grown.width > AREA.width - MARGIN) {
+            orbProblems.push(`贴右边加宽后越界：右缘 ${grown.x + grown.width}`);
+        }
+
+        // 6) clampPanel：默认值 / 旧记录缺 w,h / 下限 / 上限
+        const def = orbMod.ORB_DEFS.sniff;
+        const cases = [
+            ['无记录用默认尺寸', undefined, { w: def.panel.w, h: def.panel.h }],
+            ['旧记录只有 x,y 时用默认尺寸', { x: 100, y: 100 }, { w: def.panel.w, h: def.panel.h }],
+            ['过小的记录被顶到下限', { w: 10, h: 10 }, { w: def.panelMin.w, h: def.panelMin.h }],
+            ['过大的记录被收到工作区内', { w: 5000, h: 5000 },
+                { w: AREA.width - MARGIN * 2, h: AREA.height - MARGIN * 2 }],
+        ];
+        for (const [label, saved, want] of cases) {
+            const got = orbMod.clampPanel('sniff', saved, AREA);
+            if (got.w !== want.w || got.h !== want.h) {
+                orbProblems.push(`clampPanel ${label}：期望 ${want.w}x${want.h}，实际 ${got.w}x${got.h}`);
+            }
+        }
+    }
+
+    if (orbProblems.length > 0) {
+        failed += 1;
+        console.log('  FAIL  悬浮球面板缩放的几何算错：');
+        for (const p of orbProblems) console.log(`          ${p}`);
+    }
+
     console.log(`主进程静态自检：通过 ${checks - failed} 项，失败 ${failed} 项`);
     return failed === 0;
 }

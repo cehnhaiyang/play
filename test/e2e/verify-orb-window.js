@@ -1,9 +1,9 @@
 'use strict';
 
 /**
- * 验证球窗口的三条硬承诺。
+ * 验证球窗口的硬承诺。
  *
- * ## 为什么这三条必须实测
+ * ## 为什么这些必须实测
  *
  * 它们都是**窗口管理器的事实**，DOM 里看不出来，渲染层也读不到：
  *
@@ -14,6 +14,9 @@
  *      `resizable:false` 是否真的生效只能问 `isResizable()`。
  *   3. **置顶**：`setAlwaysOnTop` 的返回值只说明"调用没报错"，
  *      不说明系统真的把它置于顶层。只能问 `isAlwaysOnTop()`。
+ *   4. **面板能缩放且尺寸记得住**：`setBounds` 的返回值同样是"没报错"，
+ *      而"收起再展开尺寸还在不在"只有回读 `bounds` 才知道 ——
+ *      这一条曾经整个不存在（尺寸是常量），靠源码审查看不出来。
  *
  * 跑法：npx electron . --remote-debugging-port=9222
  *       node test/e2e/verify-orb-window.js
@@ -100,12 +103,72 @@ const main = async () => {
         check('展开态尺寸是面板尺寸', opened?.bounds?.width > 64 && opened?.bounds?.height > 64,
             `${opened?.bounds?.width}x${opened?.bounds?.height}`);
 
+        /*
+         * 缩放：右下角把手把窗口改大，然后**收起再展开**，尺寸必须还在。
+         *
+         * 这两步必须连在一起测。只测"拖完变大了"的话，把尺寸存回 ORB_DEFS
+         * 的那版实现照样通过 —— 而用户实际遇到的是"调完大小，一收起就复位"。
+         *
+         * 语义是**增量**：把手按下时记基准，指针移动多少，尺寸就变多少。
+         * 所以这里必须从当前右下角起步，再往右下拖，而不是直接给一个绝对坐标。
+         */
+        const before = opened?.bounds ?? { x: 0, y: 0, width: 0, height: 0 };
+        const grabX = before.x + before.width;
+        const grabY = before.y + before.height;
+        const deltaW = 120;
+        const deltaH = 80;
+        const targetW = before.width + deltaW;
+        const targetH = before.height + deltaH;
+
+        await page.evaluate(`window.orbApi.resizeStart({ x: ${grabX}, y: ${grabY} })`);
+        await page.evaluate(`window.orbApi.resizeMove({ x: ${grabX + deltaW}, y: ${grabY + deltaH} })`);
+        await page.evaluate('window.orbApi.resizeEnd()');
+        await sleep(600);
+
+        const resized = await page.evaluate('window.orbApi.windowInfo()');
+        check('缩放改的是窗口尺寸',
+            resized?.bounds?.width === targetW && resized?.bounds?.height === targetH,
+            `期望 ${targetW}x${targetH}，实际 ${resized?.bounds?.width}x${resized?.bounds?.height}`);
+
+        await page.evaluate('window.orbApi.setOpen(false)');
+        await sleep(400);
+        await page.evaluate('window.orbApi.setOpen(true)');
+        await sleep(600);
+        const reopened = await page.evaluate('window.orbApi.windowInfo()');
+        check('★ 收起再展开，调好的尺寸还在',
+            reopened?.bounds?.width === targetW && reopened?.bounds?.height === targetH,
+            `期望 ${targetW}x${targetH}，实际 ${reopened?.bounds?.width}x${reopened?.bounds?.height}`);
+
+        /*
+         * 缩放的下限由主进程收口。渲染层那个把手只是"哪里能抓"，
+         * 往左上拖过头必须被挡住 —— 否则面板会缩成一条线，把手自己也跟着消失。
+         */
+        const floorGrabX = reopened.bounds.x + reopened.bounds.width;
+        const floorGrabY = reopened.bounds.y + reopened.bounds.height;
+        await page.evaluate(`window.orbApi.resizeStart({ x: ${floorGrabX}, y: ${floorGrabY} })`);
+        await page.evaluate(`window.orbApi.resizeMove({ x: ${floorGrabX - 900}, y: ${floorGrabY - 900} })`);
+        await page.evaluate('window.orbApi.resizeEnd()');
+        await sleep(400);
+        const floored = await page.evaluate('window.orbApi.windowInfo()');
+        check('★ 往左上拖过头被下限挡住',
+            floored?.bounds?.width >= 300 && floored?.bounds?.height >= 320,
+            `${floored?.bounds?.width}x${floored?.bounds?.height}（下限 300x320）`);
+
         await page.evaluate('window.orbApi.setOpen(false)');
         await sleep(600);
         const closed = await page.evaluate('window.orbApi.windowInfo()');
         check('收起后回到 64x64 且仍置顶',
             closed?.bounds?.width === 64 && closed?.bounds?.height === 64 && closed?.isAlwaysOnTop === true,
             `${closed?.bounds?.width}x${closed?.bounds?.height} topmost=${closed?.isAlwaysOnTop}`);
+
+        /*
+         * 收起态**不许**可缩放。
+         *
+         * 上一步把面板拖到了下限，收起后窗口是 64×64 —— 如果 resizable 还开着，
+         * 用户能把这颗球拉成长方形。这一条测的是"形态与可缩放性有没有绑在一起"。
+         */
+        check('收起态不可缩放（球不能被拉成长方形）', closed?.isResizable === false,
+            `isResizable=${closed?.isResizable}`);
 
         centers.push({
             title: t.title,

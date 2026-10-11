@@ -35,6 +35,11 @@ contextBridge.exposeInMainWorld('orbApi', {
     dragMove: (point) => ipcRenderer.send('orb:drag-move', point),
     dragEnd: () => ipcRenderer.send('orb:drag-end'),
 
+    /* ---- 面板缩放。同样只报屏幕坐标，尺寸在主进程算 ---- */
+    resizeStart: (point) => ipcRenderer.send('orb:resize-start', point),
+    resizeMove: (point) => ipcRenderer.send('orb:resize-move', point),
+    resizeEnd: () => ipcRenderer.send('orb:resize-end'),
+
     /* ---- 展开 / 收起 ---- */
     setOpen: (open) => ipcRenderer.send('orb:set-open', open),
     /** 主进程改了窗口尺寸后通知渲染层切换形态 */

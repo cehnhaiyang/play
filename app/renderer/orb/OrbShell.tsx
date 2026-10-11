@@ -11,6 +11,9 @@ import type { ReactNode } from 'react';
  * 或者面板被裁掉一截。所以这里只切"画成球"还是"画成面板"，
  * 尺寸一律 `w-full h-full` 跟着窗口走。
  *
+ * 拖动与缩放同理：这里只报**屏幕坐标**，窗口怎么挪、能缩到多小都在主进程里
+ * （见 app/main/orbs.js 的第 6、7 节）。
+ *
  * ## 拖动与点击必须分开
  *
  * 球的交互有三个：拖、点开、以及拖完松手的那一次 click。第三个别处理的话，
@@ -121,6 +124,49 @@ export const OrbShell = ({ icon, accent, label, hint, toolbar, children }: OrbSh
     }, [isOpen]);
 
     /*
+     * 缩放把手。
+     *
+     * 与拖动是**两套独立状态**：拖到一半又去抓把手时，共用一套标记会让两条
+     * 路径互相改写对方的基准点，窗口会跳。主进程那边同理（resizeAnchors）。
+     *
+     * 用 `screenX/screenY` 的理由与拖动相同 —— 窗口正在跟着手改尺寸，
+     * clientX 是相对窗口的，会形成反馈。
+     *
+     * 这里**只报指针位置**，尺寸怎么算全在主进程（增量、下限、贴边平移）。
+     * 渲染层自己算的话，那几条约束就得分叉成两份。
+     */
+    const [isResizing, setIsResizing] = useState(false);
+    const resizeRaf = useRef<number | null>(null);
+
+    const onResizeDown = useCallback((event: React.PointerEvent) => {
+        // 防的是浏览器把这次按下当成选择/原生拖拽的起点（面板本身已 select-none）
+        event.preventDefault();
+        setIsResizing(true);
+        event.currentTarget.setPointerCapture(event.pointerId);
+        window.orbApi?.resizeStart({ x: event.screenX, y: event.screenY });
+    }, []);
+
+    const onResizeMove = useCallback((event: React.PointerEvent) => {
+        if (!isResizing) return;
+        const point = { x: event.screenX, y: event.screenY };
+        /* rAF 合并：pointermove 一帧能来好几次，每次都发 IPC 是纯浪费 */
+        if (resizeRaf.current !== null) return;
+        resizeRaf.current = window.requestAnimationFrame(() => {
+            resizeRaf.current = null;
+            window.orbApi?.resizeMove(point);
+        });
+    }, [isResizing]);
+
+    const onResizeUp = useCallback((event: React.PointerEvent) => {
+        if (!isResizing) return;
+        setIsResizing(false);
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+        window.orbApi?.resizeEnd();
+    }, [isResizing]);
+
+    /*
      * 球的容器是**正方形**，且必须与窗口等大。
      *
      * 窗口本身是透明的，所以"球"其实是这个容器里的一个圆。容器用
@@ -161,38 +207,84 @@ export const OrbShell = ({ icon, accent, label, hint, toolbar, children }: OrbSh
     }
 
     return (
-        <div className="animate-orb-unfold flex h-full w-full flex-col overflow-hidden rounded-2xl border border-white/12 bg-slate-950/95 font-sans text-slate-200 shadow-[0_24px_80px_rgba(0,0,0,0.7)] select-none backdrop-blur-2xl">
-            {/*
-             * 只有 header 是拖动区。面板本体挂着滚动列表和输入框，
-             * 整块都可拖的话选不中文字、点不到按钮。
-             */}
-            <header
-                className="flex shrink-0 cursor-grab items-center gap-2.5 border-b border-white/10 px-3 py-2.5 active:cursor-grabbing"
-                onPointerDown={onPointerDown}
-                onPointerMove={onPointerMove}
-                onPointerUp={onPointerUp}
-            >
-                <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br ${accent} text-white`}>
-                    {icon}
-                </span>
-                <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[13px] font-semibold text-white">{label}</span>
-                    <span className="block truncate text-[10px] text-slate-400">{hint}</span>
-                </span>
-                {toolbar}
-                <button
-                    type="button"
-                    onClick={() => window.orbApi?.setOpen(false)}
-                    title="收起（Esc）"
-                    aria-label="收起"
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.06] text-slate-400 transition hover:border-white/20 hover:bg-white/[0.12] hover:text-white"
+        /*
+         * 两层：外层只做定位，内层是面板本体。
+         *
+         * 必须分开，因为内层带 `rounded-2xl` + `overflow-hidden` —— 那是给
+         * 内容用的圆角。缩放把手正好落在右下角那个 16px 圆角上，被它一裁就
+         * 只剩一半命中区（圆角切掉的是弓形，占三角形面积的 57%）。
+         * 把手是**边框级**的东西，不该被表面裁。
+         */
+        <div className="animate-orb-unfold relative h-full w-full font-sans text-slate-200 select-none">
+            <div className="flex h-full w-full flex-col overflow-hidden rounded-2xl border border-white/12 bg-slate-950/95 shadow-[0_24px_80px_rgba(0,0,0,0.7)] backdrop-blur-2xl">
+                {/*
+                 * 只有 header 是拖动区。面板本体挂着滚动列表和输入框，
+                 * 整块都可拖的话选不中文字、点不到按钮。
+                 */}
+                <header
+                    className="flex shrink-0 cursor-grab items-center gap-2.5 border-b border-white/10 px-3 py-2.5 active:cursor-grabbing"
+                    onPointerDown={onPointerDown}
+                    onPointerMove={onPointerMove}
+                    onPointerUp={onPointerUp}
                 >
-                    <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" aria-hidden="true">
-                        <path d="M6 6l12 12M18 6L6 18" />
-                    </svg>
-                </button>
-            </header>
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{children}</div>
+                    <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br ${accent} text-white`}>
+                        {icon}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[13px] font-semibold text-white">{label}</span>
+                        <span className="block truncate text-[10px] text-slate-400">{hint}</span>
+                    </span>
+                    {toolbar}
+                    <button
+                        type="button"
+                        onClick={() => window.orbApi?.setOpen(false)}
+                        title="收起（Esc）"
+                        aria-label="收起"
+                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.06] text-slate-400 transition hover:border-white/20 hover:bg-white/[0.12] hover:text-white"
+                    >
+                        <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" aria-hidden="true">
+                            <path d="M6 6l12 12M18 6L6 18" />
+                        </svg>
+                    </button>
+                </header>
+                <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{children}</div>
+            </div>
+            {/*
+              右下角的缩放把手。
+
+              形状是**角上的三角形**而不是一个方块：方块会压住面板右下角的内容
+              （Agent 的「发送」按钮离右下角只有 8px，方块热区正好盖住它的一角，
+              点在那里会变成缩放而不是发送）。三角形只覆盖
+              `离右边距离 + 离下边距离 ≤ 16` 的区域，与那个 8×8 的角只有一个点相切。
+
+              `clip-path` 同时裁掉命中区（不只是绘制），所以三角形既是外观也是热区，
+              不需要额外写一层判据。
+
+              只画右下角、不画整条边：透明窗口没有窗口边框，整条边的热区会盖住
+              列表行尾的按钮（"播放"/"下载"就在那一列）。
+            */}
+            <div
+                onPointerDown={onResizeDown}
+                onPointerMove={onResizeMove}
+                onPointerUp={onResizeUp}
+                onPointerCancel={onResizeUp}
+                title="拖动调整面板大小"
+                aria-label="调整面板大小"
+                className="absolute right-0 bottom-0 h-4 w-4 cursor-nwse-resize text-slate-600 transition hover:text-slate-300 [clip-path:polygon(100%_0,100%_100%,0_100%)]"
+            >
+                {/* 两条斜线离角 5px 与 10px，都落在三角形内，不会被裁掉半截 */}
+                <svg
+                    className="pointer-events-none absolute right-0 bottom-0 h-4 w-4"
+                    viewBox="0 0 16 16"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={1.4}
+                    strokeLinecap="round"
+                    aria-hidden="true"
+                >
+                    <path d="M15 6L6 15M15 11L11 15" />
+                </svg>
+            </div>
         </div>
     );
 };

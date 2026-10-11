@@ -29,6 +29,15 @@ declare global {
         dragMove: (point: { x: number; y: number }) => void;
         dragEnd: () => void;
 
+        /*
+         * 面板缩放。与拖动同一套：渲染层只报**屏幕坐标**，窗口尺寸怎么算是
+         * 主进程的事（最小尺寸、工作区上限都在那边，见 app/main/orbs.js）。
+         * 渲染层自己算尺寸的话，那两条约束就得分叉成两份。
+         */
+        resizeStart: (point: { x: number; y: number }) => void;
+        resizeMove: (point: { x: number; y: number }) => void;
+        resizeEnd: () => void;
+
         setOpen: (open: boolean) => void;
         onLayout: (callback: (payload: { open: boolean; ballSize: number }) => void) => () => void;
 
@@ -37,6 +46,8 @@ declare global {
             id: string;
             bounds: { x: number; y: number; width: number; height: number };
             open: boolean;
+            /** 展开态的目标尺寸（用户拖出来的那个），与 bounds 不一定相等 */
+            panel: { w: number; h: number };
             isAlwaysOnTop: boolean;
             isResizable: boolean;
             isMovable: boolean;

@@ -34,13 +34,19 @@
  * 塞进一个窗口就必须共享一个矩形 —— 而那个矩形要同时满足"球形态"和"面板形态"，
  * 结果是两个都做不好。分开之后每个窗口只有一种形态，尺寸就是内容尺寸。
  *
+ * ## 尺寸：球是固定的，面板由用户拖
+ *
+ * 球永远是 `BALL_SIZE` 的正方形（圆被拉长就不是圆了），所以 `resizable` 始终
+ * 关着，展开态的面板大小由渲染层右下角那个把手驱动（见第 7 节）。
+ * 尺寸与球心的唯一权威是 `entry.panel` / `entry.center`，落盘走 `savePositions`。
+ *
  * ## 透明窗口的三条约束
  *
  * 1. **`transparent: true` 必须配 `frame: false`**，两者一起才有意义。
  * 2. **必须给 `backgroundColor: '#00000000'`**。不给的话 Windows 上会填一层
  *    不透明底色，表现为"球外面套了个方块"。
- * 3. **不能开 `resizable`**。用户拖窗口边缘把球拉成长方形之后，里面那个圆
- *    要么被裁掉要么留白 —— 两种都不是球。尺寸只由我们按展开/收起改。
+ * 3. **不能开 `resizable`**。理由见上一节 —— 球形态下用户拖窗口边缘会把圆
+ *    拉成长方形，而面板形态我们自己画把手，比系统那圈看不见的边框更准。
  */
 
 const path = require('path');
@@ -65,8 +71,13 @@ const MARGIN = 8;
 const ORB_DEFS = {
     sniff: {
         title: '资源嗅探',
-        /** 展开态尺寸。按内容定：列表每行两行文字，520 能放约 8 条 */
+        /**
+         * 展开态的**初始**尺寸。用户可以拖右下角改，改完存下来 ——
+         * 真正的当前尺寸在 `entry.panel` 里，这里只是第一次开面板时用的值。
+         */
         panel: { w: 380, h: 520 },
+        /** 能拖到的最小尺寸。再窄列表行就挤成一团，再矮就只剩标题栏 */
+        panelMin: { w: 300, h: 320 },
         /** 默认位置：右下角 */
         defaultCorner: 'bottom-right',
     },
@@ -74,6 +85,8 @@ const ORB_DEFS = {
         title: 'Agent',
         /** 对话比嗅探列表高：要留出输入框与多轮消息 */
         panel: { w: 440, h: 640 },
+        /** 比嗅探宽：顶部那排标签页在 360 以下会折成两行 */
+        panelMin: { w: 360, h: 400 },
         /** 默认位置：右侧中部偏下。与嗅探球错开，否则两个球完全重叠 */
         defaultCorner: 'right',
     },
@@ -86,30 +99,45 @@ const ORB_IDS = Object.keys(ORB_DEFS);
 /* ========================================================================== */
 
 /**
- * 位置存 userData 下的一个 JSON，不用 electron-store 之类的依赖。
+ * 几何存 userData 下的一个 JSON，不用 electron-store 之类的依赖。
  *
- * 存的是**球心**而不是左上角：展开时球心不动、面板围着它铺开，
+ * 一条记录是 `{ x, y, w, h }`：球心 + 面板尺寸。
+ *
+ * 位置存的是**球心**而不是左上角：展开时球心不动、面板围着它铺开，
  * 收起时回到同一个球心。存左上角的话展开一次位置就漂了 —— 因为展开态的
- * 左上角与球形态的左上角不是同一个点。
+ * 左上角与球形态的左上角不是同一个点。尺寸则是用户拖右下角把手定下来的。
+ *
+ * 加入尺寸之前的记录只有 `{ x, y }`，读进来 `w`/`h` 是 undefined ——
+ * `clampPanel` 按默认尺寸兜底，位置照旧生效。所以文件名不变、也不需要迁移：
+ * 缺字段就是"这个球还没被调过大小"。
  */
 const positionsFile = () => path.join(require('electron').app.getPath('userData'), 'orb-positions.json');
 
+/** id → { x, y, w, h }。w/h 可能缺失，见上面 */
 let positions = {};
 
 const loadPositions = () => {
     try {
         positions = JSON.parse(fs.readFileSync(positionsFile(), 'utf8')) || {};
     } catch {
-        // 首次运行或文件损坏：用默认位置，不报错
+        // 首次运行或文件损坏：用默认几何，不报错
         positions = {};
     }
 };
 
-const savePositions = () => {
+/**
+ * 落盘，**唯一的写入口**。
+ *
+ * 拖动与缩放各改各的字段（`entry.center` / `entry.panel`），存的时候统一
+ * 从这里读。两处各拼一份 JSON 的话，后写的那个会把先写的那个的字段抹掉 ——
+ * 表现为"挪一下位置，之前调好的尺寸就回去了"。
+ */
+const savePositions = (id, entry) => {
+    positions[id] = { ...entry.center, ...entry.panel };
     try {
         fs.writeFileSync(positionsFile(), JSON.stringify(positions, null, 2), 'utf8');
     } catch {
-        // 写不进去最多是下次启动位置复位，不值得打断用户
+        // 写不进去最多是下次启动几何复位，不值得打断用户
     }
 };
 
@@ -128,6 +156,27 @@ const workAreaFor = (point) => {
 };
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), Math.max(min, max));
+
+/**
+ * 把一组尺寸收敛成这个球合法的面板尺寸。
+ *
+ * 上下限在这里收口，**不与渲染层的把手尺寸重复**：把手只是"哪里能抓"，
+ * 能拖到多小多大由主进程说了算 —— 工作区与最小尺寸都是只有主进程才知道的事实。
+ *
+ * 每次展开都重新过一遍：分辨率变小或显示器拔掉之后，上次那个 900×1400 的
+ * 面板会比工作区还大，而 `frameFor` 只保证左上角在屏内 —— 右下角连同缩放
+ * 把手一起被推到屏幕外，用户既看不到内容也拖不回来。
+ */
+const clampPanel = (id, size, workArea) => {
+    const def = ORB_DEFS[id];
+    const min = def.panelMin;
+    const maxW = Math.max(min.w, (workArea?.width ?? 1920) - MARGIN * 2);
+    const maxH = Math.max(min.h, (workArea?.height ?? 1080) - MARGIN * 2);
+    return {
+        w: Math.round(clamp(Number(size?.w) || def.panel.w, min.w, maxW)),
+        h: Math.round(clamp(Number(size?.h) || def.panel.h, min.h, maxH)),
+    };
+};
 
 /**
  * 把"球心 + 尺寸"收敛成一个合法的工作区坐标。
@@ -173,11 +222,14 @@ const defaultCenter = (id, workArea) => {
 /* 4. 窗口                                                                    */
 /* ========================================================================== */
 
-/** id → { win, open, center } */
+/** id → { win, open, center, panel } */
 const orbs = new Map();
 
 /** 拖动开始时的抓取偏移，屏幕坐标 → 窗口左上角的差 */
 const grabOffsets = new Map();
+
+/** 缩放开始时的锚点偏移，屏幕坐标 → 窗口左上角的差。与拖动分开，见第 7 节 */
+const resizeAnchors = new Map();
 
 const isDev = () => !require('electron').app.isPackaged;
 
@@ -213,7 +265,11 @@ const createOrb = (id) => {
         transparent: true,
         // 不给这个的话 Windows 会填一层不透明底色，球外面套一个方块
         backgroundColor: '#00000000',
-        // 关掉用户改尺寸：把球拉成长方形之后里面的圆不是被裁就是留白
+        /*
+         * 始终关着。球形态下用户拖窗口边缘会把圆拉成长方形；面板形态下
+         * 大小的入口是渲染层右下角那个把手（见第 7 节），不经过窗口边框 ——
+         * 两种形态都不需要系统这圈热区。
+         */
         resizable: false,
         maximizable: false,
         minimizable: false,
@@ -240,7 +296,7 @@ const createOrb = (id) => {
         },
     });
 
-    const entry = { win, open: false, center };
+    const entry = { win, open: false, center, panel: clampPanel(id, saved, area) };
     orbs.set(id, entry);
 
     const url = orbUrl(id);
@@ -268,14 +324,24 @@ const createOrb = (id) => {
 const setOpen = (id, open) => {
     const entry = orbs.get(id);
     if (!entry) return;
-    const def = ORB_DEFS[id];
-    const size = open ? def.panel : { w: BALL_SIZE, h: BALL_SIZE };
 
     // 展开时以球心为中心铺开：球在哪，面板就从哪长出来
     const current = entry.win.getBounds();
     const center = { x: current.x + current.width / 2, y: current.y + current.height / 2 };
-
     const area = workAreaFor(center);
+
+    /*
+     * 尺寸的唯一权威是 `entry.panel`（初值来自落盘，见 createOrb），不是 ORB_DEFS。
+     *
+     * 用户拖过右下角之后面板就不该再弹回默认尺寸 —— 每次开面板都从 ORB_DEFS
+     * 取的话，调整只在当次会话里有效，收起再展开就复位。拖动与缩放两条路径
+     * 也读同一个字段，三处各算一份必然会漂。
+     *
+     * 展开时重新过一遍 `clampPanel`：换到更小的显示器上再展开时，上次存下的
+     * 尺寸要当场收敛，而不是等下次重启。
+     */
+    const size = open ? (entry.panel = clampPanel(id, entry.panel, area)) : { w: BALL_SIZE, h: BALL_SIZE };
+
     entry.win.setBounds(frameFor(center, size, area));
     /*
      * 改完尺寸**重申一次置顶**，而不是按 open 切换它。
@@ -327,8 +393,10 @@ const registerDrag = () => {
         const grab = grabOffsets.get(id);
         if (!entry || !grab) return;
 
+        // 展开态用 `entry.panel` 而不是 ORB_DEFS：拖过右下角之后，
+        // 从默认尺寸取会把用户调好的面板在拖动第一帧就打回原形
         const size = entry.open
-            ? ORB_DEFS[id].panel
+            ? entry.panel
             : { w: BALL_SIZE, h: BALL_SIZE };
         const target = { x: point.x - grab.x, y: point.y - grab.y };
         // 拖动时按窗口左上角直接落位，不做球心收敛 —— 那样手感会发飘
@@ -349,9 +417,115 @@ const registerDrag = () => {
         if (!entry) return;
         const b = entry.win.getBounds();
         entry.center = { x: b.x + b.width / 2, y: b.y + b.height / 2 };
-        positions[id] = entry.center;
-        savePositions();
+        savePositions(id, entry);
     });
+};
+
+/* ========================================================================== */
+/* 7. 缩放                                                                    */
+/* ========================================================================== */
+
+/**
+ * 面板大小由渲染层右下角那个把手驱动，走 IPC 让主进程改窗口。
+ *
+ * ## 为什么不用 `resizable: true` 让系统画边框
+ *
+ * 透明窗口的边框命中区在 Windows 上不可靠：`transparent: true` 的窗口没有
+ * 非客户区，系统那圈 4~8px 的缩放热区**画不出来也测不准**，实测常常是
+ * "抓不住"或者"抓到了但拖不动"。而且面板贴边处全是按钮（标题栏的收起、
+ * 列表行尾的下载），一条看不见的热区会把它们的点击抢走。
+ *
+ * 自己画把手则命中区就是我们画的那块三角形，位置、层级、光标全在掌控里。
+ *
+ * ## 缩放与拖动必须是两套状态
+ *
+ * 共用一套 `grabOffsets` 的话，"拖到一半又去抓把手"会让两条路径互相改写
+ * 对方的基准点，窗口会跳。所以下面用 `resizeAnchors` 单独记一份。
+ */
+const registerResize = () => {
+    ipcMain.on('orb:resize-start', (event, point) => {
+        const id = idOfSender(event);
+        if (!id) return;
+        const entry = orbs.get(id);
+        // 球形态没有把手，收到就是异常状态，直接忽略
+        if (!entry || !entry.open) return;
+        const b = entry.win.getBounds();
+        /*
+         * 记的是**按下那一刻的完整基准**：指针位置 + 窗口矩形。
+         *
+         * 不能只记"指针 − 尺寸"这类差值：把手有 16px 宽，指针落在把手里的
+         * 哪个像素是不确定的，用差值反推左上角会差出最多 16px ——
+         * 表现为"一按下，面板先跳一下"。记原始值则是纯粹的增量，
+         * 按下那一刻位移为 0，一点都不会动。
+         */
+        resizeAnchors.set(id, {
+            pointer: { x: point.x, y: point.y },
+            frame: { x: b.x, y: b.y, width: b.width, height: b.height },
+        });
+    });
+
+    ipcMain.on('orb:resize-move', (event, point) => {
+        const id = idOfSender(event);
+        if (!id) return;
+        const entry = orbs.get(id);
+        const anchor = resizeAnchors.get(id);
+        if (!entry || !anchor) return;
+
+        const frame = frameForResize(id, point, anchor);
+        entry.panel = { w: frame.width, h: frame.height };
+        entry.win.setBounds(frame);
+    });
+
+    ipcMain.on('orb:resize-end', (event) => {
+        const id = idOfSender(event);
+        if (!id) return;
+        resizeAnchors.delete(id);
+        const entry = orbs.get(id);
+        if (!entry) return;
+        const b = entry.win.getBounds();
+        entry.center = { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+        savePositions(id, entry);
+    });
+};
+
+/**
+ * 一次缩放的目标矩形。
+ *
+ * ## 尺寸 = 起始尺寸 + 指针位移
+ *
+ * 右下角的把手，语义就是"右边缘与下边缘跟着指针走"。用增量而不是
+ * "指针 − 某原点"，是为了让按下那一刻位移恰好为 0（见 resize-start 的注释）。
+ *
+ * ## 为什么必须允许窗口整体左移/上移
+ *
+ * 球的默认位置是**右下角**，而面板是围着球心铺开的，也就是面板的右边缘
+ * 一开始就贴着工作区右缘。这时如果死钉左上角，可增长的空间是 0 ——
+ * 用户会看到"把手拖得动，面板一动不动"。
+ *
+ * 所以贴边之后改成**整窗平移**：先把尺寸撑到指针要的大小，再把窗口整体
+ * 收敛回工作区。表现是"面板顶到屏幕右边后继续往右拖，它向左长" ——
+ * 和拖一个已经贴边的普通窗口一致。每次都从基准重算，往回拖会原路跟回来，
+ * 不会累积偏移。
+ *
+ * 与 `clampPanel` 分开：那个的参照系是工作区本身（展开时的整体收敛），
+ * 这个的参照系是**指针**（缩放时要跟手）。
+ */
+const frameForResize = (id, point, anchor) => {
+    const def = ORB_DEFS[id];
+    const { frame: from, pointer } = anchor;
+    const area = workAreaFor({ x: from.x + from.width / 2, y: from.y + from.height / 2 });
+
+    // 面板永远不该比工作区还大，否则把手会被挤出屏幕
+    const maxW = Math.max(def.panelMin.w, area.width - MARGIN * 2);
+    const maxH = Math.max(def.panelMin.h, area.height - MARGIN * 2);
+    const width = Math.round(clamp(from.width + (point.x - pointer.x), def.panelMin.w, maxW));
+    const height = Math.round(clamp(from.height + (point.y - pointer.y), def.panelMin.h, maxH));
+
+    // 装不下时整体平移，而不是裁尺寸 —— 裁尺寸会让指针与边缘脱钩
+    const x = Math.round(clamp(from.x, area.x + MARGIN, area.x + area.width - MARGIN - width));
+    const y = Math.round(clamp(from.y, area.y + MARGIN, area.y + area.height - MARGIN - height));
+
+    return { x, y, width, height };
 };
 
 /**
@@ -374,6 +548,7 @@ const idOfSender = (event) => {
 const createOrbs = () => {
     loadPositions();
     registerDrag();
+    registerResize();
     for (const id of ORB_IDS) createOrb(id);
 };
 
@@ -411,6 +586,10 @@ const entriesForBroadcast = () => [...orbs.entries()].filter(([, entry]) => !ent
  *
  * 同理 `isResizable` / `isMovable`：它们是窗口管理器的实际状态，
  * 渲染层看不到，而"用户把球拉成长方形"这类故障恰恰只能从这里查。
+ *
+ * `panel` 是**内存里的权威尺寸**，与 `bounds` 不一定相同：`bounds` 是窗口
+ * 管理器回读的事实，`panel` 是我们记下来给下次展开用的。缩放自检要同时看
+ * 这两个 —— 只看 `bounds` 说明不了"调完再收起展开还在不在"。
  */
 const windowInfo = (id) => {
     const entry = orbs.get(id);
@@ -421,6 +600,7 @@ const windowInfo = (id) => {
         id,
         bounds,
         open: entry.open,
+        panel: { ...entry.panel },
         isAlwaysOnTop: win.isAlwaysOnTop(),
         isResizable: win.isResizable(),
         isMovable: win.isMovable(),
@@ -440,4 +620,8 @@ module.exports = {
     BALL_SIZE,
     ORB_DEFS,
     ORB_IDS,
+    // 纯几何，给 test/mainstatic.test.js 直接调用。它们不碰 Electron API，
+    // 所以能在 Node 里跑 —— 而"缩放算得对不对"正是最容易悄悄错掉的一处。
+    clampPanel,
+    frameForResize,
 };
