@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentMessage, AgentScript, AgentUsage, HeaderRule, TamperRule } from '../../../shared/meta';
 import { exportAgentSession } from '../../../shared/core';
 import { OrbShell } from './OrbShell';
@@ -166,24 +166,42 @@ export const AgentOrb = () => {
     }, [connected, isDataTab]);
 
     /**
-     * 保存规则。
+     * 保存规则（去抖）。
      *
-     * `tamper-set` 会同时落盘并**立刻对当前标签页注入一次** —— 不注入的话，
-     * 用户改完规则回到页面上什么都没发生，而面板显示"已保存"。
+     * ## 为什么必须去抖
+     *
+     * 输入框是受控的，每敲一个字符就会调到这里。而 `tamper-set` 不只是写一次
+     * 存储 —— 它还会 `chrome.scripting.executeScript` 把整个钩子**重新注入页面**。
+     * 不去抖的话，打一个 "is_vip" 就是 6 次脚本注入，每敲一下卡一下。
+     *
+     * 400ms：够短到用户松手就生效，够长到一次连续输入只落一次。
+     * 界面**立刻**更新（下面那行 setRules），所以去抖不影响手感。
      */
-    const saveRules = useCallback(async (next: typeof rules) => {
-        // 先更新本地视图：输入框是受控的，不等往返就画出来才不会卡顿
+    const saveTimer = useRef<number | null>(null);
+
+    const saveRules = useCallback((next: typeof rules) => {
         setRules(next);
         setError('');
-        try {
-            const result = await bridge<{ saved: boolean }>('tamper-set', next);
-            setRulesSaved(result.saved);
-            setConnected(true);
-        } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
-            setRulesSaved(false);
-            setConnected(await bridgeConnected());
-        }
+        if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
+        saveTimer.current = window.setTimeout(() => {
+            saveTimer.current = null;
+            void (async () => {
+                try {
+                    const result = await bridge<{ saved: boolean }>('tamper-set', next);
+                    setRulesSaved(result.saved);
+                    setConnected(true);
+                } catch (e) {
+                    setError(e instanceof Error ? e.message : String(e));
+                    setRulesSaved(false);
+                    setConnected(await bridgeConnected());
+                }
+            })();
+        }, 400);
+    }, []);
+
+    /* 卸载时取消在途的保存：球窗口关掉之后那个定时器还会跑一次，而它没有意义 */
+    useEffect(() => () => {
+        if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
     }, []);
 
     /** 发一个动作给引擎 */
@@ -346,7 +364,7 @@ export const AgentOrb = () => {
                             {droppedHint(rules)}
                         </div>
                     )}
-                    <RulesTab rules={rules} onChange={(next) => void saveRules(next)} />
+                    <RulesTab rules={rules} onChange={saveRules} />
                     <SaveHint saved={rulesSaved} />
                 </div>
             )}
@@ -358,7 +376,7 @@ export const AgentOrb = () => {
                             {droppedHint(rules)}
                         </div>
                     )}
-                    <HeadersTab headers={rules.headerRules} onChange={(headerRules) => void saveRules({ ...rules, headerRules })} />
+                    <HeadersTab headers={rules.headerRules} onChange={(headerRules) => saveRules({ ...rules, headerRules })} />
                     <SaveHint saved={rulesSaved} />
                 </div>
             )}
