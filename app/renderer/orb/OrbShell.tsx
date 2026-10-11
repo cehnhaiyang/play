@@ -126,12 +126,21 @@ export const OrbShell = ({ icon, accent, label, hint, toolbar, children }: OrbSh
                 title={`${label} · ${hint}`}
             >
                 <div className="relative h-full w-full rounded-full">
-                    {/* 呼吸光晕。只补间 scale，opacity 留给 hover */}
+                    {/*
+                     * 呼吸光晕。
+                     *
+                     * 用 `.orb-halo`（mask 径向淡出）而不是 `blur-*`：
+                     * blur 会向外扩散到窗口之外并被裁成直角，球外面就会
+                     * 出现一个方块。见 orb.css 里那段说明。
+                     *
+                     * 它铺满整个窗口而不是 `inset-*` —— 淡出位置由 mask 控制，
+                     * 不需要靠 inset 躲开边界。
+                     */}
                     <span
-                        className={`animate-orb-breath pointer-events-none absolute inset-1 rounded-full bg-gradient-to-br ${accent} opacity-45 blur-md`}
+                        className={`orb-halo animate-orb-breath pointer-events-none absolute inset-0 rounded-full bg-gradient-to-br ${accent} opacity-70`}
                     />
-                    <span className={`absolute inset-1.5 rounded-full bg-gradient-to-br ${accent} opacity-95`} />
-                    <span className="orb-specular pointer-events-none absolute inset-1.5 rounded-full" />
+                    <span className={`absolute inset-2 rounded-full bg-gradient-to-br ${accent} opacity-95`} />
+                    <span className="orb-specular pointer-events-none absolute inset-2 rounded-full" />
                     <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-white drop-shadow-[0_2px_6px_rgba(0,0,0,0.65)]">
                         {icon}
                     </span>

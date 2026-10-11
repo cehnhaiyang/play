@@ -63,12 +63,49 @@
         transform: scale(1);
     }
     50% {
-        transform: scale(1.08);
+        transform: scale(1.06);
     }
 }
 
 .animate-orb-breath {
     animation: orb-breath 3.5s ease-in-out infinite;
+}
+
+/*
+ * 柔光：靠 mask 的径向淡出，**不用 blur 滤镜**。
+ *
+ * ## 为什么不能用 blur
+ *
+ * `blur()` 会把内容向元素**外**扩散，而球窗口只有 64×64。扩散到窗口边界
+ * 之外的部分会被窗口**裁掉**，裁出来的是一条直角边 —— 于是球外面套了一个
+ * 淡淡的方块。
+ *
+ * 这个故障在 DOM 里完全看不出来（DOM 里就是一个 `rounded-full` 的 span，
+ * 永远"正确"），只有截屏看像素才会发现。而且它和窗口大小耦合：把球改大、
+ * 把 blur 调大、或把呼吸动画的幅度调大，任何一项都会让它重新出现。
+ *
+ * ## mask 为什么不会
+ *
+ * 径向渐变在**元素内部**就淡到全透明，元素之外什么都没有 ——
+ * 物理上不存在"被裁掉的内容"。所以它对窗口尺寸、动画幅度都不敏感。
+ *
+ * 68% 这个位置是按窗口算的：元素铺满 64px（半径 32），
+ * 68% 即 21.8px 处已全透明，距窗口边缘还有 10px 余量。
+ * 光晕只画到球体边缘内侧，不越界。
+ */
+.orb-halo {
+    -webkit-mask-image: radial-gradient(
+        circle at 50% 50%,
+        #000 0%,
+        rgba(0, 0, 0, 0.6) 40%,
+        transparent 68%
+    );
+    mask-image: radial-gradient(
+        circle at 50% 50%,
+        #000 0%,
+        rgba(0, 0, 0, 0.6) 40%,
+        transparent 68%
+    );
 }
 
 /* 晶透外壳的高光弧：一条静态渐变，不需要动画 */
