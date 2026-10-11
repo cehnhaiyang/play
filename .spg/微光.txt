@@ -1,6 +1,7 @@
 # ============================================================================
 #  《广板 · 微光》 Largo in C minor
-#  Cm–Ab–Eb–Bb | 64 BPM | 一小节 = 3.75s | 4 小节一轮，共 4 轮 ≈ 64s
+#  Cm–Ab–Eb–Bb | 64 BPM | 一小节 = 3.75s | 全曲 16 小节 = 60s（另有 6.5s 混响尾）
+#  四轮各 4 小节：Ⅰ 陈述 → Ⅱ 旋律进入 → Ⅲ 高点（声部上移）→ Ⅳ 收束（终止式）
 # ============================================================================
 
 config {
@@ -9,13 +10,12 @@ config {
 }
 
 # --- 毡音钢琴：全曲核心 -----------------------------------------------------
-# 关键修正：旧版 lowpass(350) 低于音符基频(C4=261/Eb4=311)，把音本身滤没了。
-# 现用 1500Hz 保留木质共鸣。sustain 从 0.9 改回 0.05 —— 钢琴靠衰减成形，
-# sustain=0.9 会变成风琴。
+# lowpass 必须高于音符基频（C4=261Hz / Eb4=311Hz），否则音本身被滤没；1500Hz
+# 保留木质共鸣。sustain=0.05：钢琴靠衰减成形，sustain 高了会变成风琴。
 define_instrument(name="felt_piano") {
   preset: "piano"
   wave: "sine"
-  fm_index: 95                  # 预设 180 太亮，减半去掉琴槌高频"咔"声
+  fm_index: 95                  # 预设 180 偏亮，压到 95 去掉琴槌高频"咔"声
   filter: lowpass(1500, 0.6)
   filter_envelope: adsr(0.02, 0.9, 0.2, 0.5)   # 起音 20ms，避免滤波器瞬开产生敲击感
   filter_env_amount: 1800
@@ -48,7 +48,7 @@ define_instrument(name="deep_pad") {
   envelope: adsr(0.9, 0.9, 0.78, 4.0, curve=linear)
   filter: lowpass(240, 0.9)
   lfo: sine(freq=0.06, amount=55, target=filter, ramp=3.0)
-  loop_point: 1.8               # 每 1.8s 换一次"弓"，长音有呼吸
+  loop_point: 1.8               # 1n 长音切成两段、每段约 1.9s 重新起音，长音有换弓的呼吸
   gain: 0.55
   pan: 0.0
 }
@@ -65,7 +65,7 @@ define_instrument(name="string_bed") {
 # --- 定音鼓：新增，庄严的脉搏 -----------------------------------------------
 define_instrument(name="timpani_drum") {
   preset: "timpani"
-  pitch_env_amount: 6           # 鼓皮张力下坠，定音鼓区别于正弦低频的关键
+  pitch_env_amount: 6           # 起音高 6 半音、0.09s 内坠回基音——鼓皮张力下坠，定音鼓区别于正弦低频的关键
   pitch_decay: 0.09
   envelope: perc(0.002, 1.4, 0.8)
   gain: 0.6
@@ -73,9 +73,14 @@ define_instrument(name="timpani_drum") {
 }
 
 # ===========================================================================
-# 音序（全部 4 小节 = 15s，loop 才能整齐叠合）
+# 音序：每段固定 4 小节 = 16 拍 = 15s，mix 的 time 才能按小节边界对齐。
+# 和声骨架（Cm–Ab–Eb–Bb）由铺底承担并贯穿三轮；上方的弦乐/琶音/旋律
+# 逐轮换新素材，发展不靠 loop 复述。
 # ===========================================================================
 
+# --- 第 1-2 轮素材 -----------------------------------------------------------
+
+# 低音是全曲的不动层：只换根音、不动音区，让上方声部的发展有可对照的地面
 sequence(name="deep_drone", instrument="deep_pad", gain=0.9) {
   note("C2",  "1n", velocity=0.75)
   note("Ab1", "1n", velocity=0.68)
@@ -84,15 +89,15 @@ sequence(name="deep_drone", instrument="deep_pad", gain=0.9) {
 }
 
 # 声部进行：C3-C3-Bb2-Bb2 / Eb3-Eb3-Eb3-D3 / G3-Ab3-G3-F3 / C4-C4-Bb3-Bb3
-sequence(name="string_bed", instrument="string_bed", gain=0.7) {
+sequence(name="strings_a", instrument="string_bed", gain=0.7) {
   chord(["C3",  "Eb3", "G3",  "C4"],  "1n", strum=0.15)
   chord(["C3",  "Eb3", "Ab3", "C4"],  "1n", strum=0.15)
   chord(["Bb2", "Eb3", "G3",  "Bb3"], "1n", strum=0.15)
   chord(["Bb2", "D3",  "F3",  "Bb3"], "1n", strum=0.15)
 }
 
-# pattern="up" 现在真正按音高排序，写法顺序可以随意
-sequence(name="piano_arps", instrument="felt_piano", gain=0.7, humanize=0.22) {
+# pattern="up" 按音高排序（非书写顺序），音池按上行书写即可
+sequence(name="arps_a", instrument="felt_piano", gain=0.7, humanize=0.22) {
   arp(chord=["C3",  "Eb3", "G3",  "Bb3"], pattern="up", rate="8n", duration="1n")
   arp(chord=["Ab2", "C3",  "Eb3", "Ab3"], pattern="up", rate="8n", duration="1n")
   arp(chord=["Eb3", "G3",  "Bb3", "D4"],  pattern="up", rate="8n", duration="1n")
@@ -100,7 +105,7 @@ sequence(name="piano_arps", instrument="felt_piano", gain=0.7, humanize=0.22) {
 }
 
 # velocity 做出拱形力度：起句偏弱 → 第 3 小节高点 → 收句回落
-sequence(name="piano_melody", instrument="felt_piano", gain=1.0, humanize=0.26) {
+sequence(name="melody_a", instrument="felt_piano", gain=1.0, humanize=0.26) {
   rest("4n")
   note("C4",  "2n", velocity=0.72, gate=1.05)
   note("Bb3", "4n", velocity=0.60)
@@ -114,7 +119,7 @@ sequence(name="piano_melody", instrument="felt_piano", gain=1.0, humanize=0.26) 
   note("Bb3", "1n", velocity=0.62, gate=1.15)
 }
 
-sequence(name="glass_glimmer", instrument="glass_glimmer", gain=0.8, humanize=0.3) {
+sequence(name="glass_a", instrument="glass_glimmer", gain=0.8, humanize=0.3) {
   rest("1n")
   rest("2n")
   note("Eb4", "2n", velocity=0.7, pan=-0.4)
@@ -123,30 +128,126 @@ sequence(name="glass_glimmer", instrument="glass_glimmer", gain=0.8, humanize=0.
   rest("2n")
 }
 
-sequence(name="timpani_pulse", instrument="timpani_drum", gain=0.85) {
+sequence(name="timpani_a", instrument="timpani_drum", gain=0.85) {
   note("C2",  "1n", velocity=0.9)
   note("Ab1", "1n", velocity=0.72)
   note("Eb2", "1n", velocity=0.84)
   note("Bb1", "1n", velocity=0.78)
 }
 
+# --- 第 3 轮素材：高点。弦乐转第一转位、整体抬高三度，琶音上移一个八度并改
+# 波浪轮廓（upDown 的 4 音池序是 0-1-2-3-2-1 共 6 步，8 个八分音符回绕到池首，
+# 轮廓区别于 arps_a 的直线上行），定音鼓改同音双击加密脉搏 -------------------
+
+sequence(name="strings_b", instrument="string_bed", gain=0.7) {
+  chord(["Eb3", "G3",  "C4", "Eb4"], "1n", strum=0.15)   # Cm/Eb
+  chord(["Eb3", "Ab3", "C4", "Eb4"], "1n", strum=0.15)   # Ab/Eb
+  chord(["G3",  "Bb3", "Eb4", "G4"], "1n", strum=0.15)   # Eb/G
+  chord(["F3",  "Bb3", "D4",  "F4"], "1n", strum=0.15)   # Bb/F
+}
+
+sequence(name="arps_b", instrument="felt_piano", gain=0.75, humanize=0.22) {
+  arp(chord=["C4",  "Eb4", "G4",  "Bb4"], pattern="upDown", rate="8n", duration="1n")
+  arp(chord=["Ab3", "C4",  "Eb4", "Ab4"], pattern="upDown", rate="8n", duration="1n")
+  arp(chord=["Eb4", "G4",  "Bb4", "D5"],  pattern="upDown", rate="8n", duration="1n")
+  arp(chord=["Bb3", "D4",  "F4",  "Bb4"], pattern="upDown", rate="8n", duration="1n")
+}
+
+# 全曲力度顶点：Ab4 velocity=0.9（顶到 0.9 而非 1.0，给钳制留余量）
+sequence(name="melody_b", instrument="felt_piano", gain=1.0, humanize=0.26) {
+  rest("4n")
+  note("G4",  "2n", velocity=0.88, gate=1.05)
+  note("Eb4", "4n", velocity=0.74)
+
+  note("Ab4", "2n.", velocity=0.9, gate=1.05)
+  note("G4",  "4n", velocity=0.72)
+
+  note("Bb4", "2n", velocity=0.8)
+  note("G4",  "2n", velocity=0.66)
+
+  note("F4",  "1n", velocity=0.7, gate=1.1)
+}
+
+sequence(name="timpani_b", instrument="timpani_drum", gain=0.85) {
+  note("C2",  "2n", velocity=0.9)
+  note("C2",  "2n", velocity=0.55)
+  note("Ab1", "1n", velocity=0.72)
+  note("Eb2", "2n", velocity=0.85)
+  note("Eb2", "2n", velocity=0.5)
+  note("Bb1", "1n", velocity=0.75)
+}
+
+# --- 第 4 轮素材：收束。琶音退场，和声走 Ab–Bb–Cm 终止，
+# 末音用 gate 拖过小节线、渗进混响尾，而不是让声部自然耗尽 -------------------
+
+sequence(name="drone_end", instrument="deep_pad", gain=0.9) {
+  note("C2",  "1n", velocity=0.70)
+  note("Ab1", "1n", velocity=0.62)
+  note("Bb1", "1n", velocity=0.60)
+  note("C2",  "1n", velocity=0.72, gate=1.4)
+}
+
+sequence(name="strings_end", instrument="string_bed", gain=0.7) {
+  chord(["C3",  "Eb3", "G3",  "C4"],  "1n", strum=0.2)
+  chord(["C3",  "Eb3", "Ab3", "C4"],  "1n", strum=0.2)
+  chord(["Bb2", "D3",  "F3",  "Bb3"], "1n", strum=0.2)
+  chord(["C3",  "G3",  "C4",  "Eb4"], "1n", strum=0.3, gate=1.5)  # 开放排列的 Cm，末三音悬在上方
+}
+
+sequence(name="melody_end", instrument="felt_piano", gain=1.0, humanize=0.26) {
+  rest("2n")
+  note("G3",  "2n", velocity=0.6)
+  note("Ab3", "1n", velocity=0.62)
+  note("F3",  "2n", velocity=0.55)
+  note("G3",  "2n", velocity=0.5)
+  note("C4",  "1n", velocity=0.68, gate=1.4)   # 落回主音，长音收在混响里
+}
+
+sequence(name="timpani_end", instrument="timpani_drum", gain=0.85) {
+  note("C2",  "1n", velocity=0.78)
+  rest("1n")
+  note("Bb1", "1n", velocity=0.6)
+  note("C2",  "1n", velocity=0.7)              # 终止和弦下最后一记轻击
+}
+
+sequence(name="glass_end", instrument="glass_glimmer", gain=0.8, humanize=0.3) {
+  rest("3m")
+  note("Eb5", "2n", velocity=0.5)              # 三音浮在终止和弦上方，微光最后一下
+  rest("2n")
+}
+
 # ===========================================================================
 # 全局效果链：均衡 → 延迟 → 混响
 # ===========================================================================
 effect_chain {
-  eq(low=-4, mid=0.5, high=2)                              # 收敛 200Hz 以下的泥浆
+  eq(low=-4, mid=0.5, high=2)                              # lowshelf 在 250Hz，收敛低频泥浆
   delay(time="8n.", feedback=0.42, mix=0.26, damping=2400) # 锁在附点八分(0.703s)
-  reverb(decay=6.5, mix=0.42, pre_delay=0.03, damping=3800) # 旧版 8s/0.5 会糊掉颗粒感
+  reverb(decay=6.5, mix=0.42, pre_delay=0.03, damping=3800) # decay 再大或 mix 再高会糊掉钢琴颗粒感
 }
 
 # ===========================================================================
-# 混音编排：0-15s 引子只有铺底+琶音，旋律第 2 轮进入，微光第 3 小节起
+# 混音编排（时间轴单位：小节，1m = 4 拍 = 3.75s）
+#   0–8m    第 1-2 轮：陈述 → 旋律进入（骨架 loop 两遍，上方声部换素材）
+#   8–12m   第 3 轮：高点，全部换 *_b 素材
+#   12–16m  第 4 轮：收束，琶音退场、终止式、末音渗入混响尾
 # ===========================================================================
 mix {
-  track(source="deep_drone",    time=0,    loop=4)
-  track(source="string_bed",    time=0,    loop=4)
-  track(source="piano_arps",    time=0,    loop=4)
-  track(source="timpani_pulse", time=0,    loop=4)
-  track(source="glass_glimmer", time="2m", loop=3)
-  track(source="piano_melody",  time="4m", loop=3)
+  # 第 1-2 轮
+  track(source="deep_drone",  time=0,    loop=3)   # 低音三轮不动，是发展的参照地面
+  track(source="strings_a",   time=0,    loop=2)
+  track(source="arps_a",      time=0,    loop=2)
+  track(source="timpani_a",   time=0,    loop=2)
+  track(source="glass_a",     time="2m", loop=2)
+  track(source="melody_a",    time="4m")
+  # 第 3 轮：高点
+  track(source="strings_b",   time="8m")
+  track(source="arps_b",      time="8m")
+  track(source="melody_b",    time="8m")
+  track(source="timpani_b",   time="8m")
+  # 第 4 轮：收束
+  track(source="drone_end",   time="12m")
+  track(source="strings_end", time="12m")
+  track(source="melody_end",  time="12m")
+  track(source="timpani_end", time="12m")
+  track(source="glass_end",   time="12m")
 }
