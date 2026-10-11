@@ -1,21 +1,21 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { AgentMessage, AgentState, AgentUsage } from '../../../shared/meta';
-import type { AgentAction, BallRequest, ExtensionResponse } from '../shared/protocol';
+import type { AgentMessage, AgentUsage } from '../../../shared/meta';
 import { OrbShell } from './OrbShell';
 import { TerminalIcon } from './icons';
-import { askServiceWorker } from './SniffOrb';
+import { agentAction, bridge, bridgeConnected, formatTokens, onBridgeEvent, onBridgeStatus } from './bridge-client';
+import type { AgentAction, EngineSnapshot } from './bridge-client';
 
 /**
  * Agent 球。
  *
  * ## 它只是一个视图
  *
- * 引擎（对话历史、主循环、工具派发）在 service worker 里，模型调用在
- * offscreen 文档里。这个组件做三件事：
+ * 引擎（对话历史、主循环、工具派发）在插件的 service worker 里，模型调用在
+ * offscreen 文档里，页面执行在 chrome.debugger 上。这个窗口做三件事：
  *
- *   1. 把用户输入转成 `agent-action` 消息；
+ *   1. 把用户输入转成 `agent-action` 桥请求；
  *   2. 订阅 `agent-snapshot` 与 `agent-delta`，把引擎状态画出来；
- *   3. 在每次动作前把当前 tabId 报上去 —— 引擎靠它知道操作哪个页面。
+ *   3. 显示插件连没连上。
  *
  * ## 为什么不做乐观更新
  *
@@ -31,69 +31,64 @@ import { askServiceWorker } from './SniffOrb';
  * 一次快照就丢掉本地累积的增量 —— 两者叠加会让文字重复一遍。
  */
 
-/** 引擎推来的快照形状。与 `EngineSnapshot` 一致，这里不 import 以免把 SW 代码拖进页面 */
-type Snapshot = AgentState & { revision: number };
-
 export const AgentOrb = () => {
-    const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+    const [snapshot, setSnapshot] = useState<EngineSnapshot | null>(null);
     const [streaming, setStreaming] = useState<{ content: string; reasoning: string } | null>(null);
     const [input, setInput] = useState('');
     const [error, setError] = useState('');
+    const [connected, setConnected] = useState(true);
 
-    /* 拿一次当前快照：球可能刚随页面注入，而引擎早就跑过好几轮了 */
+    /* 桥的连接状态：查一次，之后跟着推送走。理由见 SniffOrb 同名那段 */
     useEffect(() => {
+        void (async () => setConnected(await bridgeConnected()))();
+        return onBridgeStatus(setConnected);
+    }, []);
+
+    /*
+     * 拿一次当前快照：球可能刚开，而引擎早就跑过好几轮了。
+     *
+     * 连上桥之后再取，理由见 SniffOrb 同名那段 —— 应用先起时挂载那一刻
+     * 必然失败，那条错误要能被后续成功清掉。
+     */
+    useEffect(() => {
+        if (!connected) return;
         void (async () => {
             try {
-                const res = await askServiceWorker<{ snapshot: Snapshot }>({
-                    target: 'sw',
-                    kind: 'agent-snapshot',
-                });
+                const res = await bridge<{ snapshot: EngineSnapshot }>('agent-snapshot');
                 setSnapshot(res.snapshot);
+                setError('');
             } catch (e) {
                 setError(e instanceof Error ? e.message : String(e));
             }
         })();
-    }, []);
+    }, [connected]);
 
-    useEffect(() => {
-        const onMessage = (message: {
-            target?: string;
-            kind?: string;
-            snapshot?: Snapshot;
-            delta?: { content?: string; reasoning?: string };
-        }) => {
-            if (message?.target !== 'ball') return;
-
-            if (message.kind === 'agent-snapshot' && message.snapshot) {
-                setSnapshot(message.snapshot);
-                // 快照是权威：它已经含了定稿内容，本地累积的增量必须丢掉
-                setStreaming(null);
-                return;
-            }
-
-            if (message.kind === 'agent-delta' && message.delta) {
-                setStreaming((prev) => ({
-                    content: (prev?.content || '') + (message.delta?.content || ''),
-                    reasoning: (prev?.reasoning || '') + (message.delta?.reasoning || ''),
-                }));
-            }
-        };
-        chrome.runtime.onMessage.addListener(onMessage);
-        return () => chrome.runtime.onMessage.removeListener(onMessage);
-    }, []);
+    useEffect(() => onBridgeEvent((event, payload) => {
+        if (event === 'agent-snapshot') {
+            setSnapshot(payload as EngineSnapshot);
+            // 快照是权威：它已经含了定稿内容，本地累积的增量必须丢掉
+            setStreaming(null);
+            return;
+        }
+        if (event === 'agent-delta') {
+            const delta = payload as { content?: string; reasoning?: string };
+            setStreaming((prev) => ({
+                content: (prev?.content || '') + (delta.content || ''),
+                reasoning: (prev?.reasoning || '') + (delta.reasoning || ''),
+            }));
+        }
+    }), []);
 
     /** 发一个动作给引擎 */
     const act = useCallback(async (action: AgentAction): Promise<unknown> => {
         setError('');
         try {
-            const res = await askServiceWorker<{ result: unknown }>({
-                target: 'sw',
-                kind: 'agent-action',
-                action,
-            });
-            return res.result;
+            const result = await agentAction(action);
+            setConnected(true);
+            return result;
         } catch (e) {
             setError(e instanceof Error ? e.message : String(e));
+            setConnected(await bridgeConnected());
             return null;
         }
     }, []);
@@ -135,16 +130,27 @@ export const AgentOrb = () => {
 
     return (
         <OrbShell
-            storageKey="orbPos.agent"
-            ballSize={56}
-            panelSize={{ w: 420, h: 600 }}
             label="Agent"
-            hint={busy ? '正在执行…' : `上下文 ${formatTokens(state?.usage)}`}
+            hint={
+                !connected
+                    ? '插件未连接'
+                    : busy
+                        ? '正在执行…'
+                        : `上下文 ${formatTokens(state?.usage)}`
+            }
             accent="from-fuchsia-500 via-purple-500 to-indigo-500"
             icon={<TerminalIcon className="h-6 w-6" />}
             toolbar={toolbar}
         >
-            {error && (
+            {!connected && (
+                <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-[10px] leading-relaxed text-amber-300">
+                    没有连上浏览器插件。请确认：① 浏览器已打开；② 扩展已加载；
+                    ③ 已跑过 <code className="font-mono">npm run host:install</code> 并重启过浏览器。
+                </div>
+            )}
+
+            {/* 两条横幅说同一件事，只留一条。理由见 SniffOrb 同名那段 */}
+            {error && connected && (
                 <div className="shrink-0 border-b border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-[10px] leading-relaxed text-rose-300">
                     {error}
                 </div>
@@ -292,9 +298,4 @@ const MessageRow = ({ message }: { message: AgentMessage }) => {
     );
 };
 
-/** 上下文占用显示。只给量级 —— 精确到个位的数字每秒都在变，读它没有意义 */
-const formatTokens = (usage?: AgentUsage): string => {
-    const n = usage?.contextTokens ?? 0;
-    if (n >= 1000) return `${(n / 1000).toFixed(0)}k tok`;
-    return `${n} tok`;
-};
+export type { AgentUsage };

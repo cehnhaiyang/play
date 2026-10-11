@@ -1,11 +1,10 @@
 import type { ReactNode } from 'react';
 
 /**
- * 悬浮球自己的图标。
+ * 悬浮球的图标。
  *
- * 刻意不用 `lucide-react`：这个包会被打进 content script，而它随页面一起加载 ——
- * 为一个球和两个面板图标拖进几百 KB 的图标库，代价落在每一次页面打开上。
- * 内联两个 path 更省，也不会因为图标库的版本变化而改动产物体积。
+ * 内联 path 而不用 `lucide-react`：球窗口是一个常驻的小窗口，图标库会把
+ * 它那几百 KB 的模块全带进来，而这里只用得到四个。
  */
 
 interface IconProps {
@@ -14,16 +13,7 @@ interface IconProps {
 
 /** 嗅探：同心弧，与"正在接收信号"同义 */
 export const RadarIcon = ({ className }: IconProps) => (
-    <svg
-        className={className}
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={2.2}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden="true"
-    >
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
         <path d="M4.9 19.1a10 10 0 0 1 0-14.2" />
         <path d="M7.8 16.2a6 6 0 0 1 0-8.4" />
         <path d="M10.6 13.4a2 2 0 0 1 0-2.8" />
@@ -34,31 +24,14 @@ export const RadarIcon = ({ className }: IconProps) => (
 
 /** Agent：终端提示符，与"在这里执行代码"同义 */
 export const TerminalIcon = ({ className }: IconProps) => (
-    <svg
-        className={className}
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={2.2}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden="true"
-    >
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
         <path d="M4 17l6-5-6-5" />
         <path d="M12 19h8" />
     </svg>
 );
 
 export const CloseIcon = ({ className }: IconProps) => (
-    <svg
-        className={className}
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={2.2}
-        strokeLinecap="round"
-        aria-hidden="true"
-    >
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" aria-hidden="true">
         <path d="M6 6l12 12M18 6L6 18" />
     </svg>
 );

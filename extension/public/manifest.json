@@ -8,18 +8,6 @@
     "service_worker": "service-worker.js",
     "type": "module"
   },
-  "content_scripts": [
-    {
-      "matches": [
-        "<all_urls>"
-      ],
-      "js": [
-        "content.js"
-      ],
-      "run_at": "document_idle",
-      "all_frames": false
-    }
-  ],
   "permissions": [
     "storage",
     "tabs",
@@ -28,8 +16,10 @@
     "cookies",
     "downloads",
     "debugger",
-    "offscreen"
+    "offscreen",
+    "nativeMessaging"
   ],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApYlg9kGI5ay97DzYdD5wZ2hh1D1hp/KEUeaj3k4lU7VJNKJJ7t3QtuHiqB6WMvRX+Z+8iUYdkA9Y7/uxq1GtNlAA/oyJDXeZOPMxpPnNEWBhyeSTxQHTYydj+SlVS/3Tt/C4qHTyBf9afJOaXtohBn1hClrZbH8olFiplHtTO0AHxT+oHnoGrmW3nYeQ6CnCglodTfFWCQ6L/JneNCa6dPnU2oNCPwdvilNG0PlWMGKx4VW3UYls2iUhO1S6mogbI2r7dKAJlAWECQAKNyhVuJeUP96NDTvs+3CDkKpkrfIj8vo8nZyxyX7yO5pkEWvvituQe6BZYe42eTEJ95tGlwIDAQAB",
   "host_permissions": [
     "<all_urls>"
   ]

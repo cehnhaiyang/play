@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="utf-8" />
+    <title>资源嗅探</title>
+    <!--
+        球的 CSP 比主窗口紧得多。
+
+        主窗口要放行 esm.sh、file:、以及本地 AI 服务的 http 回环，因为它自己
+        直接跑 AI 调用、直接播本地文件。球**什么都不直接请求** —— 它的数据全部
+        经 preload 过桥拿，所以这里只需要 'self' 与内联样式。
+
+        故意不写 connect-src：默认落到 default-src 'self'，也就是"球自己发不出
+        任何网络请求"。这不是省事，是把"球不直接出网"变成浏览器强制的约束 ——
+        否则将来有人在球里写一个 fetch，它会带着 Electron 的会话（含用户代理
+        配置）发出去，绕过插件的 cookie 与身份。
+    -->
+    <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
+</head>
+
+<body>
+    <div id="root"></div>
+    <script type="module" src="./sniff.tsx"></script>
+</body>
+
+</html>

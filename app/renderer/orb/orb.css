@@ -1,0 +1,112 @@
+/*
+ * 悬浮球窗口的样式。
+ *
+ * ## 与主界面那份分开的原因
+ *
+ * 主界面（index.css）的 body 有一层深色径向渐变底色，那是给 1280×800 的
+ * 正常窗口用的。球窗口是 `transparent: true` 的无边框窗口，**body 必须完全透明**
+ * —— 一旦继承那层底色，球的圆角外面就会出现一个不透明的方块，
+ * 也就是"球变成了方形"。
+ *
+ * ## 为什么不能用 Tailwind 的 preflight 去重置
+ *
+ * preflight 会把 `body { margin: 0 }` 之外的东西也一起改（比如 button 的
+ * 默认样式），那部分我们确实要。但底色这条必须显式写回来，且优先级要够。
+ * 所以这里在 @layer base 里直接写，和主界面那份同一个层级、互不干扰 ——
+ * 两份 CSS 各自只被打进自己那个页面。
+ */
+@import "tailwindcss";
+
+@layer base {
+    :root {
+        color-scheme: dark;
+    }
+
+    html,
+    body,
+    #root {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        /* 透明窗口的底色。删掉这行 → 球外面套一个方块 */
+        background: transparent;
+        overflow: hidden;
+    }
+
+    body {
+        font-family:
+            "Segoe UI",
+            "PingFang SC",
+            "Microsoft YaHei",
+            sans-serif;
+    }
+
+    * {
+        box-sizing: border-box;
+    }
+}
+
+/* ========================================================================== */
+/* 球的形态                                                                    */
+/* ========================================================================== */
+
+/*
+ * 呼吸光晕。
+ *
+ * 只补间 scale，**不补间 opacity** —— CSS 动画优先级高于普通声明，
+ * 关键帧里写了 opacity 就会把 hover 的透明度变化永久压死，
+ * 表现为"悬停没反应"。这个坑在插件那版球上踩过一次。
+ */
+@keyframes orb-breath {
+    0%,
+    100% {
+        transform: scale(1);
+    }
+    50% {
+        transform: scale(1.08);
+    }
+}
+
+.animate-orb-breath {
+    animation: orb-breath 3.5s ease-in-out infinite;
+}
+
+/* 晶透外壳的高光弧：一条静态渐变，不需要动画 */
+.orb-specular {
+    background-image: radial-gradient(circle at 32% 25%, rgba(255, 255, 255, 0.5), transparent 58%);
+}
+
+/*
+ * 展开 / 收起的形变。
+ *
+ * 只补间 border-radius 与 opacity，**不补间 width/height** ——
+ * 窗口尺寸是主进程改的（setBounds），CSS 这边补间一个由窗口决定的尺寸
+ * 只会让内容与窗口不同步，出现"面板已经展开但内容还是球的大小"。
+ */
+@keyframes orb-unfold {
+    from {
+        opacity: 0;
+        transform: scale(0.92);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+.animate-orb-unfold {
+    animation: orb-unfold 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/*
+ * 尊重系统的"减少动态效果"。
+ *
+ * 必须写复合选择器而不是裸类名：animation-name 挂在 `.animate-orb-breath` 上，
+ * 特异性已经确定，靠通配或继承压不住。
+ */
+@media (prefers-reduced-motion: reduce) {
+    .animate-orb-breath,
+    .animate-orb-unfold {
+        animation: none;
+    }
+}

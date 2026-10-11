@@ -69,6 +69,34 @@ export const BRIDGE_ENDPOINTS = {
         route: 'extension',
         reason: '嗅探是插件的 webRequest 观察，开关由插件自己持有；应用不再参与嗅探。',
     },
+    /*
+     * 下面几条是**悬浮球**用的。
+     *
+     * 球现在跑在 Electron 里（见 app/main/orbs.js 讲清了为什么），它拿不到
+     * `chrome.*`，所以这些原本"球直接问 SW"的操作改走过桥。**归属没有变** ——
+     * 数据仍然长在插件里，应用只是转发，不持有任何一份副本。
+     */
+    'sniffer-get-state': {
+        route: 'extension',
+        reason: '嗅探开关与结果都在插件的 chrome.storage，球只是显示。',
+    },
+    'sniffer-clear': {
+        route: 'extension',
+        reason: '清空的是插件的 storage.session，应用没有这份数据。',
+    },
+    'downloads-start': {
+        route: 'extension',
+        reason: 'chrome.downloads 是浏览器的下载管理器，进度与断点都由它持有；'
+            + '应用侧的下载列表已随自建外壳一起删掉。',
+    },
+    'agent-snapshot': {
+        route: 'extension',
+        reason: 'Agent 引擎（对话历史、主循环、工具派发）跑在插件里，快照的唯一权威在那边。',
+    },
+    'agent-action': {
+        route: 'extension',
+        reason: '同 agent-snapshot：动作直接改引擎状态，在应用侧再存一份就会有两套真值。',
+    },
     'get-cookies': {
         route: 'extension',
         reason: 'chrome.cookies 直接读，且拿到的是**活的**会话值；应用侧读的是启动时的快照。',

@@ -95,22 +95,75 @@ const run = () => {
     }
 
     /*
-     * content_scripts 必须**存在且非空**。
+     * content_scripts 必须**不存在**。
      *
-     * 只在"声明了就检查文件在不在"是不够的：整个 content_scripts 块被删掉时，
-     * 循环一次都不跑，检查全绿 —— 而结果是悬浮球永远不出现。
-     * 变异测试实测过这一条（删掉 content_scripts，6 项全过），所以这里
-     * 先断言它存在。
+     * 悬浮球已经从"每个标签页注入一份"改成 Electron 独立窗口（见
+     * app/main/orbs.js 讲清了为什么 —— Chrome 的窗口最小 136×80、标题栏固定
+     * 吃掉 39px、且不能置顶，插件里做不出球）。
+     *
+     * 留着 content_scripts 的后果不是"多注入一份没用"，而是**每个页面都会被
+     * 注入一个几百 KB 的脚本**，且那个脚本里已经没有界面了 —— 纯浪费，
+     * 还会让用户以为球坏了（页面上什么都没有）。
+     *
+     * 同样要检查产物里没有 content.js：构建配置里 input 加回去就会重新产出。
      */
-    if (!Array.isArray(mf.content_scripts) || mf.content_scripts.length === 0) {
-        fails.push('manifest 里没有 content_scripts —— 悬浮球不会注入到任何页面');
+    if (Array.isArray(mf.content_scripts) && mf.content_scripts.length > 0) {
+        fails.push('manifest 里还有 content_scripts —— 球已改成 Electron 窗口，不再往页面注入');
     }
-    for (const [i, cs] of (mf.content_scripts || []).entries()) {
-        if (!Array.isArray(cs.js) || cs.js.length === 0) {
-            fails.push(`content_scripts[${i}] 没有 js 文件`);
+    if (fs.existsSync(path.join(DIST, 'content.js'))) {
+        fails.push('产物里还有 content.js —— 球已改成 Electron 窗口，它不该被构建出来');
+    }
+
+    /*
+     * nativeMessaging 权限必须声明。
+     *
+     * 悬浮球跑在 Electron 里，拿不到 `chrome.*`，它要的一切都只能经
+     * native messaging 问过来。少这条权限的表现是 `connectNative` 直接抛，
+     * 而球上显示的是"插件未连接" —— 与"应用没开"完全一样的提示，
+     * 从界面上分不出是哪种。
+     */
+    if (!(mf.permissions || []).includes('nativeMessaging')) {
+        fails.push('manifest 没声明 nativeMessaging —— 悬浮球无法连接本机应用');
+    }
+
+    /*
+     * `key` 必须存在。
+     *
+     * native messaging 的 host manifest 里写死了 `allowed_origins`，形如
+     * `chrome-extension://<id>/`。而未打包扩展的 id 是**由加载路径哈希出来的**
+     * —— 换目录、换机器就变，host manifest 立刻失效，报的却是
+     * "Specified native messaging host not found"，与真正的原因毫无关系。
+     * 写死 `key` 之后 id 只由密钥决定。
+     */
+    if (!mf.key || typeof mf.key !== 'string' || mf.key.length < 100) {
+        fails.push('manifest 缺少 key —— 扩展 id 会随加载路径变化，native messaging 的 allowed_origins 会失效');
+    }
+
+    /*
+     * host manifest 的 allowed_origins 必须与 manifest 的 key 推出同一个 id。
+     *
+     * 这是**跨文件**的一致性：改 key 却忘了改 host manifest，报的是一句
+     * 与原因无关的 "host not found"。这里按 Chrome 的算法重算一遍 id 再比。
+     */
+    const hostManifestPath = path.join(ROOT, 'extension', 'host', 'com.theplay.host.json');
+    if (fs.existsSync(hostManifestPath)) {
+        if (mf.key) {
+            const hash = require('crypto').createHash('sha256')
+                .update(Buffer.from(mf.key, 'base64')).digest().subarray(0, 16);
+            let id = '';
+            for (const byte of hash) {
+                id += String.fromCharCode(97 + (byte >> 4));
+                id += String.fromCharCode(97 + (byte & 0x0f));
+            }
+            const hostMf = JSON.parse(fs.readFileSync(hostManifestPath, 'utf8'));
+            const origins = hostMf.allowed_origins || [];
+            if (!origins.includes(`chrome-extension://${id}/`)) {
+                fails.push(`host manifest 的 allowed_origins 与 manifest.key 推出的 id 不符。`
+                    + `实际 id 是 ${id}，allowed_origins 是 ${JSON.stringify(origins)}`);
+            }
         }
-        for (const js of cs.js || []) ok(`content_scripts[${i}].js`, js);
-        for (const css of cs.css || []) ok(`content_scripts[${i}].css`, css);
+    } else {
+        fails.push('extension/host/com.theplay.host.json 不存在 —— native messaging 装不上');
     }
 
     /*
@@ -128,34 +181,15 @@ const run = () => {
     for (const ref of offscreenRefs) ok('offscreen.html', ref.replace(/^\//, ''));
 
     /*
-     * panel.html 与 panel.js 必须**不存在**。
+     * 已删除的界面产物必须**不存在**。
      *
-     * 侧边栏删掉之后，主构建的 emptyOutDir 会清掉它们 —— 但如果哪天有人
-     * 把 panel 加回 vite 的 input，产物里就会重新出现一份没人加载的界面。
-     * 那种残留不会报错，只会让下一个读代码的人以为侧边栏还在。
+     * 主构建的 emptyOutDir 会清掉它们 —— 但如果哪天有人把 panel 加回 vite 的
+     * input，产物里就会重新出现一份没人加载的界面。那种残留不会报错，
+     * 只会让下一个读代码的人以为侧边栏还在。
      */
     for (const stale of ['panel.html', 'panel.js']) {
         if (fs.existsSync(path.join(DIST, stale))) {
             fails.push(`产物里还有 ${stale} —— 侧边栏已删除，它不该被构建出来`);
-        }
-    }
-
-    /*
-     * content.js 必须是**自包含的传统脚本**，不能含 import 语句。
-     *
-     * manifest 的 content_scripts 没有 `type` 字段，声明成 .js 就按传统脚本
-     * 求值 —— 出现 `import` 会直接语法错误，整个 content script 不执行。
-     * 构建配置里 format 从 'iife' 改成 'es' 就会这样，而 vite 不会报错。
-     */
-    const contentPath = path.join(DIST, 'content.js');
-    if (fs.existsSync(contentPath)) {
-        const contentSrc = fs.readFileSync(contentPath, 'utf8');
-        if (/^\s*import[\s{*]/m.test(contentSrc)) {
-            fails.push('content.js 里有 import 语句 —— content script 必须是自包含的 IIFE');
-        }
-        // 反向：宿主容器与样式注入是它存在的理由，缺了就是"装了但没反应"
-        if (!contentSrc.includes('attachShadow')) {
-            fails.push('content.js 里没有 attachShadow —— 悬浮球的样式隔离没生效');
         }
     }
 
@@ -204,47 +238,63 @@ const run = () => {
     }
 
     /*
-     * 发给球的每一条广播都必须带 `target: 'ball'`。
+     * 推给悬浮球的每一条事件都必须过桥。
      *
-     * 球的监听器按 `target === 'ball'` 过滤（它必须过滤 —— 否则 offscreen
-     * 的流式增量也会被它当成嗅探结果）。漏掉这个字段时事件发得出去、球也
-     * 收得到，但**被球自己丢掉**：表现为"打开嗅探开关后列表一直是空的，
-     * 刷新页面才出现"。
+     * ## 这一条为什么必须存在
      *
-     * 这个 bug 真实存在过：SW 发的是 `{kind:'sniffed-media'}`，没有 target，
-     * 而当时侧边栏的监听器不过滤 target —— 所以删掉侧边栏之前它一直没暴露。
+     * 球现在跑在 Electron 窗口里（不是 content script），它**收不到**
+     * `chrome.runtime.sendMessage` 的广播。所以每一次"给球推数据"都必须
+     * 同时走 `emitBridgeEvent`。漏掉的表现是：
      *
-     * ## 为什么要跟一层调用
+     *   · 球能连上、能取到初始快照；
+     *   · 但**之后再也不会更新** —— 嗅探出新地址列表不动、模型回复逐字
+     *     输出时界面一直空着。
      *
-     * SW 里不是内联字面量，而是 `notifyBall({...})`，函数体内才是
-     * `sendMessage(event)`。只扫 `sendMessage({...})` 会一个都匹配不到 ——
-     * 检查恒绿。变异测试抓到过这一点（去掉 target，4 项仍全过）。
-     * 所以这里按**两种形态**分别扫：内联字面量 + notifyBall 的实参。
+     * 这种"能连上但不动"最难查：连接是好的，请求也是好的，只有推送断了。
+     *
+     * ## 判据
+     *
+     * 凡是出现 `sendMessage({ target: 'ball', kind: X })` 的地方，同一个文件里
+     * 必须有对应的 `emitBridgeEvent(X, ...)`。按 kind 逐个比对，而不是数个数 ——
+     * 数个数会在"加了新事件但忘了桥"时仍然相等。
      */
-    const collectBallBroadcasts = (file) => {
+    const BALL_KINDS = ['sniffed-media', 'agent-snapshot', 'agent-delta'];
+    for (const file of ['background/service-worker.ts', 'background/agent-bridge.ts']) {
         const full = path.join(srcDir, file);
-        if (!fs.existsSync(full)) return [];
+        if (!fs.existsSync(full)) continue;
         const src = stripComments(fs.readFileSync(full, 'utf8'));
-        const found = [];
-        // 形态一：sendMessage({ ... }) —— agent-bridge 用的是这种
-        for (const m of src.matchAll(/sendMessage\(\s*\{([\s\S]*?)\}\s*\)/g)) {
-            if (/kind:\s*'(sniffed-media|agent-snapshot|agent-delta)'/.test(m[1])) found.push(m[1]);
-        }
-        // 形态二：notifyBall({ ... }) —— service-worker 用的是这种
-        for (const m of src.matchAll(/notifyBall\(\s*\{([\s\S]*?)\}\s*\)/g)) found.push(m[1]);
-        return found;
-    };
 
-    const broadcasts = [
-        ...collectBallBroadcasts(path.join('background', 'service-worker.ts')),
-        ...collectBallBroadcasts(path.join('background', 'agent-bridge.ts')),
-    ];
-    if (broadcasts.length === 0) {
-        fails.push('找不到任何发给球的广播 —— 检查失效了（球的实时更新全靠这几条）');
+        for (const kind of BALL_KINDS) {
+            // 该文件里有没有给球推这个 kind
+            const pushes = new RegExp(`kind:\\s*'${kind}'`).test(src);
+            if (!pushes) continue;
+            // 有的话，必须也过桥
+            if (!new RegExp(`emitBridgeEvent\\(\\s*'${kind}'`).test(src)) {
+                fails.push(`${file} 推了 '${kind}' 给球但没过桥（emitBridgeEvent）——`
+                    + '球在 Electron 窗口里收不到 chrome.runtime 广播，界面会停在初始状态');
+            }
+        }
     }
-    for (const body of broadcasts) {
-        if (!/target:\s*'ball'/.test(body)) {
-            fails.push(`球事件缺少 target:'ball'（球会丢弃它）：${body.trim().replace(/\s+/g, ' ').slice(0, 70)}`);
+
+    /*
+     * 反方向：球那一侧订阅的事件名必须是插件真的会推的。
+     *
+     * 拼错一个字母的表现与"忘了过桥"完全一样：界面永远不更新，且不报错。
+     */
+    const orbClient = path.join(ROOT, 'app', 'renderer', 'orb', 'bridge-client.ts');
+    if (fs.existsSync(orbClient)) {
+        const clientSrc = fs.readFileSync(orbClient, 'utf8');
+        const declared = clientSrc.slice(clientSrc.indexOf('export type BridgeEventName'));
+        const names = [...declared.slice(0, declared.indexOf(';')).matchAll(/'([a-z-]+)'/g)].map((m) => m[1]);
+        for (const name of names) {
+            if (!BALL_KINDS.includes(name)) {
+                fails.push(`球的 BridgeEventName 里声明了 '${name}'，但插件从不推这个事件`);
+            }
+        }
+        for (const kind of BALL_KINDS) {
+            if (!names.includes(kind)) {
+                fails.push(`插件会推 '${kind}'，但球的 BridgeEventName 里没有它 —— 球会把它丢掉`);
+            }
         }
     }
 

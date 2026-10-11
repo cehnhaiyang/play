@@ -28,6 +28,7 @@
   },
   "exclude": [
     "extension",
-    "app/main"
+    "app/main",
+    "新建文件夹"
   ]
 }

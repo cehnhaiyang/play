@@ -31,6 +31,7 @@ import {
     type SniffedMedia,
 } from '../shared/protocol';
 import { agentBridge } from './agent-bridge';
+import { emitBridgeEvent, ensureBridge, isBridgeReady, setDispatcher } from './bridge-port';
 import type { AgentEngine } from '../agent/engine';
 
 /* ========================================================================== */
@@ -246,6 +247,15 @@ const handleResponse = async (details: chrome.webRequest.OnResponseStartedDetail
 
     await pushItem(item);
     notifyBall({ target: 'ball', kind: 'sniffed-media', item });
+    /*
+     * 同一条结果也要推给应用里的悬浮球。
+     *
+     * 直接调 `emitBridgeEvent` 而不是包一层 `notifyApp` —— 那层包装只是多一个
+     * 转发，却让 manifest 自检扫不到这个调用点（它按 `emitBridgeEvent('kind'`
+     * 的字面形态匹配），于是"忘了过桥"这个最该被挡住的错误反而查不出来。
+     * 应用没连上时 `emitBridgeEvent` 自己会丢弃，不需要在外面判断。
+     */
+    emitBridgeEvent('sniffed-media', item);
 };
 
 /* ========================================================================== */
@@ -329,7 +339,83 @@ const downloadsStart = async (url: string, filename?: string) => {
 };
 
 /* ========================================================================== */
-/* 5. 消息路由                                                                */
+/* 6. 桥：本机应用（悬浮球的宿主）                                             */
+/* ========================================================================== */
+
+/**
+ * 应用发来的请求。
+ *
+ * ## 为什么这一层必须存在
+ *
+ * 悬浮球跑在 Electron 窗口里，没有 `chrome.*`。它要的一切 —— 嗅探结果、
+ * Agent 快照、下载动作 —— 都只能经 native messaging 问到这里。
+ * 所以这个 switch 就是**球能看到的能力全集**：不在表里的方法，
+ * 球就是做不到。
+ *
+ * ## 与 `dispatchBall` 的关系
+ *
+ * `dispatchBall` 是**页面里那个球**（content script）走的路径，它自带
+ * `chrome.runtime`，直接发消息即可。两者做的是同一批事，但入口不同：
+ * 一个在扩展进程内，一个跨进程。**故意不合并成一个函数** ——
+ * 合并就要把"调用方在哪"变成参数，而那个参数只影响怎么回包，
+ * 不影响做什么；拆开之后每条路径都短，谁调谁一目了然。
+ */
+const dispatchBridge = async (method: string, params: unknown): Promise<unknown> => {
+    const args = (params || {}) as Record<string, never>;
+
+    switch (method) {
+        case 'sniffer-get-state':
+            return { enabled: await getEnabled(), items: await getItems() };
+
+        case 'sniffer-set-enabled':
+            await setEnabled(Boolean((args as { enabled?: boolean }).enabled));
+            return { enabled: await getEnabled() };
+
+        case 'sniffer-clear':
+            await clearItems();
+            return { cleared: true };
+
+        case 'downloads-start': {
+            const p = args as unknown as { url: string; filename?: string };
+            return { downloadId: await downloadsStart(p.url, p.filename) };
+        }
+
+        case 'agent-snapshot': {
+            const engine = await agentBridge.getEngine();
+            return { snapshot: engine.snapshot() };
+        }
+
+        case 'agent-action': {
+            const engine = await agentBridge.getEngine();
+            return { result: await runAgentAction(engine, { action: (args as unknown as { action: never }).action } as never) };
+        }
+
+        default:
+            /*
+             * 不认识的端点**必须报错**，不能静默返回 undefined。
+             *
+             * 静默返回会让应用侧拿到一个 `ok: true` 加一个 undefined 结果，
+             * 界面上表现为"点了没反应" —— 而真正的原因只是一个拼错的方法名。
+             */
+            throw new Error(`插件不认识的桥端点：${method}`);
+    }
+};
+
+setDispatcher(dispatchBridge);
+
+/**
+ * 顶层尝试连一次桥。
+ *
+ * 放在顶层（而不是等第一次请求）的理由：SW 每次被唤醒都会重新求值本文件，
+ * 而"应用在不在"是球一打开就要显示的状态。主动连一次能让球立刻拿到
+ * 准确答案，而不是先显示"未连接"再跳回来。
+ *
+ * **失败是正常情况**：用户没开应用时 connectNative 直接抛，这里吞掉。
+ */
+ensureBridge();
+
+/* ========================================================================== */
+/* 7. 消息路由                                                                */
 /* ========================================================================== */
 
 /**

@@ -59,6 +59,26 @@ const run = () => {
 
     const bridge = require('./build/shared/meta/bridge');
 
+    /**
+     * 主进程真实注册的全部 handler 通道名。
+     *
+     * ## 为什么要把 `orb:` 排除在外
+     *
+     * 这套测试的前提是"主进程里的每一个 handler 都是桥端点" —— 那个前提在
+     * 只有主窗口时成立。悬浮球加进来之后不再成立：球是一个**独立的
+     * Electron 窗口**（见 app/main/orbs.js），它的窗口操作（拖动、展开、
+     * 改尺寸）是**应用内部的窗口管理**，一个字节都不出应用，更不过桥。
+     *
+     * 把它们塞进 `BRIDGE_ENDPOINTS` 是错的 —— 那张表是"插件 ↔ 应用"的契约，
+     * 而插件根本不知道球是个窗口、更不知道它怎么拖。
+     *
+     * 所以这里按命名空间排除，同时**反向断言**这些通道确实不出应用
+     * （见下面"orb: 通道不得出现在插件里"）。只排除不反向检查的话，
+     * 这个排除就成了一张可以随便往里塞东西的免检牌。
+     */
+    const ORB_PREFIX = 'orb:';
+    const isLocalWindowChannel = (name) => name.startsWith(ORB_PREFIX);
+
     /** 主进程真实注册的全部 handler 通道名 */
     const registeredHandlers = new Set();
     /** 主进程真实推送的全部通道名 */
@@ -75,7 +95,9 @@ const run = () => {
     /* ====================================================================== */
 
     check('端点表覆盖主进程注册的每一个 handler（无未归类端点）', () => {
-        const unclassified = [...registeredHandlers].filter((name) => !(name in bridge.BRIDGE_ENDPOINTS));
+        const unclassified = [...registeredHandlers]
+            .filter((name) => !isLocalWindowChannel(name))
+            .filter((name) => !(name in bridge.BRIDGE_ENDPOINTS));
         eq(unclassified.length, 0,
             `这些通道在主进程注册了但归属表里没有：${unclassified.join('、')}。`
             + '请在 shared/meta/bridge.ts 的 BRIDGE_ENDPOINTS 里归类。');
@@ -87,6 +109,28 @@ const run = () => {
             .map(([name, meta]) => `${name}(${meta.route})`);
         eq(dangling.length, 0,
             `这些端点在表里归给应用，但主进程没有 handler：${dangling.join('、')}`);
+    });
+
+    /*
+     * orb: 通道只许留在应用内部。
+     *
+     * 上面对它们做了免检，这条就是那张免检牌的**代价条款**：如果哪天有人
+     * 把球的窗口操作接到了插件上（比如让插件帮忙算窗口位置），这里必须报红
+     * —— 那意味着一个纯本地窗口操作绕了半圈跨进程，而它本来不需要。
+     */
+    check('orb: 窗口通道不得出现在插件里', () => {
+        const hits = [];
+        for (const file of walk(EXTENSION_SRC)) {
+            const src = fs.readFileSync(file, 'utf8');
+            for (const name of [...registeredHandlers, ...pushedChannels]) {
+                if (isLocalWindowChannel(name) && src.includes(name)) {
+                    hits.push(`${path.relative(ROOT, file)} → ${name}`);
+                }
+            }
+        }
+        eq(hits.length, 0,
+            `插件里出现了球的窗口通道：${hits.join('、')}。`
+            + '那些是应用内部的窗口管理，插件不该知道球是个窗口。');
     });
 
     check('端点表没有重复分类（表内自洽）', () => {
@@ -105,6 +149,7 @@ const run = () => {
 
     check('事件表覆盖主进程推送的每一个通道（除已退役者）', () => {
         const unclassified = [...pushedChannels]
+            .filter((name) => !isLocalWindowChannel(name))
             .filter((name) => !(name in bridge.BRIDGE_EVENTS))
             .filter((name) => !bridge.RETIRED_CHANNELS.includes(name));
         eq(unclassified.length, 0,

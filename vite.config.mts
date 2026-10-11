@@ -13,6 +13,19 @@ const here = fileURLToPath(new URL('.', import.meta.url));
  *
  * 源码在 app/renderer/ 下，但它 import 的 shared/ 在仓库根 —— vite 允许
  * root 之外的 import，只要在 fs.allow 里（默认已包含工作区根）。
+ *
+ * ## 三个入口，不是一个
+ *
+ * 主窗口之外还有两个**悬浮球窗口**（见 app/main/orbs.js）。三个页面共用
+ * 一份渲染层源码树，但各自是独立入口：
+ *
+ *   · `index.html`      主窗口
+ *   · `orb/sniff.html`  嗅探球
+ *   · `orb/agent.html`  Agent 球
+ *
+ * 拆成独立入口而不是"一个页面靠 query 参数区分形态"，是因为球的窗口尺寸与
+ * 主窗口完全不同（64×64 / 380×520 / 1280×800），共用一份 bundle 会让每个球
+ * 都把另外两个页面的代码一起加载 —— 而球是常驻窗口，那份浪费一直在。
  */
 export default defineConfig({
   root: `${here}app/renderer`,
@@ -25,6 +38,13 @@ export default defineConfig({
   build: {
     outDir: `${here}dist`,
     emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        index: `${here}app/renderer/index.html`,
+        'orb/sniff': `${here}app/renderer/orb/sniff.html`,
+        'orb/agent': `${here}app/renderer/orb/agent.html`,
+      },
+    },
   },
   server: {
     port: 5173,

@@ -2,6 +2,7 @@ import { AgentEngine, memoryStorage } from '../agent/engine';
 import type { ChatPort, EngineSnapshot, EngineStorage } from '../agent/engine';
 import { pageHost } from '../offscreen/page-host';
 import { createChatPort } from './chat-port';
+import { emitBridgeEvent } from './bridge-port';
 
 /**
  * Agent 在 service worker 里的接线。
@@ -99,6 +100,18 @@ const publish = (snapshot: EngineSnapshot): void => {
 
     void chrome.runtime.sendMessage({ target: 'ball', kind: 'agent-snapshot', snapshot })
         .catch(() => undefined);
+    /*
+     * 同时推给应用。
+     *
+     * 球现在跑在 Electron 窗口里（见 app/main/orbs.js），它收不到
+     * `chrome.runtime` 的广播，只能经 native messaging 拿。两条都发是因为
+     * 页面里的 content script 球还没删干净之前可能两种形态并存。
+     *
+     * `snapshot` 里含 `actions`（一组函数），过桥时会被 JSON 丢掉 ——
+     * 那是**有意的**：球只能通过 `agent-action` 端点驱动引擎，
+     * 不能拿到函数直接调。这也正是桥该有的边界。
+     */
+    emitBridgeEvent('agent-snapshot', snapshot);
 };
 
 /** 取引擎，第一次调用时构造并恢复历史 */
@@ -111,6 +124,7 @@ const getEngine = async (): Promise<AgentEngine> => {
         onDelta: (delta) => {
             void chrome.runtime.sendMessage({ target: 'ball', kind: 'agent-delta', delta })
                 .catch(() => undefined);
+            emitBridgeEvent('agent-delta', delta);
         },
         onSnapshot: publish,
     });

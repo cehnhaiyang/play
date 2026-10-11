@@ -1,20 +1,20 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { BallRequest, ExtensionResponse, SniffedMedia } from '../shared/protocol';
-import { SNIFF_RENDER_MAX } from '../shared/protocol';
 import { OrbShell } from './OrbShell';
 import { RadarIcon } from './icons';
+import { bridge, bridgeConnected, onBridgeEvent, onBridgeStatus } from './bridge-client';
+import type { SniffedMedia } from './bridge-client';
 
 /**
  * 嗅探球。
  *
  * ## 它不自己存一份数据
  *
- * 嗅探结果的唯一权威是 service worker（落 `chrome.storage.session`）。这个球
- * 只做三件事：订阅推送、按当前状态取一次全量、把用户的操作转成消息。
+ * 嗅探结果的唯一权威是插件的 service worker（落 `chrome.storage.session`）。
+ * 这个球只做三件事：订阅推送、打开时取一次全量、把用户操作转成桥请求。
  *
- * 之所以强调这一点：球是**每个标签页各有一份**的，而嗅探结果是全局的。
- * 球自己存一份的话，用户在同一站点开三个标签页就有三份会各自漂移的列表 ——
- * 而"哪个是真的"没有答案。统一从 SW 取，三份显示必然一致。
+ * 球是**全局唯一**的一个（Electron 窗口，不是每个标签页一份），所以"多份
+ * 列表互相漂移"这个问题从根上没有了 —— 这是从 content script 改成
+ * 独立窗口之后顺带拿到的最大好处。
  *
  * ## 关掉嗅探时列表仍显示
  *
@@ -22,56 +22,66 @@ import { RadarIcon } from './icons';
  * 清空是另一个显式动作。
  */
 
-/** 发一条消息给 service worker 并等回包。失败一律抛，由调用方决定怎么显示 */
-export const askServiceWorker = async <T,>(message: BallRequest): Promise<T> => {
-    const res = (await chrome.runtime.sendMessage(message)) as ExtensionResponse<T> | undefined;
-    if (!res) throw new Error('后台无响应（service worker 可能刚被回收，重试一次）');
-    if (!res.ok) throw new Error(res.error || '未知错误');
-    return res.result as T;
-};
+/** 列表渲染上限。与插件的 SNIFF_RENDER_MAX 同一口径，超出的不画 */
+const RENDER_MAX = 300;
 
 export const SniffOrb = () => {
     const [enabled, setEnabled] = useState(false);
     const [items, setItems] = useState<SniffedMedia[]>([]);
     const [error, setError] = useState('');
+    const [connected, setConnected] = useState(true);
     const [busy, setBusy] = useState(false);
 
-    /* 初始状态：从 SW 取（它才是权威，球可能刚随页面注入） */
+    /*
+     * 桥的连接状态：查一次，之后跟着推送走。
+     *
+     * 只查一次是不够的 —— 应用通常比浏览器先起来，所以这里第一次问到的
+     * 几乎总是"未连接"，而插件连上之后如果不更新，界面会永久挂着红字。
+     */
     useEffect(() => {
+        void (async () => setConnected(await bridgeConnected()))();
+        return onBridgeStatus(setConnected);
+    }, []);
+
+    /*
+     * 初始状态：从插件取。球可能刚开，而嗅探早就跑过了。
+     *
+     * **连上桥之后再取，且取成功时清掉上一次的错误。** 应用通常比浏览器先起，
+     * 所以挂载那一刻这次请求多半会失败并留下一条"插件未连接"。桥随后连上时
+     * 若不把它清掉，界面上会同时出现"已停止 · 2 条"和一句红色的
+     * "插件未连接" —— 用户看到的是自相矛盾的两句话。
+     */
+    useEffect(() => {
+        if (!connected) return;
         void (async () => {
             try {
-                const state = await askServiceWorker<{ enabled: boolean; items: SniffedMedia[] }>({
-                    target: 'sw',
-                    kind: 'sniffer-get-state',
-                });
+                const state = await bridge<{ enabled: boolean; items: SniffedMedia[] }>('sniffer-get-state');
                 setEnabled(state.enabled);
-                setItems(state.items.slice(0, SNIFF_RENDER_MAX));
+                setItems(state.items.slice(0, RENDER_MAX));
+                setError('');
             } catch (e) {
                 setError(e instanceof Error ? e.message : String(e));
             }
         })();
-    }, []);
+    }, [connected]);
 
-    /* 实时接收新结果。球被销毁时监听器随之消失，不需要清理 storage */
-    useEffect(() => {
-        const onMessage = (message: { target?: string; kind?: string; item?: SniffedMedia }) => {
-            if (message?.target === 'ball' && message.kind === 'sniffed-media' && message.item) {
-                setItems((prev) => [message.item as SniffedMedia, ...prev].slice(0, SNIFF_RENDER_MAX));
-            }
-        };
-        chrome.runtime.onMessage.addListener(onMessage);
-        return () => chrome.runtime.onMessage.removeListener(onMessage);
-    }, []);
+    /* 实时接收新结果。组件卸载时监听器随之消失 */
+    useEffect(() => onBridgeEvent((event, payload) => {
+        if (event !== 'sniffed-media') return;
+        setItems((prev) => [payload as SniffedMedia, ...prev].slice(0, RENDER_MAX));
+    }), []);
 
     const toggle = useCallback(async () => {
         const next = !enabled;
         setError('');
         setBusy(true);
         try {
-            await askServiceWorker({ target: 'sw', kind: 'sniffer-set-enabled', enabled: next });
+            await bridge('sniffer-set-enabled', { enabled: next });
             setEnabled(next);
+            setConnected(true);
         } catch (e) {
             setError(e instanceof Error ? e.message : String(e));
+            setConnected(await bridgeConnected());
         } finally {
             setBusy(false);
         }
@@ -80,7 +90,7 @@ export const SniffOrb = () => {
     const clear = useCallback(async () => {
         setError('');
         try {
-            await askServiceWorker({ target: 'sw', kind: 'sniffer-clear' });
+            await bridge('sniffer-clear');
             setItems([]);
         } catch (e) {
             setError(e instanceof Error ? e.message : String(e));
@@ -91,18 +101,13 @@ export const SniffOrb = () => {
      * 交给浏览器下载。
      *
      * 不走应用侧的原因：直链交给 `chrome.downloads` 之后，用户在 Ctrl+J 里
-     * 能看到进度、能暂停、能断点续传，这些浏览器已经做好了。需要 ffmpeg 的
-     * 流媒体才会走应用 —— 那部分还没接桥。
+     * 能看到进度、能暂停、能断点续传，这些浏览器已经做好了。
+     * 需要 ffmpeg 的流媒体才会走应用 —— 那部分还没接。
      */
     const download = useCallback(async (item: SniffedMedia) => {
         setError('');
         try {
-            await askServiceWorker({
-                target: 'sw',
-                kind: 'downloads-start',
-                url: item.url,
-                filename: item.title || undefined,
-            });
+            await bridge('downloads-start', { url: item.url, filename: item.title || undefined });
         } catch (e) {
             setError(e instanceof Error ? e.message : String(e));
         }
@@ -135,16 +140,32 @@ export const SniffOrb = () => {
 
     return (
         <OrbShell
-            storageKey="orbPos.sniff"
-            ballSize={56}
-            panelSize={{ w: 380, h: 520 }}
             label="资源嗅探"
-            hint={enabled ? `正在记录 · ${items.length} 条` : `已停止 · ${items.length} 条`}
+            hint={
+                !connected
+                    ? '插件未连接'
+                    : enabled
+                        ? `正在记录 · ${items.length} 条`
+                        : `已停止 · ${items.length} 条`
+            }
             accent="from-sky-500 via-blue-500 to-indigo-400"
             icon={<RadarIcon className="h-6 w-6" />}
             toolbar={toolbar}
         >
-            {error && (
+            {!connected && (
+                <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-[10px] leading-relaxed text-amber-300">
+                    没有连上浏览器插件。请确认：① 浏览器已打开；② 扩展已加载；
+                    ③ 已跑过 <code className="font-mono">npm run host:install</code> 并重启过浏览器。
+                </div>
+            )}
+
+            {/*
+              两条横幅说的是同一件事，只留一条。
+              `!connected` 那条已经写清了怎么办，此时再把请求失败的原文
+              （"插件未连接。请确认浏览器已打开…"）也画出来，用户会看到
+              上下两行几乎一样的话 —— 那会让人以为出了两个问题。
+            */}
+            {error && connected && (
                 <div className="shrink-0 border-b border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-[10px] leading-relaxed text-rose-300">
                     {error}
                 </div>
@@ -153,7 +174,7 @@ export const SniffOrb = () => {
             {items.length === 0 ? (
                 <p className="p-4 text-[11px] leading-relaxed text-slate-500">
                     {enabled
-                        ? '正在记录当前浏览中出现的视频、音频与流媒体地址。'
+                        ? '正在记录浏览中出现的视频、音频与流媒体地址。'
                         : '嗅探默认关闭。打开后，这里会列出页面加载过的媒体地址。'}
                 </p>
             ) : (

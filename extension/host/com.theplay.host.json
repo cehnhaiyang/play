@@ -1,0 +1,9 @@
+{
+  "name": "com.theplay.host",
+  "description": "The Play 本机桥：把插件的 native messaging 帧转发给 Electron 应用",
+  "path": "REPLACED_AT_INSTALL_TIME",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://kiamghhabgcacaeobnhoejnohaaamkjd/"
+  ]
+}

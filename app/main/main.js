@@ -1,6 +1,8 @@
 const { app, BrowserWindow, ipcMain, shell, webContents, dialog } = require('electron');
 const { probeGallery, downloadGallery, saveGalleryImages, fetchGalleryPages, normalizeGid, galleryTaskKey, galleryKeyMatches, GALLERY_CHANNELS, fetchChannelList, buildChannelListResult, channelListUrl, deriveListPageUrl, isCloudflareChallengePage, isCloudflareErrorPage, setUserAgent: pushUserAgentToSite } = require('./acgmhoService');
 const { getSettings, saveProxyPort, saveAiConfig, testAiConnection } = require('./settings');
+const bridge = require('./bridge');
+const orbs = require('./orbs');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
@@ -3289,6 +3291,73 @@ function setupSettingsHandlers() {
     ipcMain.handle('settings-test-ai-config', async (_event, value, reasoningEffort) => {
         return testAiConnection(value, reasoningEffort);
     });
+
+    registerOrbChannels();
+}
+
+/**
+ * 悬浮球窗口的 IPC。
+ *
+ * ## 为什么球的通道单独一组
+ *
+ * 球是**独立窗口**（见 orbs.js），它要的两件事主窗口都不需要：
+ * 展开/收起窗口尺寸、以及把请求转给插件。混进上面那批会让"这个通道谁能调"
+ * 变得含糊 —— 主窗口的渲染层也拿得到 orbApi 之外的全部接口。
+ *
+ * ## 过桥是唯一通路
+ *
+ * 球不是 content script，没有 `chrome.runtime`。它要的嗅探结果与 Agent 状态
+ * 全在插件里，而应用无法主动连插件（只有扩展能 `connectNative`），
+ * 所以链路只能是：球 → 这里 → bridge.js → host.js → 插件 SW。
+ * 这条路上每一跳都在别的文件里，这里只做转发。
+ */
+function registerOrbChannels() {
+    ipcMain.on('orb:set-open', (event, open) => {
+        // 按发送者反查是哪个球：两个球共用这一条通道
+        const target = orbs.idOfSender(event);
+        if (target) orbs.setOpen(target, !!open);
+    });
+
+    /**
+     * 球发起的桥请求。
+     *
+     * `method` 是 `BridgeEndpointName`。这里**不校验方法名** ——
+     * 端点表在 shared/meta/bridge.ts，插件收到不认识的方法会明确报错，
+     * 而在这里再维护一份白名单就是同一个事实存两处，必然漂移。
+     */
+    ipcMain.handle('orb:bridge', async (_event, method, params) => {
+        try {
+            return { ok: true, result: await bridge.request(method, params) };
+        } catch (e) {
+            return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+    });
+
+    /** 桥的连通状态。球要在标题栏显示"插件未连接"而不是一直转圈 */
+    ipcMain.handle('orb:bridge-status', () => ({ connected: bridge.isConnected() }));
+
+    /**
+     * 桥的连接状态**变化**要主动推给球。
+     *
+     * 只提供 `orb:bridge-status` 这个查询口是不够的：球在窗口打开那一刻问一次，
+     * 那时浏览器往往还没起来，于是答案是"未连接"，而**之后再也不会更新** ——
+     * 用户看到的是永久性的"插件未连接"，哪怕插件早就连上了。
+     *
+     * 这个 bug 实测过：应用先起、浏览器后起时，球上一直挂着红字，
+     * 而它下面的列表其实已经在实时更新了（自相矛盾的界面）。
+     */
+    bridge.onStatus((connected) => {
+        for (const [, entry] of orbs.entriesForBroadcast()) {
+            entry.win.webContents.send('orb:bridge-status', { connected });
+        }
+    });
+
+    /** 插件推来的事件转发给两个球。球按 event 名自己筛 */
+    bridge.onEvent((event, payload) => {
+        for (const [, entry] of orbs.entriesForBroadcast()) {
+            entry.win.webContents.send('orb:event', { event, payload });
+        }
+    });
 }
 
 app.whenReady().then(async () => {
@@ -3302,6 +3371,23 @@ app.whenReady().then(async () => {
     // 而 NetworkServices 在模块加载时（早于 ready）只能接管 agent 部分。
     installGlobalInterception();
     createWindow();
+
+    /*
+     * 桥要在球之前起来。
+     *
+     * 球第一次拉状态时会问桥"插件连上没有"，桥没起来的话那个回答是"没连"，
+     * 而真相是"还没开始监听" —— 界面会先闪一下"插件未连接"再变正常。
+     * 顺序调过来就没这一下。
+     *
+     * 失败不阻断启动：桥起不来（端口被占、目录不可写）只影响球能不能拿到
+     * 插件数据，不该让整个应用打不开。
+     */
+    try {
+        await bridge.start();
+    } catch (e) {
+        console.error('桥启动失败，悬浮球将无法连接插件：', e && e.message);
+    }
+    orbs.createOrbs();
 
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) {
@@ -3321,4 +3407,12 @@ app.on('will-quit', () => {
         // 同步销毁 BT 引擎，避免退出时 DHT/Peer 句柄挂起
         destroyTorrentClient();
     } catch (_e) { }
+    /*
+     * 桥必须显式收摊。
+     *
+     * 端点文件留着的话，插件下次会去连一个已经没人听的端口，每条请求等满
+     * 十分钟超时；而删掉它，host.js 一读不到文件就立刻报"应用没有在运行"。
+     */
+    bridge.stop();
+    orbs.destroyOrbs();
 });
