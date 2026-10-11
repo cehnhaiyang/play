@@ -103,6 +103,28 @@ export const BRIDGE_ENDPOINTS = {
         reason: '"当前是哪个标签页"是浏览器的事实，只有 chrome.tabs 知道；'
             + '球用它判「仅当前页」与「清空当前页」。',
     },
+    'tamper-get': {
+        route: 'extension',
+        reason: '规则的唯一权威是插件的 chrome.storage.local，且注入靠 chrome.scripting。'
+            + '应用侧再存一份就会出现"面板里改了、页面里没生效"。',
+    },
+    'tamper-set': {
+        route: 'extension',
+        reason: '同 tamper-get。写入后要立刻注入目标标签页，那是 chrome.scripting 的能力。',
+    },
+    'tamper-inject': {
+        route: 'extension',
+        reason: '注入是 chrome.scripting 的原生动作，应用没有这个能力。',
+    },
+    'page-storage-read': {
+        route: 'extension',
+        reason: '读的是浏览器当前会话的真实值（含 HttpOnly cookie）——'
+            + '应用侧读到的只是启动时那份快照，而"改完即时生效"要求读到活的。',
+    },
+    'page-storage-write': {
+        route: 'extension',
+        reason: '同 page-storage-read。写回后浏览器立即生效，不需要应用通知会话刷新。',
+    },
     'downloads-start': {
         route: 'extension',
         reason: 'chrome.downloads 是浏览器的下载管理器，进度与断点都由它持有；'
@@ -298,6 +320,11 @@ export const BRIDGE_EVENTS = {
     'torrent-progress': {
         route: 'app',
         reason: 'BT 引擎在应用侧。',
+    },
+    'play-media-push': {
+        route: 'app',
+        reason: '嗅探球推给**主窗口**的入列请求。播放列表长在主窗口的渲染层里，'
+            + '球（独立窗口）自己没有播放器 —— 这条是应用内部的窗口间转交，插件不参与。',
     },
 } as const satisfies Record<string, BridgeEndpoint>;
 

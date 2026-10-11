@@ -77,7 +77,10 @@ const installInterceptor = (config: TamperRules): void => {
     /* ---- 0. 基础工具 ---- */
 
     /** 伪装钩子。`toString` 也换掉，否则页面一查就露 */
-    const maskFn = <T extends (...args: never[]) => unknown>(fn: T, original: { name: string; length: number; toString: () => string }): T => {
+    const maskFn = <A extends unknown[], R>(
+        fn: (...args: A) => R,
+        original: { name: string; length: number; toString: () => string },
+    ): ((...args: A) => R) => {
         try {
             Object.defineProperty(fn, 'name', { value: original.name });
             Object.defineProperty(fn, 'length', { value: original.length });
@@ -323,9 +326,9 @@ const installInterceptor = (config: TamperRules): void => {
     try {
         const originalResponseJson = Response.prototype.json;
         if (originalResponseJson) {
-            Response.prototype.json = maskFn(function (this: Response, ...args: never[]) {
+            Response.prototype.json = maskFn(function (this: Response) {
                 const self = this;
-                return Promise.resolve(originalResponseJson.apply(self, args)).then((data: unknown) => {
+                return Promise.resolve(originalResponseJson.call(self)).then((data: unknown) => {
                     try {
                         const c = host.__interceptorCompiled;
                         let u = '';
@@ -336,7 +339,7 @@ const installInterceptor = (config: TamperRules): void => {
                     } catch { /* 同上 */ }
                     return data;
                 });
-            } as typeof Response.prototype.json, originalResponseJson);
+            }, originalResponseJson);
         }
     } catch { /* 页面冻结了 Response */ }
 
@@ -351,10 +354,19 @@ const installInterceptor = (config: TamperRules): void => {
                 const originalSend = xhr.send;
                 const scratch = xhr as unknown as { __tamperUrl?: string };
 
-                xhr.open = maskFn(function (this: XMLHttpRequest, ...args: never[]) {
+                /*
+                 * 参数原样转发。
+                 *
+                 * `open` 有两个重载（3 参与 5 参），所以这里收 `unknown[]` 再整体
+                 * 转出去 —— 手写参数表会丢掉一个重载，而漏掉的后果很严重：
+                 * 把 `async` 补成 `undefined` 会被 WebIDL 当成 `false`，
+                 * 一次普通请求就变成**同步 XHR**，页面直接卡死。
+                 * 唯一要读的是第 2 个参数（URL），规则按它匹配。
+                 */
+                xhr.open = maskFn(function (this: XMLHttpRequest, ...args: unknown[]) {
                     try { scratch.__tamperUrl = String(args[1]); } catch { /* 参数形状不对就算了 */ }
-                    return originalOpen.apply(this, args);
-                } as typeof xhr.open, originalOpen);
+                    return (originalOpen as (...a: unknown[]) => void).apply(this, args);
+                }, originalOpen) as typeof xhr.open;
 
                 xhr.setRequestHeader = maskFn(function (this: XMLHttpRequest, header: string, value: string) {
                     let finalValue = value;
@@ -378,9 +390,9 @@ const installInterceptor = (config: TamperRules): void => {
                         }
                     } catch { /* 规则出错不能影响这次请求 */ }
                     // 留空 = 删除：不调 setRequestHeader 就是"没设过这个头"
-                    if (blocked) return undefined as unknown as void;
-                    return originalSetRequestHeader.apply(this, [header, finalValue]);
-                } as typeof xhr.setRequestHeader, originalSetRequestHeader);
+                    if (blocked) return;
+                    originalSetRequestHeader.call(this, header, finalValue);
+                }, originalSetRequestHeader);
 
                 xhr.send = maskFn(function (this: XMLHttpRequest, body?: Document | XMLHttpRequestBodyInit | null) {
                     let finalBody = body;
@@ -399,8 +411,8 @@ const installInterceptor = (config: TamperRules): void => {
                             }
                         }
                     } catch { /* 请求体不是 JSON，原样发出去 */ }
-                    return originalSend.apply(this, [finalBody as XMLHttpRequestBodyInit]);
-                } as typeof xhr.send, originalSend);
+                    originalSend.call(this, finalBody as XMLHttpRequestBodyInit);
+                }, originalSend);
 
                 return xhr;
             }, originalXHR);
@@ -415,7 +427,6 @@ const installInterceptor = (config: TamperRules): void => {
             }
 
             window.XMLHttpRequest = WrappedXHR as unknown as typeof XMLHttpRequest;
-
             /*
              * `responseType = 'json'` 时浏览器自己解析响应，绕过 JSON.parse 与
              * `Response.json`。这是现代前端最常见的取数方式，不在这里补一刀则
@@ -423,12 +434,13 @@ const installInterceptor = (config: TamperRules): void => {
              */
             try {
                 const respDesc = Object.getOwnPropertyDescriptor(originalXHR.prototype, 'response');
-                if (respDesc && typeof respDesc.get === 'function') {
+                const originalResponseGetter = respDesc?.get;
+                if (respDesc && typeof originalResponseGetter === 'function') {
                     Object.defineProperty(originalXHR.prototype, 'response', {
                         configurable: true,
                         enumerable: respDesc.enumerable,
                         get(this: XMLHttpRequest) {
-                            const v = respDesc.get!.call(this) as unknown;
+                            const v = originalResponseGetter.call(this) as unknown;
                             try {
                                 const c = host.__interceptorCompiled;
                                 if (v && typeof v === 'object' && c && c.rules.length) {
@@ -553,24 +565,25 @@ const installInterceptor = (config: TamperRules): void => {
     const hookStorage = (areaName: 'localStorage' | 'sessionStorage'): void => {
         try {
             const storage = window[areaName];
-            if (!storage || typeof storage.getItem !== 'function') return;
-            const originalGetItem = storage.getItem;
+            const originalGetItem = storage && storage.getItem;
+            if (typeof originalGetItem !== 'function') return;
             storage.getItem = maskFn(function (this: Storage, key: string) {
                 try {
                     const c = host.__interceptorCompiled;
-                    const rules = (c && c.rules) || [];
+                    const rules: FieldRule[] = (c && c.rules) || [];
                     const k = String(key);
                     const urls = [pageUrl()];
                     for (let i = 0; i < rules.length; i++) {
+                        const rule = rules[i];
                         // 存储按「键」精确匹配：整条 jsonPath 或它的末段都算
-                        if (rules[i].key !== k && rules[i].rawPath !== k) continue;
-                        if (rules[i].match && !rules[i].match(urls)) continue;
+                        if (rule.key !== k && rule.rawPath !== k) continue;
+                        if (rule.match && !rule.match(urls)) continue;
                         console.log('%c[Tamper] 📖 存储读取已改写: ' + areaName + '.' + k, 'color: #f80');
-                        return rules[i].rawValue;
+                        return rule.rawValue;
                     }
                 } catch { /* 规则出错就返回真实值 */ }
-                return originalGetItem.apply(this, [key]);
-            } as typeof storage.getItem, originalGetItem);
+                return originalGetItem.call(this, key);
+            }, originalGetItem);
         } catch { /* 该存储区不可访问 */ }
     };
     hookStorage('localStorage');
@@ -591,26 +604,50 @@ const installInterceptor = (config: TamperRules): void => {
  * **唯一权威是 `chrome.storage.local`**，这里是它的同步读口：注入发生在页面
  * 就绪事件里，那时再去 await 一次 storage 会让注入晚于页面自己的脚本 ——
  * 而"页面在装钩前就把 JSON.parse 存了引用"正是规则失效的一条已知路径。
+ *
+ * ## 加载必须只有一个入口，且读它的人必须 await 过它
+ *
+ * SW 每次被唤醒都会重新求值本模块，`rules` 从空开始。曾经把"从存储恢复"放在
+ * 页面就绪事件里 —— 于是**先问规则的调用方拿到的是空数组**：用户明明存了规则，
+ * Agent 的 `tamper get` 回一个空列表，面板也可能在那一瞬间显示"没有规则"。
+ *
+ * 现在 `loadRules()` 是唯一的恢复点，且它自己保证只读一次盘（`loading` 缓存）。
+ * 任何读规则的地方都必须先 await 它，所以 `getRules()` 这个同步口**不存在** ——
+ * 有它就会有人用，用了就会读到空。
  */
 let rules: TamperRules = emptyRules();
 
-export const getRules = (): TamperRules => rules;
+/** 在途的加载。并发调用合并成一次读盘，见 loadRules */
+let loading: Promise<void> | null = null;
 
-/** 从存储恢复。SW 每次被唤醒都会重新求值本模块，所以这一步要在用到之前完成 */
-export const hydrateRules = async (): Promise<TamperRules> => {
-    try {
-        const got = await chrome.storage.local.get(TAMPER_STORE_KEY);
-        const saved = got[TAMPER_STORE_KEY] as Partial<TamperRules> | undefined;
-        rules = {
-            interceptRules: Array.isArray(saved?.interceptRules) ? saved!.interceptRules : [],
-            requestRules: Array.isArray(saved?.requestRules) ? saved!.requestRules : [],
-            headerRules: Array.isArray(saved?.headerRules) ? saved!.headerRules : [],
-        };
-    } catch {
-        // 读不出来就用空规则：注入一个空引擎无害，而抛出去会让页面就绪的
-        // 那条链整个断掉（嗅探的自动扫描也挂在同一个事件上）
-        rules = emptyRules();
+/**
+ * 恢复规则。第一次调用读盘，之后直接返回内存镜像。
+ *
+ * 读盘失败按空规则处理而不是抛：调用方是页面就绪事件与面板请求，让它们各自
+ * 去处理一个"读存储失败"只会得到四种不同的处理方式。空规则是安全的降级
+ * （不注入任何东西），失败原因留在控制台。
+ *
+ * 缓存的是**读盘这件事做完了**，不是读到的那个对象 —— 否则 `applyRules` 之后
+ * 这里会一直回旧的那份，而"改了规则界面不更新"正是最难查的一类症状。
+ */
+export const loadRules = async (): Promise<TamperRules> => {
+    if (!loading) {
+        loading = (async (): Promise<void> => {
+            try {
+                const got = await chrome.storage.local.get(TAMPER_STORE_KEY);
+                const saved = got[TAMPER_STORE_KEY] as Partial<TamperRules> | undefined;
+                rules = {
+                    interceptRules: Array.isArray(saved?.interceptRules) ? saved.interceptRules : [],
+                    requestRules: Array.isArray(saved?.requestRules) ? saved.requestRules : [],
+                    headerRules: Array.isArray(saved?.headerRules) ? saved.headerRules : [],
+                };
+            } catch (e) {
+                console.warn('[Tamper] 读取规则失败，按空规则处理：', e);
+                rules = emptyRules();
+            }
+        })();
     }
+    await loading;
     return rules;
 };
 
@@ -620,8 +657,13 @@ export const hydrateRules = async (): Promise<TamperRules> => {
  * 失败**不抛**：注入会在每个页面就绪事件里发生，而受限页面（chrome://、
  * 扩展商店、PDF 阅读器）本来就不允许注入。抛出去只会让调用方多一层无意义的
  * try/catch，且把"这个页面注入不了"（正常）与"规则写错了"（异常）混在一起。
+ *
+ * 自己先 await `loadRules()`：注入是**规则的下游**，拿到空镜像就注入等于
+ * 装了一个什么都不做的钩子 —— 而页面看起来"装了"（控制台有 Activated 日志），
+ * 用户会以为规则不生效是规则本身的问题。
  */
 export const injectRules = async (tabId: number): Promise<boolean> => {
+    const current = await loadRules();
     try {
         await chrome.scripting.executeScript({
             target: { tabId, frameIds: [0] },
@@ -629,7 +671,7 @@ export const injectRules = async (tabId: number): Promise<boolean> => {
             // 隔离世界里改的是我们那份副本，页面一行都感知不到。
             world: 'MAIN',
             func: installInterceptor,
-            args: [rules],
+            args: [current],
         });
         return true;
     } catch {

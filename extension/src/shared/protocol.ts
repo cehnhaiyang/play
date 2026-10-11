@@ -30,7 +30,7 @@
  * 会让"这个字段能不能放"变成看运气 —— 在这里随手塞一张 base64 图片没问题，
  * 同样的代码走桥就会静默失败。
  */
-import type { AiChatMessage, AiUsage, MediaSourceChannel, MediaType } from '../../../shared/meta';
+import type { AiChatMessage, AiUsage, CookieItem, HeaderRule, MediaSourceChannel, MediaType, TamperRule } from '../../../shared/meta';
 
 /* ========================================================================== */
 /* 0. 公共                                                                     */
@@ -153,7 +153,32 @@ export type BallRequest =
     | { target: 'sw'; kind: 'page-navigate'; tabId: number; url: string }
     | { target: 'sw'; kind: 'cookies-get'; url: string }
     | { target: 'sw'; kind: 'cookies-set'; url: string; name: string; value: string }
-    | { target: 'sw'; kind: 'cookies-remove'; url: string; name: string };
+    | { target: 'sw'; kind: 'cookies-remove'; url: string; name: string }
+    /** 读篡改规则（面板的「规则」「请求头」两个页签） */
+    | { target: 'sw'; kind: 'tamper-get' }
+    /** 写篡改规则。只传要改的类别，其余原样保留 */
+    | {
+        target: 'sw';
+        kind: 'tamper-set';
+        tabId?: number;
+        interceptRules?: TamperRule[];
+        requestRules?: TamperRule[];
+        headerRules?: HeaderRule[];
+    }
+    /** 只注入、不改规则：把当前页补齐（切标签页之后那个页面还没装钩子） */
+    | { target: 'sw'; kind: 'tamper-inject'; tabId?: number }
+    /** 读页面存储（local / session / cookie）——「存储」与「JWT」页签的数据源 */
+    | { target: 'sw'; kind: 'page-storage-read'; tabId?: number }
+    /** 写一条存储。`value === null` 表示删除；`area === 'cookie'` 时另收完整 cookie 对象 */
+    | {
+        target: 'sw';
+        kind: 'page-storage-write';
+        tabId?: number;
+        area: 'local' | 'session' | 'cookie';
+        key: string;
+        value: string | null;
+        cookie?: CookieItem;
+    };
 
 /** SW 推给悬浮球的事件（广播，不针对某一条请求） */
 export type BallEvent =

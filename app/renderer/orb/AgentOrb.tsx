@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { AgentMessage, AgentScript, AgentUsage } from '../../../shared/meta';
+import type { AgentMessage, AgentScript, AgentUsage, HeaderRule, TamperRule } from '../../../shared/meta';
 import { exportAgentSession } from '../../../shared/core';
 import { OrbShell } from './OrbShell';
 import { TerminalIcon } from './icons';
+import { droppedHint, HeadersTab, JwtTab, RulesTab, StorageTab } from './AgentTabs';
 import {
     agentAction,
     bridge,
@@ -50,13 +51,33 @@ const COMPACT_RATIOS = [0.4, 0.6, 0.8, 1] as const;
  * `agent-delta` 用来让文字实时滚起来，`agent-snapshot` 才是真值。所以每收到
  * 一次快照就丢掉本地累积的增量 —— 两者叠加会让文字重复一遍。
  *
- * ## 两个页签
+ * ## 六个页签
  *
- * 「对话」与「脚本」。脚本页不是装饰：`script_store` 工具能让模型存下脚本并
- * 按 URL 自动执行，而**只有这个界面能让人看见存了什么、改掉它、或者停掉它**。
- * 没有它的话，模型偷偷装上一个每次打开某站点就自动跑的脚本，用户无从知晓 ——
- * 那既是能力缺失也是安全问题。
+ * 「对话」「规则」「请求头」「存储」「JWT」「脚本」。后五个不是装饰：
+ *
+ *  · **脚本**：`script_store` 工具能让模型存下脚本并按 URL 自动执行，而
+ *    **只有这个界面能让人看见存了什么、改掉它、或者停掉它**。没有它的话，
+ *    模型偷偷装上一个每次打开某站点就自动跑的脚本，用户无从知晓 ——
+ *    那既是能力缺失也是安全问题。
+ *  · **规则 / 请求头**：模型改的规则立刻生效但不落盘，用户必须能看见它改了什么，
+ *    并且能自己写规则（不是所有篡改都值得让模型代劳）。
+ *  · **存储 / JWT**：Agent 改页面时最常问的两个问题 —— "这个值到底存在哪"、
+ *    "这个 token 里有什么"。不能查就只能反复让模型去读，慢且费上下文。
+ *
+ * 页签清单与 `新建文件夹/BrowsePanel.tsx` 的 `AGENT_TABS` 一致。
  */
+
+/** 页签清单。顺序即显示顺序：对话在最前，脚本在最后（它是低频的审阅页） */
+type AgentTab = 'chat' | 'rules' | 'headers' | 'storage' | 'jwt' | 'scripts';
+
+const AGENT_TABS: { id: AgentTab; label: string }[] = [
+    { id: 'chat', label: '对话' },
+    { id: 'rules', label: '规则' },
+    { id: 'headers', label: '请求头' },
+    { id: 'storage', label: '存储' },
+    { id: 'jwt', label: 'JWT' },
+    { id: 'scripts', label: '脚本' },
+];
 
 export const AgentOrb = () => {
     const [snapshot, setSnapshot] = useState<EngineSnapshot | null>(null);
@@ -64,7 +85,18 @@ export const AgentOrb = () => {
     const [input, setInput] = useState('');
     const [error, setError] = useState('');
     const [connected, setConnected] = useState(true);
-    const [tab, setTab] = useState<'chat' | 'scripts'>('chat');
+    const [tab, setTab] = useState<AgentTab>('chat');
+
+    /* 篡改规则。**唯一权威在插件**（tamper-get / tamper-set），这里只是它的一个视图 */
+    const [rules, setRules] = useState<{ interceptRules: TamperRule[]; requestRules: TamperRule[]; headerRules: HeaderRule[] }>({
+        interceptRules: [],
+        requestRules: [],
+        headerRules: [],
+    });
+    /** 规则的保存状态。`null` = 还没改过，不显示任何提示 */
+    const [rulesSaved, setRulesSaved] = useState<boolean | null>(null);
+    /** 当前活动标签页地址。存储页与 JWT 页按它取数据 */
+    const [activePage, setActivePage] = useState('');
 
     /* 桥的连接状态：查一次，之后跟着推送走。理由见 SniffOrb 同名那段 */
     useEffect(() => {
@@ -106,6 +138,53 @@ export const AgentOrb = () => {
             }));
         }
     }), []);
+
+    /**
+     * 拉一次篡改规则与当前页面。
+     *
+     * 只在连上桥之后拉，理由同上面那个快照 effect。**每次切到规则/请求头/
+     * 存储/JWT 页时也拉一次** —— 模型可能刚用 `tamper` 工具改过规则，
+     * 而那条改动不经桥推事件（它改的是引擎内存，不是 UI 状态）。
+     */
+    const isDataTab = tab === 'rules' || tab === 'headers' || tab === 'storage' || tab === 'jwt';
+
+    useEffect(() => {
+        if (!connected || !isDataTab) return;
+        void (async () => {
+            try {
+                const [res, page] = await Promise.all([
+                    bridge<{ rules: { interceptRules: TamperRule[]; requestRules: TamperRule[]; headerRules: HeaderRule[] } }>('tamper-get'),
+                    bridge<{ pageUrl: string }>('sniffer-active-page'),
+                ]);
+                setRules(res.rules);
+                setActivePage(page.pageUrl || '');
+                setError('');
+            } catch (e) {
+                setError(e instanceof Error ? e.message : String(e));
+            }
+        })();
+    }, [connected, isDataTab]);
+
+    /**
+     * 保存规则。
+     *
+     * `tamper-set` 会同时落盘并**立刻对当前标签页注入一次** —— 不注入的话，
+     * 用户改完规则回到页面上什么都没发生，而面板显示"已保存"。
+     */
+    const saveRules = useCallback(async (next: typeof rules) => {
+        // 先更新本地视图：输入框是受控的，不等往返就画出来才不会卡顿
+        setRules(next);
+        setError('');
+        try {
+            const result = await bridge<{ saved: boolean }>('tamper-set', next);
+            setRulesSaved(result.saved);
+            setConnected(true);
+        } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+            setRulesSaved(false);
+            setConnected(await bridgeConnected());
+        }
+    }, []);
 
     /** 发一个动作给引擎 */
     const act = useCallback(async (action: AgentAction): Promise<unknown> => {
@@ -154,19 +233,34 @@ export const AgentOrb = () => {
     const scripts = state?.scripts || [];
     const canEdit = state?.canEdit !== false && !busy;
 
+    /*
+     * 页签条。
+     *
+     * 放在**标题栏下面**而不是塞进标题栏：标题栏只有 440px 宽，六个页签加上
+     * 停止/清空/收起会全部挤成单字。独立一行还能给每个页签足够的点击面积。
+     */
+    const tabBar = (
+        <nav className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-white/[0.07] px-1.5 py-1">
+            {AGENT_TABS.map((entry) => (
+                <button
+                    key={entry.id}
+                    type="button"
+                    onClick={() => setTab(entry.id)}
+                    className={`shrink-0 rounded-lg px-2 py-1 text-[10px] font-medium transition ${
+                        tab === entry.id
+                            ? 'bg-fuchsia-500/20 text-fuchsia-200'
+                            : 'text-slate-500 hover:bg-white/[0.06] hover:text-slate-300'
+                    }`}
+                >
+                    {entry.label}
+                    {entry.id === 'scripts' && scripts.length > 0 ? ` ${scripts.length}` : ''}
+                </button>
+            ))}
+        </nav>
+    );
+
     const toolbar = (
         <>
-            <button
-                type="button"
-                onClick={() => setTab((v) => (v === 'chat' ? 'scripts' : 'chat'))}
-                className={`shrink-0 rounded-lg px-2 py-1 text-[10px] font-medium transition ${
-                    tab === 'scripts'
-                        ? 'bg-fuchsia-500/20 text-fuchsia-200'
-                        : 'bg-white/[0.06] text-slate-400 hover:bg-white/[0.12] hover:text-slate-200'
-                }`}
-            >
-                脚本{scripts.length > 0 ? ` ${scripts.length}` : ''}
-            </button>
             {busy && (
                 <button
                     type="button"
@@ -228,7 +322,9 @@ export const AgentOrb = () => {
                 </div>
             )}
 
-            {tab === 'scripts' ? (
+            {tabBar}
+
+            {tab === 'scripts' && (
                 <ScriptList
                     scripts={scripts}
                     busy={busy}
@@ -236,7 +332,50 @@ export const AgentOrb = () => {
                     onRun={(id) => void act({ type: 'run-script', id })}
                     onRemove={(id) => void act({ type: 'remove-script', id })}
                 />
-            ) : (
+            )}
+
+            {tab === 'rules' && (
+                <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
+                    {/*
+                      规则不落盘就等于没配 —— 而"引擎会跳过这条"是最容易让人
+                      白费功夫的一处：面板显示启用中，页面里什么都没发生。
+                      提示条与引擎的丢弃判据共用一份（collectDroppedRules）。
+                    */}
+                    {droppedHint(rules) && (
+                        <div className="mb-2 rounded-lg border border-amber-400/20 bg-amber-500/[0.08] px-2 py-1.5 text-[9px] leading-relaxed text-amber-200">
+                            {droppedHint(rules)}
+                        </div>
+                    )}
+                    <RulesTab rules={rules} onChange={(next) => void saveRules(next)} />
+                    <SaveHint saved={rulesSaved} />
+                </div>
+            )}
+
+            {tab === 'headers' && (
+                <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
+                    {droppedHint(rules) && (
+                        <div className="mb-2 rounded-lg border border-amber-400/20 bg-amber-500/[0.08] px-2 py-1.5 text-[9px] leading-relaxed text-amber-200">
+                            {droppedHint(rules)}
+                        </div>
+                    )}
+                    <HeadersTab headers={rules.headerRules} onChange={(headerRules) => void saveRules({ ...rules, headerRules })} />
+                    <SaveHint saved={rulesSaved} />
+                </div>
+            )}
+
+            {tab === 'storage' && (
+                <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
+                    <StorageTab pageUrl={activePage} />
+                </div>
+            )}
+
+            {tab === 'jwt' && (
+                <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
+                    <JwtTab pageUrl={activePage} />
+                </div>
+            )}
+
+            {tab === 'chat' && (
                 <>
                     <div className="min-h-0 flex-1 overflow-y-auto">
                         {messages.length === 0 && !streaming ? (
@@ -363,6 +502,40 @@ export const AgentOrb = () => {
                 </>
             )}
         </OrbShell>
+    );
+};
+
+/* ========================================================================== */
+/* 保存提示                                                                    */
+/* ========================================================================== */
+
+/**
+ * 规则的保存结果。
+ *
+ * 只有**失败**才值得一直显示。成功那条 2 秒后自己消失 —— 常驻的"已保存"
+ * 会让人以为它说的是"当前草稿已保存"，而实际上它说的是"上一次保存成功了"。
+ * `saved === null`（还没改过）时什么都不画。
+ */
+const SaveHint = ({ saved }: { saved: boolean | null }) => {
+    const [visible, setVisible] = useState(saved !== null);
+
+    useEffect(() => {
+        if (saved === null) return;
+        setVisible(true);
+        // 失败不自动消失：用户必须看到它，否则会以为规则已经存住了
+        if (!saved) return;
+        const timer = window.setTimeout(() => setVisible(false), 2000);
+        return () => window.clearTimeout(timer);
+    }, [saved]);
+
+    if (saved === null || !visible) return null;
+
+    return (
+        <p className={`mt-2 text-[9px] ${saved ? 'text-emerald-400/70' : 'text-rose-300'}`}>
+            {saved
+                ? '已保存并对当前页面生效。'
+                : '规则已对当前页面生效，但写入本地存储失败（配额可能已满）—— 重启浏览器后会丢失。'}
+        </p>
     );
 };
 

@@ -1,5 +1,6 @@
 import type { CookieItem } from '../../../shared/meta';
 import type { AgentHost, AgentTab, EvaluateResult } from '../agent/host';
+import { applyRules, loadRules } from '../background/tamper';
 
 /**
  * 页面宿主：用 `chrome.debugger` 在页面**主世界**执行代码。
@@ -398,4 +399,30 @@ export const pageHost: AgentHost = {
     getCookies,
     setCookie,
     removeCookie,
+
+    /*
+     * 篡改规则引擎。
+     *
+     * 直接转发给 `background/tamper.ts` —— 它才是规则与注入的唯一所有者。
+     * 这里**不缓存**规则：每次现读，否则引擎拿到的是 SW 唤醒那一刻的快照，
+     * 而用户可能在面板里刚改过。
+     *
+     * offscreen 文档与 SW 同属一个扩展，import 是免费的（同一个 bundle 图）。
+     */
+    tamper: {
+        rules: () => loadRules(),
+        applyRules: (intercept, request, headers) => {
+            // 工具层语义：只改内存。落盘要用户显式点「应用更改」（见 tamper-set）
+            void applyRules(
+                { interceptRules: intercept, requestRules: request, headerRules: headers },
+            );
+        },
+        saveRules: async (intercept, request, headers, tabId) => {
+            const { saved } = await applyRules(
+                { interceptRules: intercept, requestRules: request, headerRules: headers },
+                tabId,
+            );
+            return saved;
+        },
+    },
 };

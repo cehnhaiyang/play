@@ -192,17 +192,6 @@ const headerRuleToProtocol = (rule: HeaderRule): Record<string, unknown> => ({
  */
 const NO_PAGE = '当前没有可用的页面';
 
-/**
- * 篡改引擎未接入时的回执。
- *
- * **必须如实报错，不能返回 applied:true。** 规则存下来却没人执行，是本项目里
- * 最难查的一类故障：模型收到成功回执后会在页面上反复找"为什么改了没反应"，
- * 而真正的原因在另一层。
- */
-const TAMPER_UNAVAILABLE = JSON.stringify({
-    error: '篡改引擎尚未接入插件侧（规则引擎仍在迁移中）。此工具当前不可用，请改用 js 工具在页面里直接验证。',
-});
-
 export const dispatchTool = async (
     tool: AgentToolName,
     args: Record<string, unknown>,
@@ -332,10 +321,10 @@ export const dispatchTool = async (
 
         case 'tamper': {
             const engine = ctx.host.tamper;
-            if (!engine) return TAMPER_UNAVAILABLE;
 
             const action = asString(args.action) || 'get';
-            const current = engine.rules;
+            // 现读：规则可能刚被用户在面板里改过，而引擎的内存镜像不是权威
+            const current = await engine.rules();
 
             if (action === 'get') {
                 return JSON.stringify({

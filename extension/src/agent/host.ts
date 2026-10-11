@@ -26,11 +26,12 @@ import type { CookieItem, HeaderRule, TamperRule } from '../../../shared/meta';
  * | `onPageReady()` | `onPageReady()` | 语义相同，事件源从 webview 换成 webNavigation |
  * | `tamper` | `tamper` | 语义相同，实现换到插件侧 |
  *
- * ## 两个成员是**可选**的，且这是刻意的
+ * ## 所有成员都是必填的
  *
- * `tamper` 依赖规则引擎，而规则引擎还没接进来。给它一个空实现（存下规则
- * 但没人执行）比没有更糟：模型会收到 `applied: true`，然后在页面上什么都
- * 看不到，还查不出为什么。所以缺宿主时工具如实报"未接入"。
+ * 曾经把 `tamper` 标成可选、并在缺失时让工具如实报"未接入"。那个设计是错的：
+ * 它把一个**未完成的功能**伪装成一种合法状态，模型收到"未接入"只会换个方式
+ * 再试，而用户看到的是"Agent 说它改不了"。现在插件侧有完整的规则引擎
+ * （`background/tamper.ts`），接口就该是必填的 —— 缺了是类型错误，不是运行时分支。
  */
 
 /** 一个页面目标的标识。tabId 是唯一键，URL 是给模型看的 */
@@ -74,21 +75,26 @@ export interface AgentHost {
     removeCookie: (tabId: number, name: string) => Promise<boolean>;
 
     /**
-     * 篡改规则引擎。**未接入时不存在**。
+     * 篡改规则引擎。
      *
-     * 不提供它时 `tamper` 工具会如实报错，而不是假装成功 ——
-     * 规则存下来却没人执行，是本项目里最难查的一类故障。
+     * ## 为什么 `rules` 是异步的
      *
-     * `rules` 是**摊平**的规则集合。应用侧那份 `TamperState` 把它裹在
-     * `state.rules` 里，而引擎只需要这三张表 —— 照搬那层嵌套会让引擎多认识
-     * 一个它不关心的结构，也更容易在迁移时把 `state.state` 写错。
+     * 规则的唯一权威是 `chrome.storage.local`，而读它是异步的。曾经把它做成
+     * 同步 getter（读内存镜像）—— 于是**读到的可能是"还没加载完"的空数组**：
+     * 用户明明存了规则，`tamper get` 回一个空列表，模型据此以为没有规则，
+     * 转头又加了一遍。把它做成 `await` 之后，"读到未加载状态"在类型上就不存在了。
+     *
+     * `applyRules` 是**只改内存不落盘**的那个（工具层语义：模型改的规则立刻
+     * 生效，但用户点「应用更改」才持久化）。落盘版是 `saveRules`。
      */
-    tamper?: {
-        rules: {
+    tamper: {
+        rules: () => Promise<{
             interceptRules: TamperRule[];
             requestRules: TamperRule[];
             headerRules: HeaderRule[];
-        };
+        }>;
         applyRules: (intercept: TamperRule[], request: TamperRule[], headers: HeaderRule[]) => void;
+        /** 改规则并落盘，同时立刻对指定标签页注入一次 */
+        saveRules: (intercept: TamperRule[], request: TamperRule[], headers: HeaderRule[], tabId?: number) => Promise<boolean>;
     };
 }

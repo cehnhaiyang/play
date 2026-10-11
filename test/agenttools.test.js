@@ -311,17 +311,24 @@ const buildDispatch = (tamperState, scripts = [], webviewUrl = DEFAULT_TAB_URL) 
     };
 
     const tamper = JSON.parse(JSON.stringify(tamperState));
-    const tamperRef = {
-        current: {
-            rules: {
-                interceptRules: tamper.intercept,
-                requestRules: tamper.request,
-                headerRules: tamper.headers,
-            },
-            applyRules: (i, r, h) => {
-                calls.apply++;
-                tamperRef.current.rules = { interceptRules: i, requestRules: r, headerRules: h };
-            },
+    /*
+     * `rules` 是**函数**而不是属性：规则的唯一权威是插件的 chrome.storage，
+     * 而读它是异步的。做成属性时读到的是内存镜像，而镜像可能是"还没加载完"
+     * 的空数组 —— 用户明明存了规则，模型却被告知没有。
+     *
+     * 断言看 `tamperRef.rules`，它就是引擎当前那一份。
+     */
+    const tamperRef = { rules: {} };
+    tamperRef.rules = {
+        interceptRules: tamper.intercept,
+        requestRules: tamper.request,
+        headerRules: tamper.headers,
+    };
+    tamperRef.current = {
+        rules: async () => tamperRef.rules,
+        applyRules: (i, r, h) => {
+            calls.apply++;
+            tamperRef.rules = { interceptRules: i, requestRules: r, headerRules: h };
         },
     };
 
@@ -702,7 +709,7 @@ const run = async () => {
         assert(out.counts.request === 1, `request 应保留 1 条，实际 ${out.counts.request}`);
         assert(out.counts.headers === 1, `headers 应为 1 条，实际 ${out.counts.headers}`);
         assert(calls.apply === 1, '应调用 applyRules 一次');
-        const st = tamperRef.current.rules;
+        const st = tamperRef.rules;
         assert(st.interceptRules[0].jsonPath === 'vip', '拦截规则必须原样保留');
         assert(st.headerRules[0].headerName === 'Referer', '请求头规则名应写入内部 headerName');
     });
@@ -742,7 +749,7 @@ const run = async () => {
             action: 'set',
             intercept: [{ enabled: true, url_pattern: '*', key: 'vip', value: true, op: 'set' }],
         });
-        const v = tamperRef.current.rules.interceptRules[0].newValue;
+        const v = tamperRef.rules.interceptRules[0].newValue;
         assert(typeof v === 'string', `newValue 必须是字符串，实际 ${typeof v}`);
         assert(v === 'true', `newValue 应为 "true"，实际 ${JSON.stringify(v)}`);
     });
@@ -755,11 +762,11 @@ const run = async () => {
             action: 'set',
             intercept: [{ enabled: true, url_pattern: '*', key: 'code', value: '123', op: 'set' }],
         });
-        const v = tamperRef.current.rules.interceptRules[0].newValue;
+        const v = tamperRef.rules.interceptRules[0].newValue;
         assert(v === '=123', `字符串必须强制前缀，实际 ${JSON.stringify(v)}（否则引擎会按数字 123 写入）`);
         // 往返：get 应把 "=123" 逆解回字符串 "123"
         const { dispatchTool: d2 } = buildDispatch({
-            intercept: tamperRef.current.rules.interceptRules,
+            intercept: tamperRef.rules.interceptRules,
             request: [], headers: [], cookies: [], local: {}, session: {},
         });
         const got = j(await d2('tamper', { action: 'get' }));
@@ -775,7 +782,7 @@ const run = async () => {
             intercept: [{ enabled: true, url_pattern: '*', key: 'secret', op: 'delete' }],
         }));
         assert(out.applied === true, '应成功');
-        assert(tamperRef.current.rules.interceptRules[0].newValue === 'undefined',
+        assert(tamperRef.rules.interceptRules[0].newValue === 'undefined',
             'delete 应译成 undefined（引擎删字段语义）');
     });
 
@@ -821,7 +828,7 @@ const run = async () => {
             headers: [{ enabled: true, url_pattern: '*', name: 'X-Retry', value: 42 }],
         }));
         assert(out.applied === true, '应成功');
-        const hv = tamperRef.current.rules.headerRules[0].headerValue;
+        const hv = tamperRef.rules.headerRules[0].headerValue;
         assert(hv === '42', `headerValue 应为 "42"，实际 ${JSON.stringify(hv)}（空串会删除该请求头）`);
     });
 
@@ -833,7 +840,7 @@ const run = async () => {
             action: 'set',
             headers: [{ enabled: true, url_pattern: '*', name: 'X-Flag', value: false }],
         });
-        const hv = tamperRef.current.rules.headerRules[0].headerValue;
+        const hv = tamperRef.rules.headerRules[0].headerValue;
         assert(hv === 'false', `headerValue 应为 "false"，实际 ${JSON.stringify(hv)}`);
     });
 

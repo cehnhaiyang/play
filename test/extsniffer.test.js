@@ -542,6 +542,9 @@ const run = () => {
             'sniffer-set-enabled', 'sniffer-get-state', 'sniffer-clear',
             'sniffer-clear-page', 'sniffer-scan', 'sniffer-active-page',
             'sniffer-ai-scan', 'downloads-start', 'agent-snapshot', 'agent-action',
+            // 面板的「规则 / 请求头 / 存储 / JWT」四个页签走的就是这几条
+            'tamper-get', 'tamper-set', 'tamper-inject',
+            'page-storage-read', 'page-storage-write',
         ];
         for (const kind of mustForward) {
             assert(body.includes(`'${kind}'`), `dispatchBall 少了 ${kind} 这条分支`);
@@ -560,6 +563,89 @@ const run = () => {
                 `dispatchBall 里直接调了 ${fn} —— 与桥重叠的操作必须整条转发，`
                 + '只转一半等于又造了一份实现。');
         }
+    });
+
+    /* ====================================================================== */
+    /* 8.4 端点表 / 协议 / 桥分发三处必须对得上                                    */
+    /* ====================================================================== */
+
+    /**
+     * 新增一个桥端点要同时改三个地方：`service-worker.ts` 的 `dispatchBridge`
+     * 分支、`shared/protocol.ts` 的 `BallRequest`、以及 `dispatchBall` 的转发。
+     *
+     * 漏掉任何一处的表现都是**运行时才暴露**，而且都是"点了没反应"：
+     *  · 漏了 `dispatchBridge` 分支 —— 插件回"不认识的桥端点"；
+     *  · 漏了 `dispatchBall` 转发 —— 球发出去的消息落到穷尽检查，抛"未知消息"。
+     *
+     * 实测过一次：`tamper-set` 加进了归属表与 `dispatchBridge`，却忘了
+     * `BallRequest` 与转发。球上的规则页点"保存"直接报"未知消息"，
+     * 而插件侧的单测全绿 —— 因为那些测的是 `dispatchBridge`，球根本不走它。
+     *
+     * ## 为什么判据取自**球的调用点**而不是归属表
+     *
+     * `BRIDGE_ENDPOINTS` 里 `route: 'extension'` 的条目并非都由插件的
+     * `dispatchBridge` 实现 —— 迁移期还有一批（get-cookies、acgmho-* 等）
+     * 仍由应用侧的 handler 直接服务，那条名单在 `bridge.test.js` 里。
+     * 拿归属表当判据会把那批全部误报。
+     *
+     * 真正要守的是"球调的每一个端点，插件都认识"。所以这里扫的是
+     * `app/renderer/orb/` 下的**实际调用字面量**——那是唯一权威。
+     */
+    check('悬浮球调的每个桥端点都有 dispatchBridge 分支', () => {
+        const orbDir = path.join(ROOT, 'app', 'renderer', 'orb');
+        const swSrc = fs.readFileSync(
+            path.join(ROOT, 'extension', 'src', 'background', 'service-worker.ts'), 'utf8');
+        const start = swSrc.indexOf('const dispatchBridge');
+        assert(start > 0, '找不到 dispatchBridge');
+        const body = swSrc.slice(start, swSrc.indexOf('\n};', start));
+
+        /*
+         * **必须先剥掉注释再匹配。**
+         *
+         * 变异测试实测过：把 `case 'tamper-set'` 整段用块注释注掉之后，
+         * 断言**照样绿** —— 因为那个字面量还在注释里。判据是"有没有这条分支"，
+         * 而注释掉的分支不是分支。这是源码文本断言最容易骗过自己的地方。
+         */
+        const code = body
+            .replace(/\/\*[\s\S]*?\*\//g, '')
+            .replace(/^\s*\/\/.*$/gm, '');
+
+        const called = new Set();
+        for (const file of fs.readdirSync(orbDir)) {
+            if (!/\.tsx?$/.test(file)) continue;
+            const src = fs.readFileSync(path.join(orbDir, file), 'utf8');
+            // bridge('endpoint') / bridge<T>('endpoint') / agentAction 走的是 agent-action
+            for (const m of src.matchAll(/\bbridge(?:<[^>]*>)?\(\s*'([\w-]+)'/g)) called.add(m[1]);
+        }
+        assert(called.size >= 8, `球的桥调用太少（${called.size}），正则可能失配了`);
+
+        const missing = [...called].filter((name) => !code.includes(`case '${name}'`));
+        eq(missing.length, 0,
+            `球调了这些端点，但 dispatchBridge 没有分支：${missing.join('、')}。`
+            + '表现是插件回"不认识的桥端点"，而界面上只是"点了没反应"。');
+    });
+
+    check('BallRequest 的每个 kind 都在 dispatchBall 里有分支', () => {
+        const protocolSrc = fs.readFileSync(
+            path.join(ROOT, 'extension', 'src', 'shared', 'protocol.ts'), 'utf8');
+        const start = protocolSrc.indexOf('export type BallRequest');
+        assert(start > 0, '找不到 BallRequest');
+        const block = protocolSrc.slice(start, protocolSrc.indexOf('export type BallEvent', start));
+
+        // kind 都是字符串字面量，抓 `kind: '...'`
+        const kinds = [...block.matchAll(/kind: '([\w-]+)'/g)].map((m) => m[1]);
+        assert(kinds.length > 10, `BallRequest 的 kind 太少（${kinds.length}），正则可能失配了`);
+
+        const swSrc = fs.readFileSync(
+            path.join(ROOT, 'extension', 'src', 'background', 'service-worker.ts'), 'utf8');
+        const dStart = swSrc.indexOf('const dispatchBall');
+        assert(dStart > 0, '找不到 dispatchBall');
+        const body = swSrc.slice(dStart, swSrc.indexOf('\n};', dStart));
+
+        const missing = kinds.filter((kind) => !body.includes(`case '${kind}'`));
+        eq(missing.length, 0,
+            `这些 kind 在 BallRequest 里声明了，但 dispatchBall 没有分支：${missing.join('、')}。`
+            + '球发出去会落到穷尽检查，抛"未知消息"—— 表现是界面点了没反应。');
     });
 
     /* ====================================================================== */

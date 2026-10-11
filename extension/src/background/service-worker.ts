@@ -42,8 +42,11 @@ import {
 import type { MediaType } from '../../../shared/meta';
 import { agentBridge } from './agent-bridge';
 import { emitBridgeEvent, ensureBridge, setDispatcher } from './bridge-port';
+import { pageHost } from '../offscreen/page-host';
+import { applyRules, loadRules, injectRules } from './tamper';
 import type { AgentEngine } from '../agent/engine';
 import { isGenericTitle, isLinkFromPage } from '../../../shared/core/sniff';
+import type { CookieItem, HeaderRule, TamperRule } from '../../../shared/meta';
 
 /* ========================================================================== */
 /* 1. 状态：一律落 storage，内存只做缓存                                       */
@@ -696,6 +699,22 @@ chrome.webNavigation.onCompleted.addListener((details) => {
     // 只扫主框架，理由见 scanTab
     if (details.frameId !== 0 || details.tabId < 0) return;
     void (async () => {
+        /*
+         * 篡改钩子的重装。**与嗅探开关无关** —— 规则是用户显式配置的，
+         * 不该因为"没开嗅探"就不生效。
+         *
+         * 必须挂在导航完成上而不是只在改规则时注入：每次导航都会换掉页面的
+         * 主世界，上一次注入的钩子随之消失。不重装的话，用户会看到
+         * "第一页生效、点进第二页就失效"。
+         *
+         * 规则为空时跳过注入：给每个页面白装一遍钩子是纯浪费，且会在页面上
+         * 留下一串控制台日志。
+         */
+        const rules = await loadRules();
+        if (rules.interceptRules.length || rules.requestRules.length || rules.headerRules.length) {
+            await injectRules(details.tabId);
+        }
+
         if (!(await getEnabled())) return;
         await scanTab(details.tabId);
     })();
@@ -959,6 +978,101 @@ const dispatchBridge = async (method: string, params: unknown): Promise<unknown>
             return { result: await runAgentAction(engine, { action: (args as unknown as { action: never }).action } as never) };
         }
 
+        /*
+         * 篡改规则。三条端点分别对应面板上的「规则」「请求头」两个页签：
+         * 读一次、写一次、以及"改完立刻对当前页面生效一次"。
+         *
+         * 注入的**唯一入口**是 tamper.ts 的 `injectRules`，这里只负责转参数 ——
+         * 面板与 Agent 工具各写一份注入代码，必然漂移成"面板里生效、模型改的不生效"。
+         */
+        case 'tamper-get':
+            return { rules: await loadRules() };
+
+        case 'tamper-set': {
+            const p = args as unknown as Partial<{
+                interceptRules: TamperRule[];
+                requestRules: TamperRule[];
+                headerRules: HeaderRule[];
+            }>;
+            const current = await loadRules();
+            // 部分更新：只合并传了的类别。全量覆盖会让"只想改一条请求头"变成
+            // "把用户的拦截规则全清空"。
+            const next = {
+                interceptRules: Array.isArray(p.interceptRules) ? p.interceptRules : current.interceptRules,
+                requestRules: Array.isArray(p.requestRules) ? p.requestRules : current.requestRules,
+                headerRules: Array.isArray(p.headerRules) ? p.headerRules : current.headerRules,
+            };
+            const tabId = (args as { tabId?: number }).tabId;
+            const { saved } = await applyRules(next, await requireTabId(tabId));
+            // 回读落盘后的镜像：面板据此更新，而不是拿它自己刚发出去的那份
+            return { rules: await loadRules(), saved };
+        }
+
+        /*
+         * 只注入、不改规则。
+         *
+         * 存在的理由：注入是**按页面**发生的，而规则是全局的。用户切到一个新标签页
+         * 时那个页面还没装钩子（装钩子挂在 webNavigation.onCompleted 上，而那个
+         * 页面可能在我们改规则之前就加载完了）。面板打开时调一次这条，把当前页补齐。
+         */
+        case 'tamper-inject':
+            return { injected: await injectRules(await requireTabId((args as { tabId?: number }).tabId)) };
+
+        /*
+         * 页面存储。面板的「存储」与「JWT」两个页签都读它。
+         *
+         * 一次把三样都取回来（local / session / cookie）而不是分三条端点：
+         * 面板打开时要同时显示它们，分三次就是三次跨进程往返 + 三个各自可能
+         * 失败的点，而"读到一半"的界面比"读慢一点"更难解释。
+         *
+         * 走 pageHost 而不是自己拼 debugger 调用：那里已经有附着复用与超时，
+         * 再写一份必然在"超时该多久""附着失败怎么办"上漂移。
+         */
+        case 'page-storage-read': {
+            const tabId = await requireTabId((args as { tabId?: number }).tabId);
+            // 三样各自 try：cookie 那条走 chrome.cookies，与 debugger 无关，
+            // 让 debugger 的失败把它一起带走就等于"页面不可调试时看不到 cookie"。
+            const [local, session, cookies] = await Promise.all([
+                pageHost.readWebStorage(tabId, 'local').catch(() => '{}'),
+                pageHost.readWebStorage(tabId, 'session').catch(() => '{}'),
+                pageHost.getCookies(tabId).catch(() => []),
+            ]);
+            return { local, session, cookies, pageUrl: (await activePageInfo()).pageUrl };
+        }
+
+        /*
+         * 写一条存储。`value === null` 表示删除 —— 用一个端点而不是两个，
+         * 是因为 `Storage` 本来就只有 setItem / removeItem 两种写，而它们
+         * 共用"哪个区、哪个键"这一半参数。
+         *
+         * `area === 'cookie'` 走另一条实现：cookie 的写入是**整条覆盖**
+         * （见 pageHost.setCookie），必须收完整对象而不是一个字符串值。
+         * 混进同一条分支里会让调用方以为"cookie 也是一个键值对"。
+         */
+        case 'page-storage-write': {
+            const p = args as unknown as {
+                area: 'local' | 'session' | 'cookie';
+                key: string;
+                value: string | null;
+                cookie?: CookieItem;
+            };
+            const tabId = await requireTabId((args as { tabId?: number }).tabId);
+
+            if (p.area === 'cookie') {
+                if (!p.cookie) return { ok: false };
+                // 删除：Chrome 没有"按 path 删"的入口，同名不同 path 会被一起删掉
+                if (p.value === null || p.value === '') {
+                    return { ok: await pageHost.removeCookie(tabId, p.cookie.name) };
+                }
+                return { ok: await pageHost.setCookie(tabId, { ...p.cookie, value: p.value }) };
+            }
+
+            const ok = p.value === null
+                ? await pageHost.removeWebStorage(tabId, p.area, p.key)
+                : await pageHost.writeWebStorage(tabId, p.area, p.key, p.value);
+            return { ok };
+        }
+
         default:
             /*
              * 不认识的端点**必须报错**，不能静默返回 undefined。
@@ -1087,6 +1201,32 @@ const dispatchBall = async (message: BallRequest): Promise<unknown> => {
 
         case 'agent-action':
             return dispatchBridge('agent-action', { action: message.action });
+
+        case 'tamper-get':
+            return dispatchBridge('tamper-get', {});
+
+        case 'tamper-set':
+            return dispatchBridge('tamper-set', {
+                tabId: message.tabId,
+                interceptRules: message.interceptRules,
+                requestRules: message.requestRules,
+                headerRules: message.headerRules,
+            });
+
+        case 'tamper-inject':
+            return dispatchBridge('tamper-inject', { tabId: message.tabId });
+
+        case 'page-storage-read':
+            return dispatchBridge('page-storage-read', { tabId: message.tabId });
+
+        case 'page-storage-write':
+            return dispatchBridge('page-storage-write', {
+                tabId: message.tabId,
+                area: message.area,
+                key: message.key,
+                value: message.value,
+                cookie: message.cookie,
+            });
         /* ---- 球独有：面板没有那个上下文 ---- */
         case 'cookies-get':
             return cookiesGet(message.url);
