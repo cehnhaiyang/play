@@ -2,12 +2,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type React from 'react';
 import { Project, Message, AppState, ParserError, SPGWarning, getElectronAPI } from '../../../shared/meta';
-import {
-    loadProjects, saveProjects, createNewProject,
-    BrowserAudioEngine, bufferToWave,
-} from '../services/AudioService';
-// SPG 的生成/修复在应用侧：它依赖 AudioService 的名字表，留在 AiService 里
-// 会把整个音频引擎拖进插件 bundle（见 SpgAiService.ts 头部说明）
+import { loadProjects, saveProjects, createNewProject, BrowserAudioEngine, bufferToWave, } from '../services/AudioService';
 import { generateSyntax, fixSyntax } from '../services/SpgAiService';
 import { downloadBlob, loadJSON, removeStored, saveJSON } from '../../../shared/core';
 
@@ -562,11 +557,18 @@ export const useAudio = ({
     const sendMessage = useCallback(async (content: string) => {
         setIsChatProcessing(true);
         try {
-            const code = await generateSyntax(content);
-            archiveSpg(code, activeProjectNameRef.current);
+            const { code, title } = await generateSyntax(content);
+            archiveSpg(code, title || activeProjectNameRef.current);
+            // 模型给的作品名直接替换工程标题：命名是生成的一部分，
+            // 让用户改一遍等于让模型白写。没给名字就保持原样，不清空。
+            if (title) {
+                updateActiveProject({ name: title });
+            }
             const replyMessage: Message = {
                 role: 'model',
-                content: '已为您生成音频配置代码。正在自动加载到编辑器...',
+                content: title
+                    ? `已为您生成音频配置代码，工程已命名为「${title}」。正在自动加载到编辑器...`
+                    : '已为您生成音频配置代码。正在自动加载到编辑器...',
                 timestamp: Date.now(),
             };
             return { success: true, code, replyMessage };
@@ -586,7 +588,7 @@ export const useAudio = ({
         } finally {
             setIsChatProcessing(false);
         }
-    }, []);
+    }, [updateActiveProject]);
 
     const triggerFix = useCallback(async (brokenCode: string, error: string) => {
         setIsChatProcessing(true);

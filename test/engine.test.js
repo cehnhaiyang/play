@@ -1956,6 +1956,102 @@ check('提示词里的乐器参数名全部合法', () => {
   });
 });
 
+/* -------------------------------------------------------------------------- */
+/*                     作品名通道：提示词 ↔ 解析 ↔ 工程标题                     */
+/* -------------------------------------------------------------------------- */
+
+const { splitTitle, parseReply, TITLE_LINE_EXAMPLE } = require(`${ROOT}/services/SpgAiService`);
+
+check('★ 提示词教的作品名格式，解析器必须真的认', () => {
+  // 提示词给模型看的示例行与解析用的正则，是同一件事的两份表述。
+  // 漂移了不会报错：模型照新格式写，解析器认不出来，作品名通道静默失效 ——
+  // 用户看到的是"AI 不给工程命名了"，而根因在两边不一致。
+  // 所以这里把**运行时真正拼进提示词的那个字符串**喂给解析函数。
+  const parsed = splitTitle(`${TITLE_LINE_EXAMPLE}\nconfig { tempo: 120 }`);
+  eq(parsed.title, '三圈半', '提示词教的示例行应能被解析出作品名');
+  eq(parsed.code, 'config { tempo: 120 }', '作品名那一行应被摘掉，不能留在代码里');
+  assert(/\$\{TITLE_LINE_EXAMPLE\}/.test(aiSource), '提示词应通过 TITLE_LINE_EXAMPLE 注入示例行');
+});
+
+check('作品名注释被摘干净，其余内容一字不动', () => {
+  // 全角冒号（提示词教的）与半角冒号都要认，模型两种都会写
+  eq(splitTitle('# 作品名：未落\nconfig { tempo: 90 }').title, '未落', '全角冒号');
+  eq(splitTitle('# 作品名: 未落\nconfig { tempo: 90 }').title, '未落', '半角冒号');
+  eq(splitTitle('// 作品名：未落\nconfig { tempo: 90 }').title, '未落', '// 注释符');
+  eq(splitTitle('  # 作品名：未落  \nconfig{}').title, '未落', '缩进与尾随空格');
+  // 只摘那一行，代码本体（含其它注释）必须原样保留
+  const body = '# 这是一条普通注释\nconfig { tempo: 90 }\nsequence(name="s"){ note("C4","4n") }';
+  eq(splitTitle(`# 作品名：未落\n${body}`).code, body, '除作品名外不得改动任何一行');
+});
+
+check('没有作品名时不误伤代码，也不编一个名字出来', () => {
+  const code = '# 等待 AI 生成或手动输入代码...\nconfig { tempo: 120 }';
+  const r = splitTitle(code);
+  eq(r.title, null, '没有作品名注释时应返回 null，而不是回落到占位词');
+  eq(r.code, code, '没有作品名时代码必须原样返回');
+  // 「作品名」出现在正文或其它注释里不算作品名 —— 否则会把用户的说明文字摘掉
+  eq(splitTitle('# 作品名字：这是个说明\nconfig{}').title, null, '「作品名字」不是作品名');
+  eq(splitTitle('config { tempo: 120 } # 作品名：未落').title, null, '不在行首的注释不算');
+});
+
+check('作品名写在代码围栏外也能被摘到', () => {
+  // 模型常把作品名写在围栏外面，而 cleanCodeBlock 只返回围栏内部的内容。
+  // 顺序若反过来（先清围栏再摘作品名），那一行就随围栏一起没了。
+  // 这里必须调 parseReply 而不是 splitTitle：只调 splitTitle 时，
+  // 把 parseReply 的顺序写反，测试全绿 —— 变异测试实测确认过这一点。
+  const outside = parseReply(`${TITLE_LINE_EXAMPLE}\n\`\`\`spg\nconfig { tempo: 120 }\n\`\`\``);
+  eq(outside.title, '三圈半', '围栏外的作品名应被摘到');
+  eq(outside.code, 'config { tempo: 120 }', '应同时清掉围栏，只留代码');
+  // 围栏内写也一样要认（模型两种位置都会用）
+  const inside = parseReply(`\`\`\`spg\n${TITLE_LINE_EXAMPLE}\nconfig { tempo: 120 }\n\`\`\``);
+  eq(inside.title, '三圈半', '围栏内的作品名同样要认');
+  eq(inside.code, 'config { tempo: 120 }', '围栏内摘完后不得留下空行或围栏');
+  // 没有围栏时行为不变
+  const bare = parseReply(`${TITLE_LINE_EXAMPLE}\nconfig { tempo: 120 }`);
+  eq(bare.title, '三圈半', '裸文本');
+  eq(bare.code, 'config { tempo: 120 }', '裸文本');
+});
+
+check('修复提示词明确排除作品名规则', () => {
+  // 修复提示词 = 修复指令 + 完整语法文档，而语法文档第 1 条现在要求写作品名。
+  // 不显式排除，模型每修一次就可能往用户已经改过的标题上覆盖一次。
+  const fixStart = aiSource.indexOf('const SPG_FIX_PROMPT');
+  assert(fixStart > 0, '找不到 SPG_FIX_PROMPT');
+  const fixEnd = aiSource.indexOf('const buildFixPrompt', fixStart);
+  assert(fixEnd > fixStart, '找不到 SPG_FIX_PROMPT 的结束位置');
+  const fixSection = aiSource.slice(fixStart, fixEnd);
+  assert(/作品名/.test(fixSection), '修复提示词必须显式声明不处理作品名');
+  assert(/不适用/.test(fixSection), '修复提示词应说明该条规则对修复不适用');
+});
+
+/**
+ * 生成回调必须把作品名写进工程标题。
+ *
+ * **这是代码形状断言，不是行为验证**：useAudio 是 React hook，而本仓库没有
+ * React 测试环境（无 jsdom / testing-library），无法在这里真的跑一遍。
+ * 它能拦住的是"有人删掉/改错这三行"，拦不住"运行时 updateActiveProject 没生效"。
+ * 那一段只能靠人工在界面里确认，交付时按"未执行验证"记账。
+ */
+check('生成回调把作品名写进工程标题（代码形状断言，非行为验证）', () => {
+  const hookSrc = fs.readFileSync(
+    path.join(__dirname, '..', 'app', 'renderer', 'hooks', 'useAudio.ts'), 'utf8');
+  const sendStart = hookSrc.indexOf('const sendMessage = useCallback');
+  assert(sendStart > 0, '找不到 sendMessage');
+  const sendEnd = hookSrc.indexOf('const triggerFix', sendStart);
+  assert(sendEnd > sendStart, '找不到 sendMessage 的结束位置');
+  const sendBody = hookSrc.slice(sendStart, sendEnd);
+
+  assert(/generateSyntax\(/.test(sendBody), 'sendMessage 应调用 generateSyntax');
+  assert(/\{\s*code\s*,\s*title\s*\}/.test(sendBody), 'sendMessage 应从生成结果里取出 title');
+  assert(/updateActiveProject\(\{\s*name:\s*title\s*\}\)/.test(sendBody),
+    '作品名必须写进工程标题（updateActiveProject({ name: title })）');
+  // 没给作品名时不得清空标题 —— 那会把用户自己起的名字抹掉
+  assert(/if\s*\(\s*title\s*\)/.test(sendBody), '没给作品名时应保持原标题，不能无条件写入');
+  // 修复只改语法，不碰标题
+  const fixBody = hookSrc.slice(sendEnd, hookSrc.indexOf('// 5. 组装出参', sendEnd));
+  assert(!/updateActiveProject/.test(fixBody), 'triggerFix 不得改写工程标题');
+});
+
 /* ========================================================================== */
 
 /** 汇总本次结果，返回是否全部通过 */

@@ -38,6 +38,42 @@ export const cleanCodeBlock = (text: string): string => {
     return text.replace(/^```[\w]*\n?/, '').replace(/\n?```$/, '').trim();
 };
 
+/**
+ * 作品名注释：生成提示词要求写在第 1 行的那一行。
+ *
+ * 标记词只有这一个来源 —— 提示词里给模型看的示例行与下面的解析正则都由它拼出。
+ * 两处各写一份字面量的话，改了提示词而没改正则（或反过来）不会报错：
+ * 模型照新格式写，解析器认不出来，作品名通道就此静默失效。
+ *
+ * 注释符认 `#` 与 `//` 两种 —— 提示词只教 `#`，但注释符是模型的自由，
+ * 认两种能让"作品名没被认出来"少一半机会。`作品名` 之后必须是冒号，
+ * 所以 `# 作品名字：…` 这类写法不会被误认。
+ */
+const TITLE_MARKER = '作品名';
+const TITLE_LINE = new RegExp(
+    `^[ \\t]*(?:#|//)[ \\t]*${TITLE_MARKER}[ \\t]*[:：][ \\t]*([^\\r\\n]+)$`,
+    'm'
+);
+/** 提示词里给模型的规范示例行。由 `TITLE_MARKER` 拼出，与 `TITLE_LINE` 同源。 */
+export const TITLE_LINE_EXAMPLE = `# ${TITLE_MARKER}：三圈半`;
+
+/**
+ * 把作品名注释从代码里摘出来。
+ *
+ * **摘掉，而不是留在代码里**：工程标题的唯一权威是 `Project.name`。
+ * 注释留在代码里就是同一件事的第二个副本 —— 用户在标题栏改个名字，
+ * 两者立刻不一致，而没有任何东西会去读那行注释。作品名走的是传输通道，
+ * 不是存储位置。
+ *
+ * 认不出作品名时返回 `title: null` 且代码原样返回：那一行是注释，
+ * 摘不掉也不影响 SPG 编译，所以作品名通道永远不能反过来弄坏代码通道。
+ */
+export const splitTitle = (text: string): { code: string; title: string | null } => {
+    const matched = text.match(TITLE_LINE);
+    if (!matched) return { code: text, title: null };
+    return { code: text.replace(TITLE_LINE, '').trim(), title: matched[1].trim() };
+};
+
 /* -------------------------------------------------------------------------- */
 /*                                SPG 音频生成                                 */
 /* -------------------------------------------------------------------------- */
@@ -58,10 +94,16 @@ const SPG_SYSTEM_PROMPT = `
 你的任务是把自然语言描述转写成**可编译、且音乐性优秀**的 SPG 代码。
 
 ==================== 输出纪律（最重要） ====================
-1. 只输出 SPG 代码本身，不要 Markdown 围栏、不要解释、不要寒暄。
-2. 只能使用下面文档里出现过的语法。**不要发明语法**：解析器对未知指令、未知参数会直接报错。
-3. 缩进用 2 空格。可写 \`#\` 或 \`//\` 注释。
-4. 写完在心里过一遍：括号配对、引号配对、每个 sequence 都被 mix 引用、每个音名都是合法音名。
+1. 第 1 行**必须**是作品名注释，格式固定：\`${TITLE_LINE_EXAMPLE}\`
+   - 这一行会被程序摘走，**直接替换掉工程的标题**，所以它只能出现在第 1 行、只能出现一次。
+   - 命名规则：2~8 个字；从**这首曲子的结构里**找一个具体事实来命名
+     （某个声部始终不动、某次终止没有解决、某个数字反复出现）。
+   - **禁止情绪标签**（"忧伤""恐怖""激烈""史诗"）—— 那等于替听众下结论，任何同类作品都能套用。
+   - 不要用"未命名""音乐""作品"这类占位词，不要加书名号或引号，不要写副标题。
+2. 第 2 行起是 SPG 代码，不要 Markdown 围栏、不要解释、不要寒暄。
+3. 只能使用下面文档里出现过的语法。**不要发明语法**：解析器对未知指令、未知参数会直接报错。
+4. 缩进用 2 空格。可写 \`#\` 或 \`//\` 注释。
+5. 写完在心里过一遍：括号配对、引号配对、每个 sequence 都被 mix 引用、每个音名都是合法音名。
 
 ==================== 文件结构 ====================
 SPG 由五部分组成，顺序任意，但通常写成：config → define_instrument → sequence → effect_chain → mix。
@@ -303,7 +345,7 @@ mix {
 例如鼓与贝斯 loop=4 打底，旋律在第 2 拍进入，副歌段落用 transpose 升调或加新声部。
 
 ==================== 输出约束 ====================
-1. **只输出代码**，无 Markdown 围栏、无解释文字。
+1. **只输出那一行作品名注释 + 代码本身**，无 Markdown 围栏、无解释文字。
 2. 用户要求"交响乐/史诗"时，**必须**有 3 个以上不同乐器同时进行，并包含打击乐与低音声部。
 3. 用户要求"电子舞曲/EDM"时，**必须**有底鼓节奏声部与低音声部。
 4. 每条旋律都要有力度与人性化处理，不要输出每个音都一模一样的机械音序。
@@ -331,6 +373,8 @@ const SPG_FIX_PROMPT = `
 3. 若报错指向"未定义的乐器"，要么把乐器补上，要么把 sequence 的 instrument 改成已存在的名字。
 4. 若某个音序没有被 mix 引用，它不会发声 —— 需要补上 track。
 5. 若报错是"未知的和弦符号"，改用文档里列出的和弦性质，或直接写音高数组。
+6. 下面语法文档里"输出纪律"的第 1 条（作品名注释）**对修复不适用**：
+   待修代码里没有这一行，也不要添上。标题由用户自己管，修复不碰它。
 
 必须输出**修复后的完整代码**，不要输出 diff、不要解释、不要 Markdown 围栏。
 
@@ -345,22 +389,51 @@ const SPG_FIX_PROMPT = `
 const buildFixPrompt = (): string => `${SPG_FIX_PROMPT}${SPG_SYSTEM_PROMPT}`;
 
 /**
+ * 生成结果：代码与作品名是两个独立的出参。
+ *
+ * 不把作品名塞进代码里（哪怕以注释形式）是因为工程标题的唯一权威是
+ * `Project.name` —— 见 `splitTitle` 的说明。
+ */
+export interface GeneratedSpg {
+    /** 已摘掉作品名注释的 SPG 源码，可直接进编辑器 */
+    code: string;
+    /** 模型给出的作品名；没写这一行时为 null（调用方应保持原标题不变） */
+    title: string | null;
+}
+
+/**
+ * 把一次模型回复拆成「作品名 + 干净代码」。
+ *
+ * 顺序是**先摘作品名、再清围栏**，不能反过来：模型有时把作品名写在代码围栏
+ * 外面，而 `cleanCodeBlock` 只返回围栏**内部**的内容，先清围栏那一行就没了。
+ * 这个顺序错了不会报错，只会表现为"AI 不给工程命名了"，所以导出它给测试直接调用。
+ */
+export const parseReply = (text: string): GeneratedSpg => {
+    const { code, title } = splitTitle(text || '');
+    return { code: cleanCodeBlock(code), title };
+};
+
+/**
  * 根据自然语言描述生成 SPG 音频合成代码。
  * 编曲类任务吃推理，这里用 high 档换质量。
  */
-export const generateSyntax = async (userDescription: string): Promise<string> => {
+export const generateSyntax = async (userDescription: string): Promise<GeneratedSpg> => {
     const text = await chat({
         system: SPG_SYSTEM_PROMPT,
         messages: [{ role: 'user', content: userDescription }],
         temperature: 0.7,
         reasoningEffort: 'high',
     });
-    return cleanCodeBlock(text);
+    return parseReply(text);
 };
 
 /**
  * 修复编译失败的 SPG 代码。
  * 输入是确定性的报错信息，低温度 + max 档更容易一次改对。
+ *
+ * 作品名**只摘不取**：修复提示词与生成提示词共用同一份语法文档，
+ * 模型会照规矩补一行作品名，但那行必须丢掉 —— 修复只改语法，
+ * 重命名不属于它，何况用户很可能已经自己改过标题了。
  */
 export const fixSyntax = async (brokenCode: string, errorMessage: string): Promise<string> => {
     const text = await chat({
@@ -369,5 +442,5 @@ export const fixSyntax = async (brokenCode: string, errorMessage: string): Promi
         temperature: 0.2,
         reasoningEffort: 'max',
     });
-    return cleanCodeBlock(text);
+    return parseReply(text).code;
 };
