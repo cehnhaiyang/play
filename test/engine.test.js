@@ -2025,31 +2025,90 @@ check('修复提示词明确排除作品名规则', () => {
 });
 
 /**
- * 生成回调必须把作品名写进工程标题。
+ * 新建工程必须把作品名写进工程标题。
  *
  * **这是代码形状断言，不是行为验证**：useAudio 是 React hook，而本仓库没有
  * React 测试环境（无 jsdom / testing-library），无法在这里真的跑一遍。
- * 它能拦住的是"有人删掉/改错这三行"，拦不住"运行时 updateActiveProject 没生效"。
+ * 它能拦住的是"有人删掉/改错这几行"，拦不住"运行时没生效"。
  * 那一段只能靠人工在界面里确认，交付时按"未执行验证"记账。
  */
-check('生成回调把作品名写进工程标题（代码形状断言，非行为验证）', () => {
+check('新建工程把作品名写进工程标题（代码形状断言，非行为验证）', () => {
   const hookSrc = fs.readFileSync(
     path.join(__dirname, '..', 'app', 'renderer', 'hooks', 'useAudio.ts'), 'utf8');
-  const sendStart = hookSrc.indexOf('const sendMessage = useCallback');
-  assert(sendStart > 0, '找不到 sendMessage');
-  const sendEnd = hookSrc.indexOf('const triggerFix', sendStart);
-  assert(sendEnd > sendStart, '找不到 sendMessage 的结束位置');
-  const sendBody = hookSrc.slice(sendStart, sendEnd);
+  const start = hookSrc.indexOf('const createProject = useCallback');
+  assert(start > 0, '找不到 createProject');
+  const end = hookSrc.indexOf('const deleteProject', start);
+  assert(end > start, '找不到 createProject 的结束位置');
+  const body = hookSrc.slice(start, end);
 
-  assert(/generateSyntax\(/.test(sendBody), 'sendMessage 应调用 generateSyntax');
-  assert(/\{\s*code\s*,\s*title\s*\}/.test(sendBody), 'sendMessage 应从生成结果里取出 title');
-  assert(/updateActiveProject\(\{\s*name:\s*title\s*\}\)/.test(sendBody),
-    '作品名必须写进工程标题（updateActiveProject({ name: title })）');
-  // 没给作品名时不得清空标题 —— 那会把用户自己起的名字抹掉
-  assert(/if\s*\(\s*title\s*\)/.test(sendBody), '没给作品名时应保持原标题，不能无条件写入');
-  // 修复只改语法，不碰标题
-  const fixBody = hookSrc.slice(sendEnd, hookSrc.indexOf('const refineSpg', sendEnd));
-  assert(!/updateActiveProject/.test(fixBody), 'triggerFix 不得改写工程标题');
+  assert(/generateSyntax\(/.test(body), 'createProject 应调用 generateSyntax');
+  assert(/\{\s*code\s*,\s*title\s*\}/.test(body), 'createProject 应从生成结果里取出 title');
+  // 没给作品名时回落到用户描述的开头，而不是写一个占位词
+  assert(/title\s*\|\|\s*prompt\.slice/.test(body),
+    '没有作品名时应回落到描述开头，不能写死"未命名项目"');
+  assert(/newProject\.name\s*=\s*name/.test(body), '作品名必须写进工程标题');
+  assert(/archiveSpg\(code,\s*name\)/.test(body), '生成结果要留档到 .spg');
+  // 失败不建工程：留一个空工程在列表里还得用户自己删
+  const catchAt = body.indexOf('catch (');
+  assert(catchAt > 0, 'createProject 应有失败分支');
+  assert(!/setProjects/.test(body.slice(catchAt)), '生成失败时不得建工程');
+});
+
+check('工作台里没有会话容器（创作/迭代/修复各有独立入口）', () => {
+  // 三件事各自有入口之后，对话区不再承担任何职责：
+  // 留着它等于让用户面对一个"说什么都行但不知道会发生什么"的输入框。
+  //
+  // 断言锚在**定义与渲染处**，不是"文件里出现过这个词" ——
+  // 文件头的历史说明里提到 ChatInterface 是正当的，
+  // 而扫全文字面量会逼着注释绕开自己的历史（实测：这条一开始就是这么红的）。
+  const panelSrc = fs.readFileSync(
+    path.join(__dirname, '..', 'app', 'renderer', 'components', 'AudioPanel.tsx'), 'utf8');
+  for (const [pattern, what] of [
+    [/const ChatInterface\s*=/, 'ChatInterface 组件定义'],
+    [/<ChatInterface[\s/>]/, 'ChatInterface 的渲染'],
+    [/placeholder="描述你想要的音乐/, '对话区输入框'],
+    [/sendMessage:\s*\w/, '对话式的 sendMessage 注入'],
+  ]) {
+    assert(!pattern.test(panelSrc), `会话容器应已删除，但仍能找到${what}`);
+  }
+  // 创作入口改成"新建工程时输入描述"。
+  // 断言必须锚在**使用处**：只查标识符是否存在的话，把按钮删掉、
+  // 或把渲染短路成 `{false && <Dialog/>}`，标识符依然在文件里（实测确认过）。
+  assert(/onClick=\{\(\) => setCreateOpen\(true\)\}/.test(panelSrc),
+    '必须有一个能打开对话框的入口');
+  assert(/<CreateProjectDialog\s+open=\{createOpen\}/.test(panelSrc),
+    '新建工程对话框必须真的被渲染');
+  // 对话框自己用 `if (!open) return null` 管可见性，外面再加一层条件
+  // 就是同一件事的第二个主人 —— 两处对不上时表现为"点了按钮没反应"
+  assert(!/[&?][&?]?\s*<CreateProjectDialog|\?\s*<CreateProjectDialog/.test(panelSrc),
+    '对话框不得被外层条件短路，可见性由它自己的 open 参数决定');
+  assert(/onSubmit=\{handleCreateProject\}/.test(panelSrc), '对话框应提交给 handleCreateProject');
+  // 迭代与修复的入口必须还在（删会话容器不能顺手删掉它们）
+  assert(/onChange=\{handleRefineImport\}/.test(panelSrc), '迭代优化入口不得被一起删掉');
+  assert(/onClick=\{handleManualFix\}/.test(panelSrc), '手动修复入口不得被一起删掉');
+});
+
+check('工程数据里不再有会话历史', () => {
+  // messages 字段随会话容器一起删掉。留着一个没人读的数组，
+  // 下次改动就会有人以为它还在被持久化往返地维护。
+  const iface = fs.readFileSync(
+    path.join(__dirname, '..', 'shared', 'meta', 'interface.ts'), 'utf8');
+  const start = iface.indexOf('export interface Project {');
+  assert(start > 0, '找不到 Project 接口');
+  const body = iface.slice(start, iface.indexOf('}', start));
+  assert(!/messages/.test(body), 'Project 不应再有 messages 字段');
+
+  const svc = fs.readFileSync(
+    path.join(__dirname, '..', 'app', 'renderer', 'services', 'AudioService.ts'), 'utf8');
+  const createStart = svc.indexOf('export const createNewProject');
+  const createBody = svc.slice(createStart, svc.indexOf('export const saveProjects', createStart));
+  assert(!/messages/.test(createBody), 'createNewProject 不应再初始化 messages');
+  // 旧缓存里带 messages 的条目必须仍能被读出来 —— 校验器若要求这个字段，
+  // 用户升级后所有工程都会被判为脏数据丢掉
+  const loadStart = svc.indexOf('export const loadProjects');
+  const loadBody = svc.slice(loadStart, svc.indexOf('};', loadStart));
+  assert(!/messages/.test(loadBody),
+    'loadProjects 不得要求 messages 字段，否则旧缓存里的工程会被整批丢弃');
 });
 
 /* -------------------------------------------------------------------------- */

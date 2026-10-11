@@ -9,7 +9,6 @@ import type {
     MediaGroupType,
     LFOTarget,
     ArpPattern,
-    MessageRole,
     GalleryDownloadStatus,
     GalleryFetchStatus,
     AiConfig,
@@ -871,18 +870,6 @@ export interface ScheduledEvent {
  */
 
 /**
- * AI 助手对话消息
- */
-export interface Message {
-    /** 消息发送方角色 ('user' | 'model' | 'system') */
-    role: MessageRole;
-    /** 消息正文文本 */
-    content: string;
-    /** 发送时间戳 (毫秒) */
-    timestamp: number;
-}
-
-/**
  * 音频工作台工程项目
  */
 export interface Project {
@@ -892,8 +879,6 @@ export interface Project {
     name: string;
     /** 乐谱及合成 DSL 脚本代码 */
     code: string;
-    /** 项目关联的 AI 聊天会话历史 */
-    messages: Message[];
     /** 创建时间戳 */
     createdAt: number;
     /** 最近修改时间戳 */
@@ -2274,9 +2259,4 @@ export interface GalleryPanelProps {
 
 export interface TorrentPanelProps {
     onBack: () => void;
-}
-
-/** 音频面板对话区的对外句柄：父级凭它把报错代码塞进来触发自动修复 */
-export interface ChatInterfaceRef {
-    triggerFix: (code: string, error: string) => Promise<void>;
 }

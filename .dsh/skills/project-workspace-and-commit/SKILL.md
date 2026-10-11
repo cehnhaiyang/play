@@ -1,74 +1,105 @@
 ---
 name: project-workspace-and-commit
-description: 仅适用于本项目（the-play，D:\the-play）。讲清目录职责、SPG 脚本的落盘位置、`git_commit` 工具会 `git add -A` 从而捎带无关改动这一必须每次上报的行为，以及 `test` 与 `typecheck` 两个工具在本项目的适用边界。
-whenToUse: 在 the-play 里新建或修改任何文件、调用 `git_commit`、或需要判断某条验证路径是否可行时。
+description: Applies to this project only (the-play, D:\the-play). Covers the real directory layout and the exact paths of the SPG engine, the SPG system prompt and the Electron main process; the fact that `git_commit` runs `git add -A` and therefore sweeps in unrelated changes that must be reported every time; and the applicability boundary of the `test` and `typecheck` tools.
+whenToUse: When creating or modifying any file in the-play, when calling `git_commit`, when locating the SPG engine or the SPG system prompt, or when deciding whether a given verification path is even possible.
 ---
 
-# 本项目的工作区与提交纪律
+# Workspace and commit discipline for this project
 
-## 一、目录职责
+## 1. Directory responsibilities — use these exact paths
 
-| 路径 | 职责 |
+**The paths below are the real ones. `services/AudioService.ts` does not exist.** Getting this
+wrong is not a cosmetic problem: `grep` on a non-existent path aborts with
+
+```
+rg: D:\the-play\services\AudioService.ts: IO error for operation on
+D:\the-play\services\AudioService.ts: 系统找不到指定的路径。 (os error 3)
+```
+
+and the call is wasted. When unsure, run `glob "**/AudioService.ts"` first — it resolves in one call.
+
+| Path | Responsibility |
 |---|---|
-| `services/AudioService.ts` | **SPG 语言的唯一权威**（约 5400 行）：`SPGParser`、`EventScheduler`、`AudioSynthesizer`、`BrowserAudioEngine`、`DRUM_SPECS`、`PRESETS` |
-| `services/AiService.ts` | 生成 SPG 的系统提示词（`SPG_SYSTEM_PROMPT` 附近）。是文档，**可能落后于实现** |
-| `.spg/` | SPG 脚本的落盘目录。`electron/main.js` 的 `handleSpgSave` 用 `app.getAppPath()/.spg`，开发时即 `D:\the-play\.spg` |
-| `test/` | `test/index.js` 是入口；各 `*.test.js` 是回归套件 |
-| `components/` `hooks/` `electron/` | UI、渲染层 hook、主进程 |
+| `app/renderer/services/AudioService.ts` | **Sole authority for the SPG language** (~5383 lines): `SPGParser`, `EventScheduler`, `AudioSynthesizer`, `BrowserAudioEngine`, `DRUM_SPECS`, `PRESETS` |
+| `app/renderer/services/SpgAiService.ts` | Holds the SPG system prompt: `SPG_SYSTEM_PROMPT` (line 92), applied via `withSyntaxDoc` (line 471) and `system: SPG_SYSTEM_PROMPT` (line 504). It is documentation and **may lag the implementation** |
+| `shared/ai/AiService.ts` | A separate AI service — **not** the SPG prompt. Do not confuse it with `SpgAiService.ts` |
+| `app/renderer/services/LogService.ts`, `SearchService.ts` | Other renderer services |
+| `app/main/main.js` | Electron main process (~3483 lines). Contains `handleSpgSave` (line 1988), registered as `ipcMain.handle('spg-save', handleSpgSave)` (line 2015) |
+| `app/renderer/` | Renderer: `App.tsx`, `index.tsx`, `components/` (`AudioPanel.tsx`, `GalleryPanel.tsx`, `PlayPanel.tsx`, `TorrentPanel.tsx`, `Floating.tsx`), `orb/` |
+| `shared/core/`, `shared/meta/`, `shared/ai/` | Shared modules consumed by both renderer and tests |
+| `extension/` | Browser extension (`extension/src/agent/**`, `extension/src/shared/**`) |
+| `.spg/` | SPG script drop directory |
+| `test/` | `test/index.js` is the entry point; each `*.test.js` is a regression suite; `test/build/` is compiled output |
 
-`.spg/` 下的文件名带时间戳（`${工程名}_${ISO时间戳}.spg`），同一工程反复生成不会互相覆盖。
-但**用户手工整理过这些文件**（改名、去重、移走副本），所以不要假设命名规律 ——
-用 `glob` 看当前实际内容。
+`package.json` facts worth knowing: `"main": "app/main/main.js"`, `"test:spg": "node test/index.js"`,
+`"typecheck": "tsc --noEmit && tsc --noEmit -p extension/tsconfig.json"`.
 
-### 生成物落盘为什么在主进程
+`.spg/` file names carry a timestamp (`${projectName}_${ISOtimestamp}.spg`), so regenerating the same
+project never overwrites itself. But **the user has hand-curated these files** (renamed, de-duplicated,
+copies moved away) — current contents are mixed `.txt` and `.spg`, e.g. `忧伤_钢琴.txt`, `压抑恐怖.txt`,
+`未落.txt`, `原地.txt`, `三圈半.txt`, `美好世界.spg`, `微光.txt`. Do not assume a naming rule — use
+`glob` to see what is actually there.
 
-渲染层没有文件系统权限，所以由 `handleSpgSave` 落盘；落点用 `app.getAppPath()`
-而不是 `__dirname`，因为打包后 `__dirname` 在只读的 `app.asar` 内。
-写盘失败**不影响生成结果**（生成物已在编辑器里），只是没留档。
+### Why the drop file is written by the main process
 
----
-
-## 二、`git_commit` 会捎带无关改动
-
-`git_commit` 工具等价于 `git add -A && git commit -m 更新`。它**没有参数、无法只提交指定文件**。
-
-后果：工作区里任何既有的未提交改动（其他人在做的重构、别的会话留下的修改）
-都会被一起提交，且提交信息固定为「更新」。
-
-**每次调用后都要看输出里的 `N files changed`，与本次实际改动的文件数对照。**
-不一致就在报告里说明「提交捎带了非本次任务的改动」，并点名文件。
-不要默认这些改动是自己做的，也不要因为它们出现在自己的提交里就去解释它们。
-
-行尾警告（`LF will be replaced by CRLF`）只是提示，不代表内容变化。
-
-`git_commit` 的另一个用途：**给新文件或未跟踪文件做恢复点**。
-在批量编辑之前调用一次，之后编辑出错就能一行回退。
-工作区干净时它会返回 `nothing to commit`（exit code 1）—— 这本身也是有用的信号：
-说明当前没有未保存的改动。
+The renderer has no filesystem permission, so `handleSpgSave` writes it. The target uses
+`app.getAppPath()` rather than `__dirname`, because after packaging `__dirname` is inside the read-only
+`app.asar` archive. In development `getAppPath()` is the project root, i.e. `D:\the-play\.spg`.
+A failed write **does not affect the generated result** (it is already in the editor); it only means no
+archive copy was kept.
 
 ---
 
-## 三、`test` 与 `typecheck` 的适用边界
+## 2. `git_commit` sweeps in unrelated changes
 
-**`test` 工具不读 `.spg/` 下的脚本**（见 `spg-coding` 第八节）。它跑的是 `test/` 目录下的
-整套用例（入口 `test/index.js`）。所以交付 SPG 脚本时，正确说法是「逐条对着
-`services/AudioService.ts` 核对过，未执行验证」，不是「已验证」。
+The `git_commit` tool is equivalent to `git add -A && git commit -m 更新`. It **takes no arguments and
+cannot commit a selected file**.
 
-`typecheck` 跑的是 `tsc --noEmit`，只对本项目的 TypeScript 有效；改 `.txt` / `.spg` 脚本
-不会影响它的结果，此时不必调用。
+Consequence: any pre-existing uncommitted change in the workspace (someone else's refactor, another
+session's edits) is committed along with yours, under the fixed message `更新`.
+
+**After every call, compare the `N files changed` in the output against the number of files you
+actually touched.** If they differ, state in the report that "the commit swept in changes that were not
+part of this task" and name the files. Do not assume those changes are yours, and do not explain them
+just because they ended up inside your commit.
+
+The line-ending warning (`LF will be replaced by CRLF`) is only a notice and does not mean the content
+changed.
+
+The tree can change **during** a session, not just between sessions. Observed in one session: the first
+call returned `nothing to commit, working tree clean` (exit code 1), and after the edits the next call
+reported `2 files changed` where only one file was mine — the extra one,
+`app/renderer/services/SpgAiService.ts`, had been modified concurrently by something outside the session.
+
+`git_commit` has a second use: **creating a recovery point for new or untracked files.** Call it once
+before a batch of edits, so a bad edit can be reverted. When the tree is clean it returns
+`nothing to commit` (exit code 1) — that is itself a useful signal: there are no unsaved changes.
 
 ---
 
-## 四、不要假设工作区是你上次离开时的样子
+## 3. Applicability boundary of `test` and `typecheck`
 
-本项目的工作区**在本会话之外被并发修改**。已经观察到：
+**The `test` tool does not read scripts under `.spg/`** (see `spg-coding` section 8). It runs the whole
+suite in `test/`, entry point `test/index.js`. So when delivering an SPG script the correct wording is
+"checked item by item against `app/renderer/services/AudioService.ts`, not executed", never "verified".
 
-- 交付过的 `.txt` 文件被移动（根目录 → `.spg/`）或被改名；
-- 用户手工改名成作品名（`忧伤_钢琴_优化版.txt` → `未落.txt`，`压抑恐怖 (2).txt` → `原地.txt`）；
-- `components/AudioPanel/` 目录被合并成单个 `components/AudioPanel.tsx`。
+`typecheck` runs `tsc --noEmit` (plus the extension project) and is only meaningful for this project's
+TypeScript. Editing `.txt` / `.spg` scripts cannot change its result, so there is no reason to call it then.
 
-**动手前先 `glob` 确认文件当前位置与名字。** 收到「迭代 X」这类指令时，
-不要按记忆里的路径直接读 —— 先查。文件不在预期位置是常态，不是异常。
+---
 
-用户明确说「已更名为 X」时，直接按新名字找；找不到再用 `glob` 列目录，
-不要假设改名失败或去改回旧名。
+## 4. Do not assume the workspace is as you left it
+
+This project's workspace **is modified concurrently outside the session**. Already observed:
+
+- a delivered `.txt` file moved (project root → `.spg/`) or renamed;
+- the user renaming files to the work's title (`忧伤_钢琴_优化版.txt` → `未落.txt`,
+  `压抑恐怖 (2).txt` → `原地.txt`);
+- `components/AudioPanel/` being collapsed into a single `app/renderer/components/AudioPanel.tsx`.
+
+**Run `glob` before acting to confirm the file's current location and name.** On an instruction like
+"iterate X", do not read from the path you remember — look it up first. A file not being where you expect
+is normal, not an anomaly.
+
+When the user explicitly says "it has been renamed to X", go straight to the new name; only fall back to
+`glob` listing the directory if that fails. Do not assume the rename failed and do not rename it back.

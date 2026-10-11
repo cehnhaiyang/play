@@ -1,9 +1,7 @@
 /// <reference lib="dom" />
 import React, {
-    forwardRef,
     useCallback,
     useEffect,
-    useImperativeHandle,
     useMemo,
     useRef,
     useState,
@@ -15,22 +13,17 @@ import {
     ArrowUpTrayIcon,
     Bars3Icon,
     BeakerIcon,
-    CheckIcon,
     ChevronRightIcon,
-    ClipboardDocumentIcon,
-    CpuChipIcon,
     CubeIcon,
     ExclamationTriangleIcon,
     HomeIcon,
     MusicalNoteIcon,
-    PaperAirplaneIcon,
     PencilSquareIcon,
     PlayIcon,
     PlusIcon,
     SparklesIcon,
     StopIcon,
     TrashIcon,
-    UserCircleIcon,
 } from '@heroicons/react/24/solid';
 import {
     ArrowPathRoundedSquareIcon,
@@ -38,22 +31,28 @@ import {
     ChartBarIcon,
     WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline';
-import { AppState, ChatInterfaceRef, Message, ParserError, Project } from '../../../shared/meta';
+import { AppState, ParserError, Project } from '../../../shared/meta';
 import { useAudio } from '../hooks';
 
 /**
  * 音频工坊（Sound Particle Studio）。
  *
- * 这个文件是**一个整体**：对话生成代码 → 编辑器改代码 → 编译报错 → 回灌对话
- * 自动修复，是一条闭环。闭环上的每一环都要读写同一份「当前工程」，
+ * 这个文件是**一个整体**：新建工程时描述 → 生成代码 → 编辑器改代码 →
+ * 编译报错 → 自动修复，是一条闭环。闭环上的每一环都要读写同一份「当前工程」，
  * 而工程状态只属于 AudioPanel 里的 useAudio；拆成多个文件后，
  * 子组件只能靠一层层传参或各自再调一次 useAudio 来够到它，
  * 前者接口随需求反复变形，后者每个实例都会新建一个 AudioContext 且从不关闭。
  *
- * 原 AudioPanel/ 目录（index + ChatInterface + CodeEditor + Visualizer +
- * AudioToolbox）全部合并到这里，对话区所需的引擎能力由 AudioPanel 显式注入。
+ * 三件事各有独立入口，互不共用容器：
+ *   创作 —— 新建工程对话框里写一句描述
+ *   迭代 —— 选一份已有的 .spg，在保住原曲的前提下优化，落进新工程
+ *   修复 —— 编译失败时自动触发（最多 3 轮），或由状态条上的「立即修复」手动触发
  *
- * 文件内分区：视觉令牌 → 示波器 → 代码编辑器 → 对话区 → 音频实验室 → 面板外壳。
+ * 原 AudioPanel/ 目录（index + ChatInterface + CodeEditor + Visualizer +
+ * AudioToolbox）全部合并到这里。对话区已随会话容器一起删除。
+ *
+ * 文件内分区：视觉令牌 → 示波器 → 代码编辑器 → 音频实验室 →
+ * 新建工程对话框 → 面板外壳。
  */
 
 type ViewState = 'dashboard' | 'workspace' | 'lab';
@@ -593,325 +592,6 @@ const CodeEditor: React.FC<CodeEditorProps> = ({ code, onChange, error }) => {
 };
 
 /* ========================================================================== */
-/*                                  对话区                                    */
-/* ========================================================================== */
-
-interface ChatInterfaceProps {
-    initialMessages: Message[];
-    onCodeGenerated: (code: string) => void;
-    onMessagesUpdate: (messages: Message[]) => void;
-    /**
-     * 对话能力由父级 AudioPanel 注入。
-     * 这里刻意不调用 useAudio()：那会为每个 ChatInterface 实例
-     * 额外创建一个 AudioContext 且从不关闭，造成音频上下文泄漏。
-     */
-    chat: {
-        isProcessing: boolean;
-        sendMessage: (content: string) => Promise<{ success: boolean; code?: string; replyMessage: Message }>;
-        triggerFix: (brokenCode: string, error: string) => Promise<{ success: boolean; code?: string; replyMessage: Message }>;
-    };
-}
-
-/**
- * 消息正文渲染。
- *
- * 模型回复里最常出现的两种结构是**行内代码**（`note("C4","4n")` 这类写法）
- * 和段落换行。此前整段当纯文本塞进一个 div，反引号和换行原样显示，
- * 一条讲语法的回复读起来是一坨。
- *
- * 这里只处理这两种，不引入 Markdown 解析器：对话内容是模型生成的，
- * 走 HTML 渲染等于把注入面交给模型；下面全程是 React 元素，没有 innerHTML。
- */
-const MessageBody: React.FC<{ content: string }> = ({ content }) => (
-    <>
-        {content.split('\n').map((line, lineIdx) => (
-            <React.Fragment key={lineIdx}>
-                {lineIdx > 0 && <br />}
-                {line.split(/(`[^`]+`)/g).map((part, partIdx) =>
-                    part.length > 1 && part.startsWith('`') && part.endsWith('`') ? (
-                        <code
-                            key={partIdx}
-                            className="rounded bg-black/40 px-1 py-0.5 font-mono text-[0.85em] text-cyan-300"
-                        >
-                            {part.slice(1, -1)}
-                        </code>
-                    ) : (
-                        <React.Fragment key={partIdx}>{part}</React.Fragment>
-                    )
-                )}
-            </React.Fragment>
-        ))}
-    </>
-);
-
-/** 一条可复制的代码片段（模型回复里带 ``` 围栏的块） */
-const CodeSnippet: React.FC<{ code: string }> = ({ code }) => {
-    const [copied, setCopied] = useState(false);
-
-    const handleCopy = async () => {
-        try {
-            await navigator.clipboard.writeText(code);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1600);
-        } catch {
-            // 剪贴板权限被拒时保持原状：没有反馈好过谎报"已复制"
-        }
-    };
-
-    return (
-        <div className="mt-2 rounded-lg border border-white/8 bg-black/50 overflow-hidden">
-            <div className="flex items-center justify-between px-2.5 py-1 border-b border-white/8 bg-white/[0.03]">
-                <span className={`${LABEL} text-zinc-600`}>SPG</span>
-                <button
-                    onClick={handleCopy}
-                    className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-white/10 hover:text-white ${FOCUS_RING}`}
-                    title="复制代码"
-                >
-                    {copied ? <CheckIcon className="w-3 h-3 text-emerald-400" /> : <ClipboardDocumentIcon className="w-3 h-3" />}
-                    {copied ? '已复制' : '复制'}
-                </button>
-            </div>
-            <pre className="px-2.5 py-2 overflow-x-auto text-[11px] leading-4 text-zinc-300 font-mono">{code}</pre>
-        </div>
-    );
-};
-
-/**
- * 把消息正文切成"文本段 + 代码块"。
- * 代码块用 ``` 围栏界定，与提示词要求模型输出的格式一致。
- */
-const splitMessage = (content: string): { text: string; code?: string }[] => {
-    const parts: { text: string; code?: string }[] = [];
-    const fence = /```[^\n]*\n?([\s\S]*?)```/g;
-    let last = 0;
-    let match: RegExpExecArray | null;
-
-    while ((match = fence.exec(content)) !== null) {
-        if (match.index > last) parts.push({ text: content.slice(last, match.index) });
-        parts.push({ text: '', code: match[1].replace(/\n$/, '') });
-        last = fence.lastIndex;
-    }
-    if (last < content.length) parts.push({ text: content.slice(last) });
-    return parts.length ? parts : [{ text: content }];
-};
-
-/** 一条消息的气泡内容：代码块单独成块，其余走 MessageBody */
-const MessageContent: React.FC<{ content: string }> = ({ content }) => (
-    <>
-        {splitMessage(content).map((part, idx) =>
-            part.code !== undefined ? (
-                <CodeSnippet key={idx} code={part.code} />
-            ) : part.text.trim() ? (
-                <MessageBody key={idx} content={part.text.trim()} />
-            ) : null
-        )}
-    </>
-);
-
-const ChatInterface = forwardRef<ChatInterfaceRef, ChatInterfaceProps>(
-    ({ initialMessages, onCodeGenerated, onMessagesUpdate, chat }, ref) => {
-        const { isProcessing, sendMessage, triggerFix: triggerFixAction } = chat;
-
-        const [input, setInput] = useState('');
-        const [messages, setMessages] = useState<Message[]>(initialMessages);
-        const messagesEndRef = useRef<HTMLDivElement>(null);
-        const scrollRef = useRef<HTMLDivElement>(null);
-        const isMounted = useRef(true);
-        /**
-         * 用户是否还停在底部。
-         *
-         * 原来是无条件 `scrollIntoView({ behavior: 'smooth' })`：只要消息一变就滚到底。
-         * 自动修复一轮会连续追加多条消息，用户想往上翻看前一条报错时会被反复拽回底部，
-         * 根本读不了。改成只在"本来就在底部"时跟随。
-         */
-        const pinnedToBottom = useRef(true);
-
-        useEffect(() => {
-            isMounted.current = true;
-            return () => {
-                isMounted.current = false;
-            };
-        }, []);
-
-        const handleScroll = () => {
-            const el = scrollRef.current;
-            if (!el) return;
-            // 24px 容差：滚动到底时浏览器给的 scrollTop 常差几个小数
-            pinnedToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-        };
-
-        useEffect(() => {
-            setMessages(initialMessages);
-        }, [initialMessages]);
-
-        useEffect(() => {
-            if (pinnedToBottom.current) {
-                messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-            }
-        }, [messages, isProcessing]);
-
-        useEffect(() => {
-            if (isMounted.current) {
-                onMessagesUpdate(messages);
-            }
-        }, [messages, onMessagesUpdate]);
-
-        // 暴露给父组件的 AutoFix 触发器
-        useImperativeHandle(ref, () => ({
-            triggerFix: async (brokenCode: string, error: string) => {
-                const systemMsg: Message = {
-                    role: 'model',
-                    content: `检测到编译错误：${error}。正在尝试自动修复...`,
-                    timestamp: Date.now(),
-                };
-                setMessages((prev) => [...prev, systemMsg]);
-
-                const result = await triggerFixAction(brokenCode, error);
-
-                if (!isMounted.current) return;
-
-                setMessages((prev) => [...prev, result.replyMessage]);
-
-                if (result.success && result.code) {
-                    onCodeGenerated(result.code);
-                }
-            },
-        }));
-
-        const handleSend = async () => {
-            if (!input.trim() || isProcessing) return;
-
-            const userMsg: Message = { role: 'user', content: input, timestamp: Date.now() };
-            setMessages((prev) => [...prev, userMsg]);
-            setInput('');
-            // 自己发的消息一定要看到，强制回到跟随状态
-            pinnedToBottom.current = true;
-
-            const result = await sendMessage(userMsg.content);
-
-            if (!isMounted.current) return;
-
-            setMessages((prev) => [...prev, result.replyMessage]);
-
-            if (result.success && result.code) {
-                onCodeGenerated(result.code);
-            }
-        };
-
-        const handleKeyDown = (e: React.KeyboardEvent) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                handleSend();
-            }
-        };
-
-        return (
-            <div className="flex flex-col h-full bg-transparent">
-                {/* Header */}
-                <div className="px-4 py-3 border-b border-white/8 bg-white/[0.02] flex items-center justify-between shrink-0">
-                    <div className="flex items-center gap-2">
-                        <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600">
-                            <SparklesIcon className="w-3.5 h-3.5 text-white" />
-                        </span>
-                        <h2 className="text-sm font-bold text-zinc-100">作曲助手</h2>
-                    </div>
-                    <span className={`${LABEL} rounded border border-white/8 bg-white/[0.03] px-2 py-1 text-zinc-500`}>
-                        描述 → 代码
-                    </span>
-                </div>
-
-                {/* Message List */}
-                <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto p-4 space-y-5 custom-scrollbar">
-                    {messages.map((msg, idx) => (
-                        <div key={idx} className={`flex gap-2.5 ${msg.role === 'user' ? 'flex-row-reverse' : 'flex-row'}`}>
-                            {/* Avatar */}
-                            <div
-                                className={`
-                w-7 h-7 rounded-full flex items-center justify-center shrink-0 border
-                ${msg.role === 'user'
-                                        ? 'bg-white/[0.06] border-white/10'
-                                        : msg.role === 'system' ? 'bg-transparent border-transparent'
-                                            : 'bg-gradient-to-br from-cyan-600 to-blue-700 border-cyan-400/30'
-                                    }
-            `}
-                            >
-                                {msg.role === 'user' && <UserCircleIcon className="w-4 h-4 text-zinc-400" />}
-                                {msg.role === 'model' && <CpuChipIcon className="w-4 h-4 text-white" />}
-                            </div>
-
-                            {/* Bubble */}
-                            <div
-                                className={`
-                max-w-[85%] min-w-0 rounded-2xl px-3.5 py-2.5 text-[13px] leading-relaxed
-                ${msg.role === 'user'
-                                        ? 'bg-cyan-500/12 text-cyan-50 rounded-tr-sm border border-cyan-400/20'
-                                        : msg.role === 'system'
-                                            ? 'bg-white/[0.02] text-zinc-500 text-[11px] italic text-center w-full border border-dashed border-white/10'
-                                            : 'bg-white/[0.045] text-zinc-300 rounded-tl-sm border border-white/8'
-                                    }
-            `}
-                            >
-                                <MessageContent content={msg.content} />
-                            </div>
-                        </div>
-                    ))}
-
-                    {isProcessing && (
-                        <div className="flex gap-2.5">
-                            <div className="w-7 h-7 rounded-full bg-gradient-to-br from-cyan-600 to-blue-700 border border-cyan-400/30 flex items-center justify-center shrink-0">
-                                <CpuChipIcon className="w-4 h-4 text-white" />
-                            </div>
-                            <div className="bg-white/[0.045] rounded-2xl rounded-tl-sm px-3.5 py-3 border border-white/8 flex items-center gap-1">
-                                {[0, 0.15, 0.3].map((delay) => (
-                                    <span
-                                        key={delay}
-                                        className="spg-dot w-1.5 h-1.5 bg-cyan-400 rounded-full"
-                                        style={{ '--spg-delay': `${delay}s` } as React.CSSProperties}
-                                    />
-                                ))}
-                            </div>
-                        </div>
-                    )}
-                    <div ref={messagesEndRef} />
-                </div>
-
-                {/* Input Area */}
-                <div className="p-3 border-t border-white/8 bg-white/[0.02] shrink-0">
-                    <div className="relative">
-                        <input
-                            type="text"
-                            value={input}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setInput(e.target.value)}
-                            onKeyDown={handleKeyDown}
-                            placeholder="描述你想要的音乐，例如：一段 90BPM 的 Lo-fi 钢琴…"
-                            className={`w-full bg-black/40 border border-white/10 rounded-xl pl-3.5 pr-11 py-2.5 text-[13px] text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-cyan-400/50 focus:ring-2 focus:ring-cyan-400/25 transition ${FOCUS_RING}`}
-                            disabled={isProcessing}
-                        />
-                        <button
-                            onClick={handleSend}
-                            disabled={isProcessing || !input.trim()}
-                            title="发送（Enter）"
-                            className={`
-                absolute right-1.5 top-1/2 -translate-y-1/2 p-2 rounded-lg transition
-                ${isProcessing || !input.trim()
-                                    ? 'text-zinc-700'
-                                    : 'text-cyan-400 hover:bg-cyan-500/15 hover:text-cyan-300'
-                                }
-            `}
-                        >
-                            <PaperAirplaneIcon className="w-4 h-4" />
-                        </button>
-                    </div>
-                    <p className="mt-2 text-[10px] text-zinc-600 leading-relaxed">
-                        生成后会自动试跑；编译失败会连续自动修复最多 3 次。
-                    </p>
-                </div>
-            </div>
-        );
-    }
-);
-
-/* ========================================================================== */
 /*                                音频实验室                                  */
 /* ========================================================================== */
 
@@ -1379,6 +1059,127 @@ const FixerView: React.FC<FixerProps> = ({ file, gain, isProcessing, setFile, se
 };
 
 /* ========================================================================== */
+/*                              新建工程对话框                                */
+/* ========================================================================== */
+
+interface CreateProjectDialogProps {
+    open: boolean;
+    isGenerating: boolean;
+    error: string | null;
+    onCancel: () => void;
+    onSubmit: (description: string) => void;
+}
+
+/**
+ * 新建工程 = 描述一句话 → 生成 → 进工作台。
+ *
+ * 生成从对话区挪到了这一步，所以这个框是**唯一**的创作入口：
+ * 用户不必先学会"该在哪个框里说什么话"，也不需要为了生成先建一个空工程。
+ */
+const CreateProjectDialog: React.FC<CreateProjectDialogProps> = ({
+    open, isGenerating, error, onCancel, onSubmit,
+}) => {
+    const [description, setDescription] = useState('');
+    const inputRef = useRef<HTMLTextAreaElement>(null);
+
+    // 每次打开都从空白开始：留着上一次的描述会让"再建一个"变成"再生成同一首"
+    useEffect(() => {
+        if (!open) return;
+        setDescription('');
+        inputRef.current?.focus();
+    }, [open]);
+
+    // Esc 关闭。生成中不关 —— 请求已经发出去了，关掉只会让用户以为取消了
+    useEffect(() => {
+        if (!open) return;
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape' && !isGenerating) onCancel();
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [open, isGenerating, onCancel]);
+
+    if (!open) return null;
+
+    const submit = () => {
+        if (isGenerating || !description.trim()) return;
+        onSubmit(description);
+    };
+
+    return (
+        <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+            onMouseDown={(e) => { if (e.target === e.currentTarget && !isGenerating) onCancel(); }}
+        >
+            <div
+                role="dialog"
+                aria-modal="true"
+                aria-label="新建工程"
+                className="w-full max-w-lg rounded-2xl border border-white/10 bg-zinc-900 p-6 shadow-2xl shadow-black/60"
+            >
+                <div className="mb-1 flex items-center gap-2">
+                    <SparklesIcon className="w-4 h-4 text-cyan-300" />
+                    <h2 className="text-base font-bold text-zinc-100">想做什么曲子？</h2>
+                </div>
+                <p className="mb-4 text-xs text-zinc-500">
+                    描述越具体越好：乐器、速度、调性、情绪、段落。AI 会写出可编译的 SPG 代码并直接试听。
+                </p>
+
+                <textarea
+                    ref={inputRef}
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                    onKeyDown={(e) => {
+                        // Ctrl/Cmd+Enter 提交（与工作区的运行快捷键一致），
+                        // 裸 Enter 留给换行 —— 描述常常要写好几行
+                        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                            e.preventDefault();
+                            submit();
+                        }
+                    }}
+                    rows={4}
+                    disabled={isGenerating}
+                    placeholder={'例如：一段 62BPM 的 C 小调钢琴独奏，左手琶音铺底，\n右手旋律克制，末段留白，加一点混响。'}
+                    className={`w-full resize-none rounded-xl border border-white/10 bg-black/40 px-3.5 py-3 text-[13px] leading-relaxed text-zinc-100 placeholder:text-zinc-600 transition focus:border-cyan-400/50 focus:outline-none focus:ring-2 focus:ring-cyan-400/25 disabled:opacity-60 ${FOCUS_RING}`}
+                />
+
+                {error && (
+                    <p className="mt-2 rounded-lg border border-rose-500/30 bg-rose-950/40 px-3 py-2 text-xs text-rose-300">
+                        {error}
+                    </p>
+                )}
+
+                <div className="mt-5 flex items-center justify-end gap-3">
+                    <button
+                        onClick={onCancel}
+                        disabled={isGenerating}
+                        className={`${BTN_GHOST} px-4 py-2.5 text-[13px] disabled:opacity-50`}
+                    >
+                        取消
+                    </button>
+                    <button
+                        onClick={submit}
+                        disabled={isGenerating || !description.trim()}
+                        className={`${BTN_PRIMARY} px-4 py-2.5 text-[13px]`}
+                    >
+                        {isGenerating ? (
+                            <>
+                                <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                                正在作曲…
+                            </>
+                        ) : (
+                            <>
+                                <SparklesIcon className="w-4 h-4" /> 开始创作
+                            </>
+                        )}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+/* ========================================================================== */
 /*                                 面板外壳                                   */
 /* ========================================================================== */
 
@@ -1391,11 +1192,12 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
     // UI Local State
     const [view, setView] = useState<ViewState>('dashboard');
     const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+    const [createOpen, setCreateOpen] = useState(false);
+    const [createError, setCreateError] = useState<string | null>(null);
 
     // Refs
     const fileInputRef = useRef<HTMLInputElement>(null);
     const refineInputRef = useRef<HTMLInputElement>(null);
-    const chatInterfaceRef = useRef<ChatInterfaceRef>(null);
 
     // --- Workspace Logic ---
 
@@ -1428,11 +1230,23 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
 
     // --- Handlers ---
 
-    const handleCreateProject = useCallback(() => {
+    /**
+     * 用一句话建工程：生成、命名、落盘全在 createProject 里，
+     * 这里只管界面状态（进工作区、收起侧栏、就地显示失败原因）。
+     */
+    const handleCreateProject = useCallback(async (description: string) => {
         audioActions.stop();
-        audioActions.createProject();
-        setView('workspace');
         resetWorkspace();
+        setCreateError(null);
+
+        const result = await audioActions.createProject(description);
+        if (!result.success) {
+            setCreateError(result.message || '生成失败，请重试。');
+            return;
+        }
+
+        setCreateOpen(false);
+        setView('workspace');
         if (window.innerWidth < 768) setIsSidebarOpen(false);
     }, [audioActions, resetWorkspace]);
 
@@ -1464,49 +1278,77 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
         setView('lab');
     }, [audioActions, resetWorkspace]);
 
+    /**
+     * 编译并试听；autoFix 时失败就自动修复，修好再试，最多 MAX_AUTO_FIX 轮。
+     *
+     * 写成**一个循环**而不是互相递归（原来是 compile → 对话区 ref → 回调 → compile）：
+     * 中间那层 ref 是对话区才需要的转发，会话容器删掉后它没有存在理由，
+     * 而递归版本的终止条件散在两个函数里，改一处就会漏。
+     *
+     * 尝试次数只由 fixAttemptRef 记账（见上），循环里每轮读它决定是否放弃。
+     */
     const handleCompileAndPlay = useCallback(async (
         sourceCode: string,
         options: { autoFix?: boolean } = {}
     ) => {
         const { autoFix = false } = options;
-        const result = await audioActions.compileAndPlay(sourceCode);
+        let code = sourceCode;
 
-        if (result.success) {
-            setFixAttempts(0);
-            return;
+        for (;;) {
+            const result = await audioActions.compileAndPlay(code);
+
+            if (result.success) {
+                setFixAttempts(0);
+                return;
+            }
+
+            if (!autoFix || !result.error) return;
+
+            if (fixAttemptRef.current >= MAX_AUTO_FIX) {
+                audioActions.setParserError({
+                    message: `${result.error.message}（已自动修复 ${MAX_AUTO_FIX} 次仍未通过，请手动检查代码）`,
+                    line: result.error.line,
+                });
+                setFixAttempts(0);
+                return;
+            }
+
+            setFixAttempts(fixAttemptRef.current + 1);
+            const fixed = await audioActions.triggerFix(code, result.error.message);
+
+            if (!fixed.success || !fixed.code) {
+                // 修复通道自己失败了（网络/服务不可用）：把原因报出来并停下，
+                // 继续循环只会拿同一份代码反复撞同一个错
+                audioActions.setParserError({
+                    message: fixed.message || '自动修复失败，请手动检查代码。',
+                    line: result.error.line,
+                });
+                setFixAttempts(0);
+                return;
+            }
+
+            code = fixed.code;
+            audioActions.updateActiveProject({ code });
         }
-
-        if (!autoFix || !result.error) return;
-
-        if (fixAttemptRef.current >= MAX_AUTO_FIX) {
-            audioActions.setParserError({
-                message: `${result.error.message}（已自动修复 ${MAX_AUTO_FIX} 次仍未通过，请手动检查代码）`,
-                line: result.error.line,
-            });
-            setFixAttempts(0);
-            return;
-        }
-
-        setFixAttempts(fixAttemptRef.current + 1);
-        chatInterfaceRef.current?.triggerFix(sourceCode, result.error.message);
     }, [audioActions, setFixAttempts]);
 
-    const handleCodeUpdate = useCallback((newCode: string) => {
-        audioActions.updateActiveProject({ code: newCode });
-        // AI 产出的代码（含修复结果）自动试跑；修复结果若仍失败会继续触发下一轮修复
-        handleCompileAndPlay(newCode, { autoFix: true });
-    }, [audioActions, handleCompileAndPlay]);
+    const handleManualFix = useCallback(async () => {
+        if (!parserError || !activeProject) return;
 
-    const handleMessagesUpdate = useCallback((newMessages: Message[]) => {
-        audioActions.updateProjectMessages(newMessages);
-    }, [audioActions]);
+        setFixAttempts(1);
+        const fixed = await audioActions.triggerFix(activeProject.code, parserError.message);
 
-    const handleManualFix = useCallback(() => {
-        if (parserError && chatInterfaceRef.current && activeProject) {
-            setFixAttempts(1);
-            chatInterfaceRef.current.triggerFix(activeProject.code, parserError.message);
+        if (!fixed.success || !fixed.code) {
+            audioActions.setParserError({
+                message: fixed.message || '自动修复失败，请手动检查代码。',
+                line: parserError.line,
+            });
+            return;
         }
-    }, [activeProject, parserError, setFixAttempts]);
+
+        audioActions.updateActiveProject({ code: fixed.code });
+        handleCompileAndPlay(fixed.code, { autoFix: true });
+    }, [activeProject, audioActions, handleCompileAndPlay, parserError, setFixAttempts]);
 
     const handleExportBundle = useCallback(() => {
         if (activeProject) {
@@ -1646,7 +1488,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                         <button onClick={() => fileInputRef.current?.click()} className={`${BTN_GHOST} px-4 py-2.5 text-[13px]`}>
                             <ArrowUpTrayIcon className="w-4 h-4" /> 导入 .spg
                         </button>
-                        <button onClick={handleCreateProject} className={`${BTN_PRIMARY} px-4 py-2.5 text-[13px]`}>
+                        <button onClick={() => setCreateOpen(true)} className={`${BTN_PRIMARY} px-4 py-2.5 text-[13px]`}>
                             <PlusIcon className="w-4 h-4" /> 新建项目
                         </button>
                     </div>
@@ -1671,7 +1513,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                 <div className="grid grid-cols-1 gap-5 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                     {/* Create Card */}
                     <button
-                        onClick={handleCreateProject}
+                        onClick={() => setCreateOpen(true)}
                         className={`group flex h-[248px] flex-col items-center justify-center rounded-2xl border-2 border-dashed border-white/10 bg-white/[0.015] transition-colors hover:border-cyan-400/50 hover:bg-cyan-500/[0.04] ${FOCUS_RING}`}
                     >
                         <span className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-white/[0.04] transition-colors group-hover:bg-cyan-500/15">
@@ -1756,12 +1598,10 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                                     )}
                                 </div>
 
-                                <div className="mt-3 flex items-center justify-between border-t border-white/8 pt-3 text-[11px] text-zinc-500">
-                                    <span>{relativeTime(project.lastModified)}</span>
-                                    <span className="flex items-center gap-1.5">
-                                        <SparklesIcon className="w-3 h-3 text-zinc-600" />
-                                        {project.messages.length} 条对话
-                                    </span>
+                                {/* 右半边原来显示"N 条对话"，会话容器删掉后没有对应物了。
+                                    卡片上方那排标签已经说明"这是个什么曲子"，不再补位占满 */}
+                                <div className="mt-3 border-t border-white/8 pt-3 text-[11px] text-zinc-500">
+                                    {relativeTime(project.lastModified)}
                                 </div>
                             </div>
                         );
@@ -1824,7 +1664,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
             <div className="mt-2 flex items-center justify-between px-4 py-2 shrink-0">
                 <h3 className={LABEL}>最近项目</h3>
                 <button
-                    onClick={handleCreateProject}
+                    onClick={() => setCreateOpen(true)}
                     title="新建项目"
                     className={`rounded-md p-1 text-cyan-400 transition hover:bg-cyan-500/15 hover:text-cyan-300 ${FOCUS_RING}`}
                 >
@@ -2021,25 +1861,9 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                     </div>
                 </header>
 
-                {/* Split View Content */}
-                <div className="flex-1 flex overflow-hidden p-4 gap-4">
-                    {/* Left: Chat */}
-                    <div className="w-[380px] shrink-0 flex flex-col rounded-2xl overflow-hidden border border-white/8 bg-zinc-900/60 shadow-2xl shadow-black/40">
-                        <ChatInterface
-                            key={activeProject.id}
-                            ref={chatInterfaceRef}
-                            chat={{
-                                isProcessing: audioState.isChatProcessing,
-                                sendMessage: audioActions.sendMessage,
-                                triggerFix: audioActions.triggerFix,
-                            }}
-                            initialMessages={activeProject.messages}
-                            onMessagesUpdate={handleMessagesUpdate}
-                            onCodeGenerated={handleCodeUpdate}
-                        />
-                    </div>
-
-                    {/* Right: Visualizer & Code */}
+                {/* 工作区：示波器 + 编辑器。原来左边那栏是对话区，
+                    现在创作、迭代、修复各自有独立入口，会话容器不再承担任何职责 */}
+                <div className="flex-1 flex overflow-hidden p-4">
                     <div className="flex-1 flex flex-col gap-4 min-w-0">
                         {/* Visualizer (Fixed Height) */}
                         <div className="h-44 shrink-0 rounded-2xl overflow-hidden border border-white/8 shadow-2xl shadow-black/40 relative group">
@@ -2146,6 +1970,14 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
                     {view === 'workspace' ? renderWorkspace() : renderLab()}
                 </div>
             )}
+
+            <CreateProjectDialog
+                open={createOpen}
+                isGenerating={audioState.isGenerating}
+                error={createError}
+                onCancel={() => setCreateOpen(false)}
+                onSubmit={handleCreateProject}
+            />
         </div>
     );
 };

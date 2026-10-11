@@ -1,7 +1,7 @@
 /// <reference lib="dom" />
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type React from 'react';
-import { Project, Message, AppState, ParserError, SPGWarning, getElectronAPI } from '../../../shared/meta';
+import { Project, AppState, ParserError, SPGWarning, getElectronAPI } from '../../../shared/meta';
 import { loadProjects, saveProjects, createNewProject, BrowserAudioEngine, bufferToWave, } from '../services/AudioService';
 import { generateSyntax, fixSyntax, refineSyntax } from '../services/SpgAiService';
 import { downloadBlob, loadJSON, removeStored, saveJSON } from '../../../shared/core';
@@ -40,17 +40,19 @@ interface UseAudioReturn {
         fixerFile: File | null;
         fixerGain: number;
         fixerProcessing: boolean;
-        // 对话辅助
+        /** 正在按描述生成一首新曲子（新建工程对话框用） */
+        isGenerating: boolean;
+        /** 正在自动修复编译错误 */
         isChatProcessing: boolean;
         /** 正在迭代优化一份外部 .spg 文件 */
         isRefining: boolean;
     };
     actions: {
         // 工程操作
-        createProject: () => string;
+        /** 用一句话描述建一个工程：生成代码、命名、落盘，返回新工程 id */
+        createProject: (description: string) => Promise<{ success: boolean; projectId?: string; message?: string }>;
         deleteProject: (id: string) => void;
         updateActiveProject: (updates: Partial<Project>) => void;
-        updateProjectMessages: (messages: Message[]) => void;
         importProjectFromFile: (file: File, callback: (newId: string) => void) => void;
         setActiveProjectId: React.Dispatch<React.SetStateAction<string | null>>;
         // 引擎操作
@@ -67,9 +69,8 @@ interface UseAudioReturn {
         setFixerFile: (file: File | null) => void;
         setFixerGain: (gain: number) => void;
         applyFix: () => Promise<void>;
-        // 对话操作
-        sendMessage: (content: string) => Promise<{ success: boolean; code?: string; replyMessage: Message }>;
-        triggerFix: (brokenCode: string, error: string) => Promise<{ success: boolean; code?: string; replyMessage: Message }>;
+        // 修复操作
+        triggerFix: (brokenCode: string, error: string) => Promise<{ success: boolean; code?: string; message?: string }>;
         /** 基于一份已有的 .spg 文件迭代优化；结果进**新**工程，原工程一字不动 */
         refineSpg: (file: File) => Promise<{ success: boolean; projectId?: string; code?: string; message?: string }>;
     };
@@ -169,8 +170,8 @@ export const useAudio = ({
     /**
      * 留档时用的工程名。
      *
-     * 走 ref 而不是把 activeProject 塞进 sendMessage 的依赖：那两个回调
-     * 经 actions 的 useMemo 流向对话区，而 activeProject 的引用每次编辑代码
+     * 走 ref 而不是把 activeProject 塞进 triggerFix 的依赖：那个回调
+     * 经 actions 的 useMemo 流向工作区，而 activeProject 的引用每次编辑代码
      * 都会变（updateActiveProject 产生新的 projects 数组），加进依赖等于
      * 每敲一个字就重建一次回调。名字只用于拼文件名，读到最新值即可。
      */
@@ -179,13 +180,49 @@ export const useAudio = ({
         activeProjectNameRef.current = activeProject?.name || '未命名';
     }, [activeProject]);
 
-    const createProject = useCallback(() => {
-        const newProject = createNewProject();
-        newProject.name = `未命名项目 ${projects.length + 1}`;
-        setProjects((prev) => [newProject, ...prev]);
-        setActiveProjectId(newProject.id);
-        return newProject.id;
-    }, [projects.length]);
+    /**
+     * 用一句话描述建一个工程：生成代码 → 命名 → 留档 → 落进工程列表。
+     *
+     * 生成从对话区挪到了**创建工程这一步**，因为工作台里已经没有会话容器了。
+     * 这三件事（创作 / 迭代 / 修复）原本都挤在同一个对话框里靠提示词区分，
+     * 现在各自有独立入口，用户不必先学会"该在哪个框里说什么话"。
+     *
+     * 失败时**不建工程**：留一个空的、只有占位代码的工程在列表里，
+     * 用户还得自己删掉它。返回错误让调用方就地显示。
+     */
+    const createProject = useCallback(async (description: string) => {
+        const prompt = description.trim();
+        if (!prompt) {
+            return { success: false, message: '请先描述你想要的曲子。' };
+        }
+
+        setIsGenerating(true);
+        try {
+            const { code, title } = await generateSyntax(prompt);
+            const name = title || prompt.slice(0, 12);
+
+            archiveSpg(code, name);
+
+            const newProject = createNewProject();
+            newProject.name = name;
+            newProject.code = code;
+            setProjects((prev) => [newProject, ...prev]);
+            setActiveProjectId(newProject.id);
+
+            return { success: true, projectId: newProject.id };
+        } catch (error: unknown) {
+            console.error('SPG 生成失败:', error);
+            const message = error instanceof Error ? error.message : '';
+            return {
+                success: false,
+                message: message.includes('无法连接') || message.includes('AI 服务')
+                    ? `错误：${message}`
+                    : '生成失败，请重试。',
+            };
+        } finally {
+            setIsGenerating(false);
+        }
+    }, []);
 
     const deleteProject = useCallback((id: string) => {
         setProjects((prev) => prev.filter((project) => project.id !== id));
@@ -210,33 +247,6 @@ export const useAudio = ({
         );
     }, [activeProjectId]);
 
-    const updateProjectMessages = useCallback((messages: Message[]) => {
-        if (!activeProjectId) return;
-
-        setProjects((prev) => {
-            let changed = false;
-
-            const nextProjects = prev.map((project) => {
-                if (project.id !== activeProjectId) {
-                    return project;
-                }
-
-                if (project.messages === messages) {
-                    return project;
-                }
-
-                changed = true;
-                return {
-                    ...project,
-                    messages,
-                    lastModified: Date.now(),
-                };
-            });
-
-            return changed ? nextProjects : prev;
-        });
-    }, [activeProjectId]);
-
     const importProjectFromFile = useCallback((file: File, callback: (newId: string) => void) => {
         const reader = new FileReader();
         reader.onload = (event) => {
@@ -245,11 +255,6 @@ export const useAudio = ({
             const newProject = createNewProject();
             newProject.name = file.name.replace(/\.(spg|txt)$/i, '') || 'Imported Project';
             newProject.code = content;
-            newProject.messages.push({
-                role: 'system',
-                content: '已导入外部代码文件。您可以继续在此基础上进行修改。',
-                timestamp: Date.now(),
-            });
 
             setProjects((prev) => [newProject, ...prev]);
             setActiveProjectId(newProject.id);
@@ -555,65 +560,26 @@ export const useAudio = ({
         }
     }, [fixerFile, fixerGain]);
 
-    // 4. 对话与代码修复状态
+    // 4. 生成、迭代与修复状态
     const [isChatProcessing, setIsChatProcessing] = useState(false);
     const [isRefining, setIsRefining] = useState(false);
-
-    const sendMessage = useCallback(async (content: string) => {
-        setIsChatProcessing(true);
-        try {
-            const { code, title } = await generateSyntax(content);
-            archiveSpg(code, title || activeProjectNameRef.current);
-            // 模型给的作品名直接替换工程标题：命名是生成的一部分，
-            // 让用户改一遍等于让模型白写。没给名字就保持原样，不清空。
-            if (title) {
-                updateActiveProject({ name: title });
-            }
-            const replyMessage: Message = {
-                role: 'model',
-                content: title
-                    ? `已为您生成音频配置代码，工程已命名为「${title}」。正在自动加载到编辑器...`
-                    : '已为您生成音频配置代码。正在自动加载到编辑器...',
-                timestamp: Date.now(),
-            };
-            return { success: true, code, replyMessage };
-        } catch (error: unknown) {
-            let errorMsg = '生成失败，请重试。';
-            const message = error instanceof Error ? error.message : '';
-            // AI 服务没配好（地址不通、密钥不对）是最常见的失败原因，直接把原文带出来
-            if (message.includes('无法连接') || message.includes('AI 服务')) {
-                errorMsg = `错误：${message}`;
-            }
-            const replyMessage: Message = {
-                role: 'model',
-                content: errorMsg,
-                timestamp: Date.now(),
-            };
-            return { success: false, replyMessage };
-        } finally {
-            setIsChatProcessing(false);
-        }
-    }, [updateActiveProject]);
+    const [isGenerating, setIsGenerating] = useState(false);
 
     const triggerFix = useCallback(async (brokenCode: string, error: string) => {
         setIsChatProcessing(true);
         try {
             const fixedCode = await fixSyntax(brokenCode, error);
             archiveSpg(fixedCode, activeProjectNameRef.current);
-            const replyMessage: Message = {
-                role: 'model',
-                content: '修复完成！正在应用新代码。',
-                timestamp: Date.now(),
-            };
-            return { success: true, code: fixedCode, replyMessage };
+            return { success: true, code: fixedCode };
         } catch (error: unknown) {
             console.error('语法自动修复失败:', error);
-            const replyMessage: Message = {
-                role: 'model',
-                content: '自动修复失败。请手动检查代码。',
-                timestamp: Date.now(),
+            const message = error instanceof Error ? error.message : '';
+            return {
+                success: false,
+                message: message.includes('无法连接') || message.includes('AI 服务')
+                    ? `错误：${message}`
+                    : '自动修复失败，请手动检查代码。',
             };
-            return { success: false, replyMessage };
         } finally {
             setIsChatProcessing(false);
         }
@@ -626,10 +592,6 @@ export const useAudio = ({
      * 那就不能把原稿覆盖掉 —— 用户点完按钮发现原曲没了，
      * 优化得再好也是净损失。原稿本身也只存在于工程里（.spg 归档是生成时写的），
      * 没有第二份可以回退。
-     *
-     * 与 sendMessage 分成两个入口，而不是给它加个"带文件"参数：
-     * 生成是"从一句话创造"，迭代是"在给定作品上改动"，目标相反。
-     * 合成一个函数后，两个方向的提示词与落点都得在函数内部再分一次叉。
      */
     const refineSpg = useCallback(async (file: File) => {
         setIsRefining(true);
@@ -648,11 +610,6 @@ export const useAudio = ({
             const project = createNewProject();
             project.name = `${baseName} 优化版`;
             project.code = code;
-            project.messages.push({
-                role: 'model',
-                content: `已基于「${file.name}」迭代优化，原工程保持不变。正在自动加载到编辑器...`,
-                timestamp: Date.now(),
-            });
             setProjects((prev) => [project, ...prev]);
             setActiveProjectId(project.id);
 
@@ -690,6 +647,7 @@ export const useAudio = ({
             fixerProcessing,
             isChatProcessing,
             isRefining,
+            isGenerating,
         }),
         [
             projects,
@@ -708,6 +666,7 @@ export const useAudio = ({
             fixerProcessing,
             isChatProcessing,
             isRefining,
+            isGenerating,
         ]
     );
 
@@ -716,7 +675,6 @@ export const useAudio = ({
             createProject,
             deleteProject,
             updateActiveProject,
-            updateProjectMessages,
             importProjectFromFile,
             setActiveProjectId,
             compileAndPlay,
@@ -731,7 +689,6 @@ export const useAudio = ({
             setFixerFile,
             setFixerGain,
             applyFix,
-            sendMessage,
             triggerFix,
             refineSpg,
         }),
@@ -739,7 +696,6 @@ export const useAudio = ({
             createProject,
             deleteProject,
             updateActiveProject,
-            updateProjectMessages,
             importProjectFromFile,
             setActiveProjectId,
             compileAndPlay,
@@ -749,7 +705,6 @@ export const useAudio = ({
             convert,
             analyze,
             applyFix,
-            sendMessage,
             triggerFix,
             refineSpg,
         ]

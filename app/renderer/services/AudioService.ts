@@ -5325,8 +5325,6 @@ export class BrowserAudioEngine {
 /* ==================== 工程持久化 ==================== */
 
 const PROJECTS_STORAGE_KEY = 'spg_projects_v1';
-/** 聊天记录只留最近这些条，避免撑爆 localStorage 配额 */
-const MAX_STORED_MESSAGES = 50;
 
 /** 优先用 crypto.randomUUID，不可用时回退 Math.random */
 const generateId = (): string => {
@@ -5342,9 +5340,6 @@ export const createNewProject = (): Project => {
     id: generateId(),
     name: '未命名项目',
     code: '# 等待 AI 生成或手动输入代码...',
-    messages: [
-      { role: 'system', content: '欢迎使用声音粒子Web Studio。请描述您想要生成的音频（例如："生成一段120BPM的C大调上行音阶"）。', timestamp: Date.now() }
-    ],
     createdAt: Date.now(),
     lastModified: Date.now()
   };
@@ -5352,11 +5347,7 @@ export const createNewProject = (): Project => {
 
 export const saveProjects = (projects: Project[]): void => {
   try {
-    const projectsToSave = projects.map(p => ({
-      ...p,
-      messages: p.messages.slice(-MAX_STORED_MESSAGES)
-    }));
-    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projectsToSave));
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
   } catch (e) {
     console.warn('Failed to save projects to localStorage', e);
   }
@@ -5373,8 +5364,7 @@ export const loadProjects = (): Project[] => {
       (p): p is Project =>
         !!p && typeof p === 'object' &&
         typeof (p as Project).id === 'string' &&
-        typeof (p as Project).code === 'string' &&
-        Array.isArray((p as Project).messages)
+        typeof (p as Project).code === 'string'
     );
   } catch (e) {
     console.warn('Failed to load projects from localStorage', e);

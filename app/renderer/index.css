@@ -608,29 +608,6 @@ input[type='range']:focus-visible {
     animation: spg-sheen 2.8s var(--tp-ease) infinite;
 }
 
-/* 等待回复的三点。
-   原来是 `animate-bounce` + `delay-100/200` —— Tailwind 的 delay-* 设的是
-   **transition-delay**，对 animation 完全无效，三个点始终同步起跳。 */
-@keyframes spg-dot {
-
-    0%,
-    60%,
-    100% {
-        transform: translateY(0);
-        opacity: 0.4;
-    }
-
-    30% {
-        transform: translateY(-3px);
-        opacity: 1;
-    }
-}
-
-.spg-dot {
-    animation: spg-dot 1.05s ease-in-out infinite;
-    animation-delay: var(--spg-delay, 0ms);
-}
-
 /* 代码编辑器的当前行指示条：top 由 React 写入，这里补补间。
    写成组件内联样式之外的一个类，是因为 `transition-top` 并不是 Tailwind 类
    （没有 transition-top 工具类），此前那处过渡一直是死的。 */
@@ -641,8 +618,7 @@ input[type='range']:focus-visible {
 @media (prefers-reduced-motion: reduce) {
 
     .spg-rise,
-    .spg-sheen,
-    .spg-dot {
+    .spg-sheen {
         animation: none;
     }
 

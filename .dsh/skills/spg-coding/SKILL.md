@@ -1,109 +1,126 @@
 ---
 name: spg-coding
-description: 仅适用于本项目（the-play）。写、改、审 `.spg/*.txt` 的 SPG 音频脚本时读：以 services/AudioService.ts 为唯一权威的核对方法、五种块与全部参数白名单、时值与音量算式、一组「写了不报错但结果不是你以为的」陷阱、时间艺术作品的结构纪律、注释纪律与命名法。
-whenToUse: 生成、修改、审查 the-play 的 SPG 脚本（`.spg/` 下的 `.txt`）；判断某个 SPG 构造实际会发出什么声音；或为这类作品命名。
+description: Applies to this project only (the-play). Read when writing, editing or reviewing SPG audio scripts under `.spg/`: how to check constructs against the sole authority `app/renderer/services/AudioService.ts`, the five block types and all parameter whitelists, the duration and gain formulas, a list of "it parses but does not sound like you think" traps, structural discipline for time-based artwork, comment discipline, and naming.
+whenToUse: When generating, modifying or reviewing a the-play SPG script (`.txt` / `.spg` under `.spg/`); when determining what a given SPG construct actually sounds like; or when naming such a work.
 ---
 
-# SPG 编码
+# SPG coding
 
-> **权威只有一份：`services/AudioService.ts`。**
-> 解析器 `SPGParser`、调度器 `EventScheduler`、合成器 `AudioSynthesizer` 都在其中（约 5400 行）。
-> `services/AiService.ts` 的系统提示词是同一套语言的说明文档，但**可能落后于实现** —— 冲突时以实现为准。
+> **There is exactly one authority: `app/renderer/services/AudioService.ts`.**
+> The parser `SPGParser`, the scheduler `EventScheduler` and the synthesizer `AudioSynthesizer` all live
+> inside it (~5400 lines; the exact count drifts because the file is edited concurrently outside the
+> session). Note the path: it is **not** `services/AudioService.ts` — that path does not exist, and
+> grepping it fails with `os error 3`. When in doubt, `glob "**/AudioService.ts"` first.
 >
-> 解析器的贯穿原则是「**宁可报错，不要静默忽略**」：未知参数、非法时值、非法枚举一律抛 `SPGError` 并带行号。
-> 于是拼错参数名会立刻报错，而**语义写错不会** —— 第三节那张清单专治后者。
+> The SPG system prompt lives in `app/renderer/services/SpgAiService.ts` (`SPG_SYSTEM_PROMPT`, around
+> line 92). It is documentation for the same language but **may lag the implementation** — on conflict,
+> the implementation wins.
+>
+> The parser's guiding principle is "**rather raise an error than silently ignore**": unknown parameters,
+> illegal durations and illegal enums all throw `SPGError` with a line number.
+> So a misspelled parameter name fails immediately, while a **semantically wrong construct does not** —
+> the list in section 3 exists specifically for the latter.
 
 ---
 
-## 一、核对方法：怎么把实现当权威用
+## 1. How to use the implementation as the authority
 
-### 1.1 来源优先级
+### 1.1 Source priority
 
-| 优先级 | 来源 | 用途 |
+| Priority | Source | Use it for |
 |---|---|---|
-| 1 | `services/AudioService.ts` 的实现代码 | 参数白名单、取值范围、默认值、分支条件 |
-| 2 | `services/AiService.ts` 的提示词 | 意图与推荐用法 |
-| 3 | 你对通用 DSL / 合成器 / 音频格式的经验 | **只用来生成搜索关键词**，不能作为写下去的依据 |
+| 1 | The implementation code in `app/renderer/services/AudioService.ts` | Parameter whitelists, value ranges, defaults, branch conditions |
+| 2 | The prompt in `app/renderer/services/SpgAiService.ts` | Intent and recommended usage |
+| 3 | Your experience with generic DSLs / synthesizers / audio formats | **Only to generate search keywords** — never as grounds for writing something |
 
-第 3 项最危险：SPG 长得像通用格式，经验会给出一个「看起来对」的写法。
-典型：效果器 `filter` 的 `start` 是「第几秒开始扫频」，起始频率叫 `from`。
-凭直觉写 `start=<频率>` 不报错，只是数值被当成时间 —— 语义完全变了。
+Priority 3 is the most dangerous: SPG looks like a generic format, so experience produces a
+"looks right" spelling. Classic case: the `filter` effect's `start` means "at which second the sweep
+begins"; the starting frequency is called `from`. Writing `start=<frequency>` on intuition raises no
+error — the number is simply read as a time, and the meaning changes completely.
 
-**规则：每一个写进文件的构造，都要在实现里找到消费它的那一行。** 找不到消费点，
-就说明它是「解析了但没人读」的字段；要么不用，要么在注释里写明「只做格式校验，不参与发声」。
+**Rule: every construct you put into the file must have the exact line that consumes it located in the
+implementation.** If you cannot find a consumer, the field is "parsed but never read"; either do not use
+it, or state in a comment that it is format-checked only and does not affect the sound.
 
-### 1.2 找白名单，不要从示例里归纳
+### 1.2 Read the whitelist, do not induce it from examples
 
-实现里有若干张参数白名单表和 `rejectUnknownParams` 式的校验函数。
-**读白名单表本身**比从示例归纳快且准 —— 示例可能用了别名，也可能本身就过时。
+The implementation contains several parameter whitelist tables and `rejectUnknownParams`-style
+validation functions. **Reading the whitelist table itself** is faster and more accurate than inducing
+rules from examples — examples may use aliases, or may themselves be out of date.
 
 ```
-grep -n "PARAMS\s*[:=]|_NAMES\s*[:=]|rejectUnknownParams" services/AudioService.ts
+grep -n "PARAMS\s*[:=]|_NAMES\s*[:=]|rejectUnknownParams" app/renderer/services/AudioService.ts
 ```
 
-### 1.3 别名表是坑的清单
+### 1.3 The alias tables are the list of traps
 
-实现里的 `*_ALIASES` 表记录的正是「最常写错、于是被容忍」的写法。读它一遍就知道哪些名字有歧义。
-反过来：**别名存在不等于推荐使用** —— 写正式名，别名只当兼容。
+The `*_ALIASES` tables in the implementation record exactly the spellings that are written wrongly most
+often and therefore tolerated. Reading them once tells you which names are ambiguous.
+Conversely: **the existence of an alias does not make it recommended** — write the canonical name and
+treat aliases as compatibility only.
 
 ---
 
-## 二、语言参考
+## 2. Language reference
 
-### 2.1 五种块
+### 2.1 The five block types
 
-| 块 | 数量限制 | 说明 |
+| Block | Count limit | Purpose |
 |---|---|---|
-| `config { }` | 最多 1 个 | tempo / master_gain / key / scale / swing |
-| `define_instrument(name="…") { }` | 可多个 | 音色定义 |
-| `sequence(name="…", instrument="…") { }` | 可多个 | 音符序列 |
-| `effect_chain { }` | 顶层可重复，乐器级最多 1 个 | 效果链，顺序 = 信号流经顺序 |
-| `mix { track(...) }` | 最多 1 个 | 编排；写了之后未被引用的音序不发声 |
+| `config { }` | at most 1 | tempo / master_gain / key / scale / swing |
+| `define_instrument(name="…") { }` | many | instrument definition |
+| `sequence(name="…", instrument="…") { }` | many | note sequence |
+| `effect_chain { }` | repeatable at top level, at most 1 per instrument | effect chain; order = signal flow order |
+| `mix { track(...) }` | at most 1 | arrangement; once written, unreferenced sequences produce no sound |
 
-块的出现顺序任意。注释用 `#` 或 `//`，按行剥离（尊重引号）。
+Blocks may appear in any order. Comments use `#` or `//` and are stripped per line (quote-aware).
 
 ### 2.2 config
 
-| 参数 | 约束 |
+| Parameter | Constraint |
 |---|---|
-| `tempo` / `bpm` | > 0，≤ 1000 |
-| `master_gain` / `gain` | ≥ 0，≤ 2 |
-| `key` | 正则 `/^[A-Ga-g][#b♯♭]?m?$/`，如 `"Cm"`、`"F#"` |
-| `scale` | 枚举：major / minor / harmonic_minor / melodic_minor / dorian / phrygian / lydian / mixolydian / locrian / major_pentatonic / minor_pentatonic / blues / chromatic / whole_tone |
+| `tempo` / `bpm` | > 0, ≤ 1000 |
+| `master_gain` / `gain` | ≥ 0, ≤ 2 |
+| `key` | regex `/^[A-Ga-g][#b♯♭]?m?$/`, e.g. `"Cm"`, `"F#"` |
+| `scale` | enum: major / minor / harmonic_minor / melodic_minor / dorian / phrygian / lydian / mixolydian / locrian / major_pentatonic / minor_pentatonic / blues / chromatic / whole_tone |
 | `swing` | 0~1 |
 
-**`key` 与 `scale` 只做格式校验，调度与合成都不读取它们。** 写 `key: "Cm"` 不会自动转调，
-也不会把音阶外的音滤掉。想让脚本听起来是某个调，必须自己写对音高。
+**`key` and `scale` are format-checked only; neither scheduling nor synthesis reads them.** Writing
+`key: "Cm"` does not transpose anything and does not filter out notes outside the scale. To make a script
+sound like a given key you must write the pitches correctly yourself.
 
-`swing` 把落在十六分网格第 2 个的音推到 1/3 拍、第 4 个（即后半拍八分）推到 2/3 拍。
-`8n` 写法落在偶数步上，所以**四分与八分音符的旋律基本不受影响**，主要作用于十六分与八分交替的琶音。
+`swing` pushes notes landing on the 2nd sixteenth-grid slot to 1/3 of a beat, and the 4th (i.e. the
+off-beat eighth) to 2/3 of a beat. `8n` notation lands on even steps, so **quarter- and eighth-note
+melodies are essentially unaffected**; it mainly acts on arpeggios alternating sixteenths and eighths.
 
-### 2.3 时值记号（`parseDuration`）
+### 2.3 Duration notation (`parseDuration`)
 
-| 写法 | 含义 |
+| Spelling | Meaning |
 |---|---|
-| `4n` / `8n` / `16n` / `32n` | 1/N 全音符；全音符 = 4 拍 |
-| `4n.` | 附点，×1.5 |
-| `4n..` | 双附点，×1.75（不是 1.5×1.5） |
-| `4nt` | 三连音，×2/3 |
-| `1m` | 1 小节 = 4 拍 |
-| `250ms` / `1.5s` | 绝对时间 |
-| `250`（裸数字） | **按秒**，不是按拍 |
-| `4x` | **报错**。裸数字必须整串是数字 |
+| `4n` / `8n` / `16n` / `32n` | 1/N of a whole note; whole note = 4 beats |
+| `4n.` | dotted, ×1.5 |
+| `4n..` | double-dotted, ×1.75 (not 1.5×1.5) |
+| `4nt` | triplet, ×2/3 |
+| `1m` | 1 measure = 4 beats |
+| `250ms` / `1.5s` | absolute time |
+| `250` (bare number) | **interpreted as seconds**, not beats |
+| `4x` | **error**. A bare number must be numeric in full |
 
-`1m` 恒等于 4 拍（按 4/4 记），与 tempo 无关。
+`1m` is always 4 beats (assumed 4/4), independent of tempo. The measure regex is `^([\d.]+)m$`, so any
+number of measures works: `2m` = 8 beats, `3m` = 12 beats (verified). Dots and triplets are counted by a
+loop, so `2n.` = 3 beats, `8n.` = 0.75 beat.
 
-### 2.4 音高与和弦
+### 2.4 Pitches and chords
 
-- 音名必须带八度：`"C4"`、`"F#5"`、`"Bb3"`；也接受频率写法 `"440hz"`。
-- C4 = MIDI 60，A4 = 440Hz。
-- `chord()` / `arp()` / `progression()` 的第一个位置参数既可以给音高数组，
-  也可以给**和弦符号字符串**（`"Am7"`、`"Cmaj9"`、`"G7/B"`）。
-- `note("Am7", "2n")` 会报错并提示改用 `chord()` —— 这是刻意的可操作报错。
-- `chord` 的 `octave`（默认 4）是**声位寄存器**，与 `note` 的 `octave`
-  （升高 N 个八度）语义不同；实现里把它标为 reserved，不会重复叠加。
+- A pitch name must carry an octave: `"C4"`, `"F#5"`, `"Bb3"`; frequency notation `"440hz"` is also accepted.
+- C4 = MIDI 60, A4 = 440Hz.
+- The first positional argument of `chord()` / `arp()` / `progression()` may be either an array of pitches
+  or a **chord symbol string** (`"Am7"`, `"Cmaj9"`, `"G7/B"`).
+- `note("Am7", "2n")` raises an error telling you to use `chord()` instead — a deliberate, actionable error.
+- `chord`'s `octave` (default 4) is a **voicing register**, unlike `note`'s `octave`
+  (raise by N octaves). The implementation marks it reserved so it is not applied twice.
 
-### 2.5 乐器参数白名单
+### 2.5 Instrument parameter whitelist
 
 ```
 preset, wave, envelope, env, amp_envelope, filter, filter_envelope, filter_env_amount,
@@ -112,63 +129,76 @@ pitch_env_amount, pitch_decay, spread, velocity_sensitivity, velocity_to_filter,
 voices, unison_spread, harmonics, attack_noise, loop_point, effect_chain
 ```
 
-- `preset` 作为基线，其余字段逐项覆盖它。可用预设含 `piano`、`electric_piano`、
-  `bell`、`marimba`、`music_box`、`glass`、`strings_section`、`cello`、`flute`、
-  `supersaw`、`synth_pad`、`warm_pad`、`timpani` 等 55 个。
-- `wave`：`sine | square | sawtooth | triangle | white_noise | pink_noise | brown_noise | custom`。
-  `custom` **必须**配 `harmonics`；噪声波形**不能**配 `harmonics`（两者都报错）。
-- `voices` 被钳制到 1~7；`attack_noise` 钳制到 0~1；`gain` 默认 0.8。
-- `velocity_sensitivity` 默认 0.7；`velocity_to_filter` 默认 0。
-- `fm_wave` 只能是 `sine | square | sawtooth | triangle`（噪声名会报错）。
-- `fm_ratio` **必须 > 0**；`fm_index` 为 0 或缺失时 FM 静默关闭。
-- `glide` / `pitch_decay` / `loop_point` 不接受负数。
+- `preset` is the baseline; every other field overrides it item by item. Available presets include
+  `piano`, `electric_piano`, `bell`, `marimba`, `music_box`, `glass`, `strings_section`, `cello`,
+  `flute`, `supersaw`, `synth_pad`, `warm_pad`, `timpani` and 55 in total.
+- `wave`: `sine | square | sawtooth | triangle | white_noise | pink_noise | brown_noise | custom`.
+  `custom` **requires** `harmonics`; noise waveforms **must not** have `harmonics` (both raise errors).
+- `voices` is clamped to 1~7; `attack_noise` clamped to 0~1; `gain` defaults to 0.8.
+- `velocity_sensitivity` defaults to 0.7; `velocity_to_filter` defaults to 0.
+- `fm_wave` may only be `sine | square | sawtooth | triangle` (noise names raise an error).
+- `fm_ratio` **must be > 0**; when `fm_index` is 0 or missing, FM is silently off.
+- `glide` / `pitch_decay` / `loop_point` do not accept negative values.
 
-### 2.6 包络
+**`pitch_env_amount` direction (verified in the implementation):** the oscillator starts at
+`freq * 2^(amount / 12)` — that is, *above* the written pitch — and exponentially ramps **down** to
+`freq` over `pitch_decay` seconds (`Math.max(0.005, pitchDecay)`). So a positive amount is a downward
+pitch drop, which is what makes a timpani or kick sound like a struck drum head losing tension. A comment
+claiming "the pitch falls" is correct; a comment claiming it rises is a direction-type defect.
 
-`adsr(a, d, s, r)` / `ad(a, d)` / `ar(a, r)` / `perc(a, d, r)`，
-可加 `curve=linear|exp|hold`（默认 `exp`）与 `delay=秒`。
-`adsr` 的 `s` 是 0~1 的**电平比例**，不是秒。参数可写引号也可裸写。
-负数报错；`sustain > 1` 被钳制为 1。
+**`loop_point` re-attack (verified):** with `loopPoint > 0 && noteDur > loopPoint * 1.5` the note is cut
+into `segments = floor(noteDur / loopPoint)` equal pieces of `segDur = noteDur / segments`, each
+re-attacking. **The segment length is `segDur`, not `loopPoint`.** Worked example: a `1n` note at 64 BPM
+is 3.75s, `loop_point: 1.8` gives `segments = floor(3.75 / 1.8) = 2`, so each segment is 1.875s — a
+comment saying "re-attacks every 1.8s" is off by ~4%. This mode is only audible when `sustain < 1`:
+at `sustain = 1.0` "decay to sustain" means staying put, so re-attacking changes nothing.
 
-**`applyAdsr` 会在 `a + d > 音符时值` 时把两者按 `noteDur / (a + d)` 等比压缩** ——
-写下的秒数不等于听到的秒数，见 6.2。
+### 2.6 Envelopes
 
-### 2.7 滤波器
+`adsr(a, d, s, r)` / `ad(a, d)` / `ar(a, r)` / `perc(a, d, r)`, optionally with
+`curve=linear|exp|hold` (default `exp`) and `delay=seconds`.
+`adsr`'s `s` is a 0~1 **level ratio**, not seconds. Arguments may be quoted or bare.
+Negative values raise an error; `sustain > 1` is clamped to 1.
 
-`lowpass | highpass | bandpass | notch | lowshelf | highshelf | peaking | allpass`，
-位置参数 `(freq, Q)`，额外可写 `gain`（搁架/峰值用）、`sweep` / `sweep_to`。
-`freq > 0`，`Q ≥ 0`（实现里再钳到 0~30）。
+**`applyAdsr` compresses both `a` and `d` by `noteDur / (a + d)` when `a + d > note duration`** —
+the seconds you write are not the seconds you hear; see 6.2.
+
+### 2.7 Filters
+
+`lowpass | highpass | bandpass | notch | lowshelf | highshelf | peaking | allpass`,
+positional arguments `(freq, Q)`, plus optional `gain` (for shelves/peaking) and `sweep` / `sweep_to`.
+`freq > 0`, `Q ≥ 0` (the implementation clamps to 0~30).
 
 ### 2.8 LFO
 
-`波形(freq=, amount=, target=, ramp=, swell=true)`，波形取四种振荡器波形。
-`target`：`frequency | filter | gain | pan | detune`。`freq > 0`。
+`waveform(freq=, amount=, target=, ramp=, swell=true)`, where the waveform is one of the four oscillator
+shapes. `target`: `frequency | filter | gain | pan | detune`. `freq > 0`.
 
-**`amount` 的单位随 target 变**：
+**The unit of `amount` depends on `target`:**
 
-| target | 单位 | 钳制 |
+| target | Unit | Clamp |
 |---|---|---|
-| `frequency` / `detune` | **音分**（实际接在 detune 上，各音高听感一致） | ±1200 |
+| `frequency` / `detune` | **cents** (actually wired to detune, so the effect is consistent across pitches) | ±1200 |
 | `filter` | Hz | 0~12000 |
-| `gain` | 0~1 的深度比 | 0~1 |
+| `gain` | depth ratio 0~1 | 0~1 |
 | `pan` | -1~1 | 0~1 |
 
-`swell=true` 会把深度再线性升到 `peakAmount * 2.2`，终点取
-`t + max(0.05, 音符时值, ramp)`（保证自动化时间单调）。
+`swell=true` ramps the depth linearly up to `peakAmount * 2.2`, with the endpoint at
+`t + max(0.05, note duration, ramp)` (keeping automation times monotonic).
 
-### 2.9 效果器（13 种）
+### 2.9 Effects (13 kinds)
 
 ```
 delay, pingpong, reverb, distortion, bitcrush, overdrive, filter, eq, chorus,
 flanger, phaser, tremolo, compressor
 ```
 
-| 效果 | 参数 |
+| Effect | Parameters |
 |---|---|
 | `delay` / `pingpong` | time, feedback, mix, damping, pingpong |
 | `reverb` | decay, mix, predelay, pre_delay, damping |
 | `distortion` / `overdrive` | amount, mix |
-| `bitcrush` | bits（1~16）, mix |
+| `bitcrush` | bits (1~16), mix |
 | `chorus` | rate, depth, mix |
 | `flanger` | rate, feedback, mix |
 | `phaser` | rate, min, max, mix |
@@ -177,286 +207,372 @@ flanger, phaser, tremolo, compressor
 | `eq` | low, mid, high |
 | `compressor` | threshold, ratio, attack, release |
 
-- `eq` 实现为 lowshelf 250Hz / peaking 1200Hz Q0.9 / highshelf 4000Hz，各钳 ±24dB。
-- **效果器 `filter` 的 `start` 是「第几秒开始扫频」，起始频率必须写 `from`。**
-  这是最容易写错的一处：直觉会把 `start` 当起始频率，写了不报错但语义完全不同。
-- 同义参数别名（会编译但发警告）：`delay→time`、`fb→feedback`、`tone→damping`、
-  `size→decay`、`drive`/`gain→amount`、`depth→bits`、`speed→rate`、
-  `ping_pong→pingpong`、`end→to`、`dur→duration`、`at→start`、`bass→low`、`treble→high`。
-  写正式名，别名只当兼容。
+- `eq` is implemented as lowshelf at 250Hz / peaking at 1200Hz Q0.9 / highshelf at 4000Hz, each clamped
+  to ±24dB. **Quote 250Hz, not 200Hz**, when describing the low band in a comment.
+- **The `filter` effect's `start` is "at which second the sweep begins"; the starting frequency must be
+  written as `from`.** This is the single easiest thing to get wrong: intuition reads `start` as the
+  starting frequency, no error is raised, and the meaning is entirely different.
+- `delay` / `pingpong` `time` is parsed as a **duration argument with tempo** (`durArg(['time'], 0, '0.3')`),
+  so `time="8n."` is legal and tempo-relative. At 64 BPM, `8n.` = 0.75 beat × 0.9375s = 0.703s.
+  For `pingpong` the right channel delay is `time * 1.5`.
+- Synonym aliases (they compile but emit a warning): `delay→time`, `fb→feedback`, `tone→damping`,
+  `size→decay`, `drive`/`gain→amount`, `depth→bits`, `speed→rate`,
+  `ping_pong→pingpong`, `end→to`, `dur→duration`, `at→start`, `bass→low`, `treble→high`.
+  Write the canonical name; treat aliases as compatibility only.
 
-### 2.10 音序指令
+### 2.10 Sequence commands
 
-块头参数：`name | seq | id`、`instrument | inst`、`gain`、`transpose`、`humanize`。
+Block-header parameters: `name | seq | id`, `instrument | inst`, `gain`, `transpose`, `humanize`.
 
-逐音符可用参数（`NOTE_EXPR_PARAMS`）：
+Per-note parameters (`NOTE_EXPR_PARAMS`):
 `velocity, vel, pan, gain, gate, transpose, glide, detune, humanize, human, octave, accent`
 
-- `accent=true` 就是 `velocity=1` 的简写，`hit()` 也认。
-- `gate` 是时值倍率：`gate=1.06` 让音稍微拖过下一条指令的起点，用来暗示踏板交叠。
-- **指令严格串行**：每条把时间轴往后推自己的时值。**不存在「同时发两个音」** ——
-  要同时发声只能用 `chord()`。这一条决定了「钟声与刮擦」是先后而不是叠加。
+- `accent=true` is shorthand for `velocity=1`; `hit()` honours it too.
+- `gate` is a duration multiplier: `gate=1.06` lets a note run slightly past the next command's start,
+  useful for implying pedal overlap.
+- **Commands are strictly serial**: each one pushes the timeline forward by its own duration.
+  **There is no way to sound two notes simultaneously** — for that you must use `chord()`.
+  This is what makes "the bell and the scrape" sequential rather than layered.
 
-| 指令 | 参数 |
+| Command | Parameters |
 |---|---|
-| `note(音高, 时值)` | — |
-| `chord(数组或符号, 时值, strum=, voicing=, octave=, duration=)` | `strum` 0~1，每个声部错开 `strum * 0.055` 秒；`voicing`: close/open/drop2/spread |
-| `arp(数组或符号, pattern=, rate=, duration=, octaves=, gate=)` | `pattern`: up/down/upDown/downUp/asPlayed/random；`rate` 默认 `16n`；`octaves` 1~4；`gate` 默认 0.9 |
-| `progression(chords=, beats=, …)` | `beats` 是时值参数。**没有 `duration`** —— 写了报错 |
-| `run(数组, 速率, direction=, repeat=, gate=)` | `direction`: up/down/updown |
-| `hit(鼓名, 时值, tune=, decay=, tone=, snap=, duration=)` | `decay` 必须 > 0；`snap` 0~1 |
-| `rest(时值)` | 也接受 `dur` / `len` |
+| `note(pitch, duration)` | — |
+| `chord(array or symbol, duration, strum=, voicing=, octave=, duration=)` | `strum` 0~1, each voice offset by `strum * 0.055` seconds; `voicing`: close/open/drop2/spread |
+| `arp(array or symbol, pattern=, rate=, duration=, octaves=, gate=)` | `pattern`: up/down/upDown/downUp/asPlayed/random; `rate` defaults to `16n`; `octaves` 1~4; `gate` defaults to 0.9 |
+| `progression(chords=, beats=, …)` | `beats` is a duration parameter. **There is no `duration`** — writing it raises an error |
+| `run(array, rate, direction=, repeat=, gate=)` | `direction`: up/down/updown |
+| `hit(drum name, duration, tune=, decay=, tone=, snap=, duration=)` | `decay` must be > 0; `snap` 0~1 |
+| `rest(duration)` | also accepts `dur` / `len` |
 
-### 2.11 `arp` 与 `run` 的顺序陷阱
+Two parsing facts verified in the implementation:
 
-- `arp` 的 `up` / `down` 是**按音高排序**，不是书写顺序；只有 `asPlayed` 与 `random`
-  保留书写顺序。直接按下标升序会让 `["C3","G3","Eb3"]` 的 up 出来不是上行琶音。
-- `arp` 的步数 = `floor(duration / rate)`，索引对 `order.length` **取模回绕**。
-  4 音池的 `upDown` 是 6 步（0-1-2-3-2-1），配 8 个八分音符会回绕到池首两个音。
-- **`run` 的 `direction="down"` 会把数组反转。** 要让音高下行，数组必须按**上行**写。
-  写下行数组再配 `down` 得到的是上行线 —— 与意图恰好相反，且不报错。
-- `run` 的 `updown` 对长度 > 2 的数组是 `concat(slice(1,-1).reverse())`。
+- **`chord` accepts `gate`** like any other note expression (it is merged in via `NOTE_EXPR_PARAMS`), and
+  `chord` advances the timeline by `duration` only — the `strum` offsets do not shift subsequent commands.
+  So a sustained final chord can be written `chord([...], "1n", strum=0.3, gate=1.5)` and it will ring
+  1.5× its written length into the reverb tail.
+- **`arp` accepts a named pitch source**: `arp(chord=[...])`, also `notes=` / `pitches=`. A named source
+  takes priority over the positional argument, and when it is present the positional arguments are
+  re-read as `pattern` / `rate` / `duration` starting from index 0. This exists so that
+  `arp(chord=["C4"], "up", "16n", "1n")` does not try to parse `"up"` as a chord symbol.
 
-**这类「按语义重排输入」的参数一律读那几行代码，不要猜。** 注释在这里极易写反。
+### 2.11 The ordering traps in `arp` and `run`
 
-### 2.12 鼓组
+- `arp`'s `up` / `down` order by **pitch**, not by written order; only `asPlayed` and `random` preserve
+  written order. Sorting by index directly would make `["C3","G3","Eb3"]` come out as something that is
+  not an ascending arpeggio at all.
+- `arp`'s step count is `floor(duration / rate)`, and the index **wraps modulo `order.length`**.
+  A 4-note pool's `upDown` is 6 steps (0-1-2-3-2-1), so pairing it with 8 eighth notes wraps back to the
+  first two notes of the pool — a wave-shaped contour, not a clean repeat.
+- **`run`'s `direction="down"` reverses the array.** To make the pitches descend, the array must be
+  written **ascending**. Writing a descending array and passing `down` yields an ascending line — the
+  exact opposite of the intent, with no error.
+- `run`'s `updown` for arrays longer than 2 is `concat(slice(1,-1).reverse())`.
 
-可用名（`DRUM_NAMES`，从 `DRUM_SPECS` 派生）：
+**Any parameter that "reorders the input by semantics" must be read in those exact lines; never guess.**
+Comments are extremely easy to get backwards here.
+
+### 2.12 Drum kit
+
+Available names (`DRUM_NAMES`, derived from `DRUM_SPECS`):
 `kick, sub_kick, snare, rim, clap, hat, open_hat, pedal_hat, tom_low, tom_mid,
 tom_high, crash, ride, cowbell, shaker, tambourine`
 
-- `hit()` **不需要乐器**。块里只有 `hit` 时解析器不会要求乐器存在。
-- 鼓组事件**不走乐器的滤波 / LFO / 增益 / 声像链路**，自带 `DRUM_SPECS` 标定
-  （kick 增益 1.0、hat 0.45、shaker 0.4…），只认逐音符的 `velocity` / `pan`
-  以及 mix 轨道的 `pan`。给纯鼓音序写 `instrument` 不会改变音色。
-- 微调参数单位：`tune` 半音、`decay` 倍率（下限 0.05）、`tone` 噪声中心频率的 Hz 偏移、
-  `snap` 0~1 瞬态。时值短于音色自然衰减时按门限截断（可用来掐断开镲）。
-- 振幅算式：`clamp(spec.gain * (0.45 + velocity * 0.7), 0, 2, 0.8)`。
+- `hit()` **needs no instrument**. When a block contains only `hit`, the parser does not require an
+  instrument to exist.
+- Drum events **do not pass through the instrument's filter / LFO / gain / pan chain**; they carry their
+  own `DRUM_SPECS` calibration (kick gain 1.0, hat 0.45, shaker 0.4…). They honour only per-note
+  `velocity` / `pan` and the mix track's `pan`. Writing `instrument` on a pure drum sequence does not
+  change the timbre.
+- Tuning parameters and units: `tune` in semitones, `decay` a multiplier (floor 0.05), `tone` a Hz offset
+  of the noise centre frequency, `snap` 0~1 transient. When the note duration is shorter than the
+  timbre's natural decay it is truncated by the gate (useful to choke an open hat).
+- Amplitude formula: `clamp(spec.gain * (0.45 + velocity * 0.7), 0, 2, 0.8)`.
 
-### 2.13 音量与力度：三级相乘
+### 2.13 Volume and velocity: three levels multiplied
 
 ```
 gain = clamp(baseGain * velScale * seqGain * trackGain * jitterGain, 0, 2, 0.8)
 ```
 
-- `baseGain` = 逐音符 `gain`，否则乐器 `gain`（默认 0.8）。
-- `velScale = clamp((1 - sens) + sens * (velocity / 0.8), 0, 1.6, 1)`，
-  `sens` 是 `velocity_sensitivity`（默认 0.7）。
-  **`velocity = 0.8` 恰好是 1.0 倍**；`sens=0.85` 时 `velocity=0.4` 只有 0.58 倍。
-- 所以 `velocity` 写满 1.0 会顶到钳制上限，**留余量**（0.3~0.9 之间）比写满好。
-- 三层增益（乐器 × 音序 × 轨道）相乘后再乘 `config.master_gain`。
-- `humanize` 产生 ±12 音分、±12% 力度、±2% 时值的可复现抖动（种子含音序名、
-  起始时刻与 loop 下标）。
-- `velocity_to_filter` 让强奏更亮：`filter.frequency + (velocity - 0.8) * vtF`。
+- `baseGain` = the per-note `gain`, otherwise the instrument `gain` (default 0.8).
+- `velScale = clamp((1 - sens) + sens * (velocity / 0.8), 0, 1.6, 1)`, where `sens` is
+  `velocity_sensitivity` (default 0.7).
+  **`velocity = 0.8` is exactly a 1.0 multiplier**; with `sens=0.85`, `velocity=0.4` yields only 0.58×.
+- So writing `velocity` at the full 1.0 hits the clamp ceiling; **leaving headroom** (0.3~0.9) is better.
+- The three gain levels (instrument × sequence × track) are multiplied, then multiplied by
+  `config.master_gain`.
+- `humanize` produces ±12 cents, ±12% velocity and ±2% duration of reproducible jitter (the seed includes
+  the sequence name, the start time and the loop index).
+- `velocity_to_filter` makes hard playing brighter: `filter.frequency + (velocity - 0.8) * vtF`.
 
-### 2.14 `mix` 与 loop 的真实语义
+### 2.14 The real semantics of `mix` and loop
 
-`track(source=, time=, loop=, gain=, pan=, stagger=)`，别名 `seq`/`track`、`at`、`repeat`/`times`。
+`track(source=, time=, loop=, gain=, pan=, stagger=)`, aliases `seq`/`track`, `at`, `repeat`/`times`.
 
-**`loop` 是「再演一遍」：第 n 遍从上一遍的**终点**接续，不是每遍都从 `time` 重来。**
+**`loop` means "play it again": pass n continues from the previous pass's END, not from `time` again.**
 
 ```
 currentStart = time
-for i in 0..loop-1:  duration = 播放(source, currentStart);  currentStart += duration + stagger
+for i in 0..loop-1:  duration = play(source, currentStart);  currentStart += duration + stagger
 ```
 
-推论：
+Consequences:
 
-- 一条 4 小节的音序 `loop=3` 正好铺 12 小节，不会重叠也不会留缝。
-- 想让某声部「每隔 8 小节回来一次」，**不能**靠 `loop`，要用多条 `track` 分别给 `time`。
-- `stagger` 让每次循环错位叠加（可做卡农），但也会让该声部比别的声部长出 `stagger`。
-- **写了 `mix` 之后，没被任何 `track` 引用的音序一律不发声**，解析器只给一句警告。
-  改脚本时两侧要同步。
-- **不写 `mix` 时，所有音序按定义顺序首尾相接**（游标累加），不是全部从 0 叠加。
-  这常被误以为是「同时播放」。
+- A 4-measure sequence with `loop=3` covers exactly 12 measures, with neither overlap nor gap.
+- To make a part "come back every 8 measures", **`loop` cannot do it**; use several `track` entries with
+  their own `time` instead.
+- `stagger` offsets each repetition so they overlap (usable for a canon), but it also makes that part
+  longer than the others by `stagger`.
+- **Once `mix` is written, any sequence not referenced by a `track` produces no sound**; the parser only
+  emits a warning. Both sides must be kept in sync when editing.
+- **Without `mix`, all sequences are concatenated head to tail** in definition order (a running cursor),
+  not layered from 0. This is commonly mistaken for "playing simultaneously".
+- `loop` **defaults to 1** when omitted, so a single `track` needs no `loop` at all.
+- Several tracks may reference the same `source` — `mix` is a plain list, and each entry is scheduled
+  independently. That is the correct way to restate the same material at a later point in the timeline.
 
-### 2.15 导出长度
+### 2.15 Export length
 
 ```
 totalDuration + tailRoom
-tailRoom = effects.length > 0 ? min(max(3.0, 最长混响 decay), 12) : 0.5
+tailRoom = effects.length > 0 ? min(max(3.0, longest reverb decay), 12) : 0.5
 ```
 
-混响 `decay` 被钳到 0.05~12 秒。离线渲染总时长上限 900 秒。
+Reverb `decay` is clamped to 0.05~12 seconds. The offline render total is capped at 900 seconds.
+
+Worked example: 16 measures at 64 BPM = 60s, with a global chain present and `decay=6.5` gives
+`tailRoom = min(max(3, 6.5), 12) = 6.5`, so the rendered length is about 66.5s. A header comment claiming
+"4 rounds ≈ 64s" for 16 measures at 64 BPM is a numeric defect — the correct figure is 60s.
 
 ---
 
-## 三、「写了不报错但结果不符」清单
+## 3. The "parses fine but does not do what you think" list
 
-解析器只拦语法，不拦语义。写脚本前逐条确认：
+The parser only stops syntax, not semantics. Confirm each item before writing a script:
 
-1. **`fm_index` 不是教科书里的调制指数** —— 它是直接加到载波频率上的 Hz 频偏量
-   （`fmGain.gain = fm_index`），且随时间衰减到 8%。预设 `bell` 用 420、`piano` 用 180。
-2. **效果器 `filter` 的 `start` 是扫频起始时刻**，起始频率写 `from`。
-3. **`progression` 没有 `duration`**，时值参数叫 `beats`。
-4. **`run` 的 `direction="down"` 反转数组**，要下行就得按上行写。
-5. **`arp` 的 up/down 按音高排序**，`asPlayed` 才保留书写顺序。
-6. **`wave` 是噪声时不能配 `harmonics`**；`wave:"custom"` 必须配 `harmonics`。
-7. **`fm_ratio` 必须为正**；为 0 或负数报错（不需要 FM 就删掉三个 fm 字段）。
-8. **`config` 的 `key` / `scale` 不参与发声**，不会自动转调。
-9. **包络的 A+D 超过音符时值会被按比例压缩**（`applyAdsr` 与滤波包络都如此）：
-   写 `adsr(3.5, 2.0, …)` 配 1 小节的音符，实际起音只有约 3.0 秒。
-   滤波包络同理：峰值是 `baseFreq + amount`，持续电平是 `baseFreq + amount * sustain`。
-10. **同乐器、同时刻、同音高**只是把振幅叠上去（两个振荡器同相，多约 6dB），
-    听不出「更厚」。要加厚就换音高或换音色。
-11. **一条音序里的指令严格串行**，不存在同时发声；跨音序的同时发声由 `mix` 的 `time` 对齐。
-12. **每段音序的时长应当是整小节数**，否则 `mix` 的 `time` 会逐遍累积偏移。
-    改完记得把每段的时值求和验算一遍（见 4.3）。
+1. **`fm_index` is not the textbook modulation index** — it is a Hz frequency deviation added directly to
+   the carrier frequency (`fmGain.gain = fm_index`), decaying to 8% over time. The `bell` preset uses
+   420, `piano` uses 180.
+2. **The `filter` effect's `start` is the sweep start time**; the starting frequency goes in `from`.
+3. **`progression` has no `duration`**; the duration parameter is called `beats`.
+4. **`run`'s `direction="down"` reverses the array**, so descending output requires ascending input.
+5. **`arp`'s up/down order by pitch**; only `asPlayed` preserves written order.
+6. **A noise `wave` must not have `harmonics`**; `wave:"custom"` must have `harmonics`.
+7. **`fm_ratio` must be positive**; 0 or negative raises an error (delete all three fm fields if you do
+   not want FM).
+8. **`config`'s `key` / `scale` do not affect the sound** and do not transpose.
+9. **An envelope whose A+D exceeds the note duration is compressed proportionally** (both `applyAdsr` and
+   the filter envelope): `adsr(3.5, 2.0, …)` on a one-measure note gives an actual attack of about 3.0s.
+   The filter envelope behaves the same way: the peak is `baseFreq + amount` and the sustain level is
+   `baseFreq + amount * sustain`.
+10. **Same instrument, same instant, same pitch** merely adds amplitude (two in-phase oscillators, about
+    +6dB); it does not sound "thicker". To thicken, change the pitch or the timbre.
+11. **Commands inside one sequence are strictly serial**; there is no simultaneous sounding. Simultaneity
+    across sequences is arranged by `mix`'s `time`.
+12. **Each sequence's duration should be a whole number of measures**, otherwise `mix`'s `time` drifts
+    cumulatively with each pass. After editing, re-sum each section's durations (see 4.3).
+13. **`pitch_env_amount` drops the pitch downward** from `freq * 2^(amount/12)` to `freq` over
+    `pitch_decay`; it never rises.
+14. **`loop_point` re-attacks on a segment length of `noteDur / floor(noteDur / loopPoint)`, not on
+    `loopPoint` itself**, and only when `noteDur > loopPoint * 1.5`.
 
 ---
 
-## 四、结构纪律
+## 4. Structural discipline
 
-> **同一个素材循环两遍，是「重复」；换一个素材，才是「发展」。**
-> 参数化把「复制粘贴」变得极其便宜，于是它成了最容易被滥用的手段。
+> **Looping the same material twice is "repetition"; changing the material is "development".**
+> Parameterisation makes copy-paste extremely cheap, which is exactly why it is the most abused tool.
 
-### 4.1 `loop=N` 不是发展
+### 4.1 `loop=N` is not development
 
-把一段 4 小节的素材 `loop=2` 铺满 8 小节，音高、时值、走向**完全相同**。
-即使抖动种子含循环下标（每次的微随机不同），听感上仍然是「同一句话说了两遍」。
+Spreading a 4-measure passage over 8 measures with `loop=2` gives **identical** pitches, durations and
+direction. Even though the jitter seed includes the loop index (so each pass differs microscopically),
+what you hear is still "the same sentence said twice".
 
-**要制造发展，就写第二份素材。** 复述与发展的区别是结构性的，
-不能靠参数微调（力度、声像、滤波）弥补 —— 那些只改变「听起来一样的东西有多响」。
+**To create development, write a second piece of material.** The difference between restatement and
+development is structural and cannot be compensated by parameter tweaks (velocity, pan, filtering) —
+those only change "how loud the identical thing is".
 
-判断当前是不是在偷懒：**问「第二遍里有没有一个新音是新的」。** 没有，就是复述。
+To check whether you are being lazy, ask: **"is there a single new note in the second pass?"**
+If not, it is restatement.
 
-### 4.2 替换，不是叠加
+### 4.2 Replace, do not stack
 
-表达「状态升级」时，新素材应当**接替**旧素材，而不是与它同时响。
+When expressing an "escalation of state", the new material should **take over from** the old one, not
+sound at the same time as it.
 
-反例：心跳慢的素材 `loop` 铺满全曲，同时在某个时间点叠加一份心跳快的素材。
-结果不是「心率变快」，而是两套心跳同时响 —— 低频搅成一片，
-而且「变快」这个意思被自己的慢速版本抵消了。
+Counter-example: a slow heartbeat looped across the whole piece, with a fast heartbeat added on top at
+some point. The result is not "the heart rate increased" but two heartbeats sounding at once — the low end
+turns to mud, and the meaning "faster" is cancelled out by its own slow version.
 
-**规则：表示状态变化的两个素材，时间区间不重叠。** 交接点落在结构边界上。
+**Rule: two materials that express a change of state must not overlap in time.** The hand-over point sits
+on a structural boundary.
 
-同理，声部之间如果音高只差几个半音、又占同一频段，同时响只会互相掩盖。
-**同频段只留一个声部**，要加厚就在它的音高上做文章，不是再加一个。
+Likewise, if two parts differ by only a few semitones and occupy the same frequency band, sounding them
+together only masks both. **Keep one part per frequency band**; to thicken, work on that part's pitches
+rather than adding another one.
 
-### 4.3 结构要能在时间轴上算术验算
+### 4.3 The structure must be arithmetically checkable on the timeline
 
-每一段的时长必须是**基本单位的整数倍**（小节、秒、帧）。
-否则循环接续时会逐遍累积偏移，几遍之后彻底错开 —— 而且不报错。
+Every section's duration must be an **integer multiple of the base unit** (measure, second, frame).
+Otherwise the loop continuation accumulates drift pass after pass, and after a few passes everything is
+misaligned — with no error raised.
 
-验算方法：把每段的时值列出来求和，确认等于预期的整段长度。
+How to check: list each section's durations, sum them, and confirm the total equals the expected section
+length.
 
 ```
-1n + 8n + 2n. + 4n = 4 + 0.5 + 3 + 1 = 8.5 拍   ← 不是整小节
+1n + 8n + 2n. + 4n = 4 + 0.5 + 3 + 1 = 8.5 beats   ← not a whole measure
 ```
 
-这类错误在原稿里非常常见（写的时候按感觉凑，没求和）。
-**改写时逐段求和一遍，是成本最低、收益最高的一步检查。**
+This class of error is very common in drafts (written by feel, never summed).
+**Summing each section once while rewriting is the cheapest, highest-yield check available.**
 
-### 4.4 终点要有设计，不要让它自然结束
+### 4.4 The ending must be designed, not left to run out
 
-素材铺满时长之后，「最后一段」往往只是「又一次循环」。
-把它单独写出来 —— 末段的处理方式（留白、只留一个声部、不解决、延长尾音）
-决定了整部作品停在什么位置上。
+Once the material fills the duration, the "last section" is usually just "another loop".
+Write it separately — how the final section is handled (silence, a single remaining part, no resolution,
+an extended tail) determines where the whole piece comes to rest.
 
-**具体做法**：末段单独写一份素材，而不是让前一段 `loop` 到底。
-代价是几行重复，收益是作品有一个真正的结尾。
+**Concretely**: write a separate piece of material for the final section instead of letting the previous
+one `loop` to the end. The cost is a few repeated lines; the reward is that the work has a real ending.
 
----
+### 4.5 A round-based plan that works for iteration
 
-## 五、改写流程
+When iterating a piece that is a sequence of equal-length rounds, restructure it as follows. This
+procedure was used to repair a piece whose four rounds were byte-identical accompaniment:
 
-### 5.1 先提取意图，再动语法
-
-旧稿往往语法过时但意图可读。改写分两步，不要合并：
-
-1. **提取意图**：这段想表达什么？（渐强、留白、对位、收束……）
-2. **用 SPG 重新实现**：意图不变，实现重写。
-
-跳过第 1 步会退化成「把旧写法逐句翻译成新写法」—— 旧稿里被语法限制逼出来的
-绕路（复制粘贴的段落、靠时间偏移硬凑的层次）会被原样继承。
-
-**判断哪些是「语法限制的产物」**：同一段内容被复制多份、只改一两个参数，
-通常说明旧语法缺少「循环/变体」机制。这类重复正是改写要消掉的主要目标 ——
-但消掉之后要按 4.1 检查：是真的用 `loop` 复述了两遍，还是写了两份素材。
-
-### 5.2 逐项核对清单
-
-写完后，对文件里**每一个**构造过一遍：
-
-- [ ] 参数名在白名单里（拼写、单复数、下划线）
-- [ ] 数值在实现允许的区间内（尤其：> 0、0~1、枚举值）
-- [ ] 该字段真的有消费点，而不是「解析了但没人读」
-- [ ] 时值/长度单位与 `parseDuration` 的规则一致（拍、秒、毫秒、小节）
-- [ ] 引号、分隔符、注释符与实现的分词方式一致
-- [ ] 顺序类参数（`direction`、`pattern`、`up`/`down`）已回到那几行代码确认过方向
-- [ ] 若实现里对某些组合会抛错（如「A 必须配 B」），确认没有踩到
-- [ ] 每段音序的时值求和等于整小节数（4.3）
-- [ ] 所有 `sequence` 都被某条 `track` 引用，或确认不写 `mix`
+1. **Split the timeline into rounds** and give each round a name (`Ⅰ statement → Ⅱ entry → Ⅲ high point
+   → Ⅳ close`). Write that map into the header comment so the structure is readable without playing it.
+2. **Name the material by round**: `*_a` for the opening material, `*_b` for the developed material,
+   `*_end` for the closing material. Renaming the old material to `*_a` is part of the fix, not cosmetic:
+   it makes the mix block read as a section map.
+3. **Keep exactly one invariant layer** — typically the bass pedal, which carries the harmonic skeleton —
+   and let it run across the earlier rounds (`loop=3`). State in a comment that this layer is deliberately
+   static and serves as the reference ground for the development above it. Everything else changes per round.
+4. **Change a different parameter per round** so the development is audible, not merely present on paper:
+   register (raise the whole bed a third), contour (`up` → `upDown`), rhythm (single strokes → double
+   strokes), density (arpeggios drop out in the final round).
+5. **Give the final round a cadence and a tail**: end on the tonic, drop the busiest part, and let the last
+   note cross the barline with `gate=1.4`–`1.5` so it bleeds into the reverb tail instead of stopping dead.
+6. **Verify each sequence's duration sums to the same whole number of measures**, then verify the mix
+   timeline: with `loop` semantics as in 2.14, check that consecutive tracks for the same part start
+   exactly where the previous one ends and that no part is left uncovered.
 
 ---
 
-## 六、注释纪律
+## 5. Rewriting procedure
 
-> **注释不是证据。你上一轮写下的注释更不是。**
-> 一份脚本里最危险的不是语法错误（会报错），而是**注释声称的行为与引擎实际行为不符** ——
-> 它不报错、不告警，只是让下一个读的人（包括你自己）基于错的前提做决定。
+### 5.1 Extract the intent first, then touch the syntax
 
-### 6.1 两类缺陷，要分开验
+An old draft often has dated syntax but readable intent. Split the rewrite into two steps; do not merge them:
 
-| 类型 | 表现 | 怎么发现 |
+1. **Extract the intent**: what is this passage trying to express? (crescendo, silence, counterpoint,
+   close…)
+2. **Re-implement in SPG**: same intent, new implementation.
+
+Skipping step 1 degenerates into "translating the old spelling sentence by sentence into the new spelling" —
+the detours the old syntax forced (copy-pasted passages, layers faked with time offsets) get inherited
+unchanged.
+
+**How to tell which parts are "artefacts of the old syntax"**: the same content copied several times with
+only one or two parameters changed usually means the old syntax lacked a loop/variation mechanism. That
+repetition is exactly what the rewrite should remove — but after removing it, check against 4.1: did you
+really restate with `loop`, or did you write two pieces of material?
+
+### 5.2 Item-by-item checklist
+
+After writing, walk through **every** construct in the file:
+
+- [ ] The parameter name is in the whitelist (spelling, singular/plural, underscores)
+- [ ] The value is within the range the implementation allows (especially: > 0, 0~1, enum values)
+- [ ] The field actually has a consumer, rather than being "parsed but never read"
+- [ ] Duration/length units match `parseDuration`'s rules (beats, seconds, milliseconds, measures)
+- [ ] Quotes, separators and comment markers match the implementation's tokenisation
+- [ ] Ordering parameters (`direction`, `pattern`, `up`/`down`) were confirmed against those exact lines
+- [ ] Combinations the implementation rejects (e.g. "A requires B") are not present
+- [ ] Every sequence's durations sum to a whole number of measures (4.3)
+- [ ] Every `sequence` is referenced by some `track`, or `mix` is deliberately omitted
+
+---
+
+## 6. Comment discipline
+
+> **A comment is not evidence. A comment you wrote in a previous round even less so.**
+> The most dangerous thing in a script is not a syntax error (that raises an error) but **a comment whose
+> claimed behaviour contradicts what the engine actually does** — it raises nothing, warns nothing, and
+> simply makes the next reader (including yourself) decide on a false premise.
+
+### 6.1 Two defect classes, verified separately
+
+| Class | Symptom | How to find it |
 |---|---|---|
-| **数值型** | 注释里的秒数/频率/比例与实际不符 | 对着实现算一遍，把算式写进注释 |
-| **方向型** | 注释说「上行/变亮/减少」，实际相反 | 读实现的分支，确认哪条路径生效 |
+| **Numeric** | Seconds/frequencies/ratios in the comment do not match reality | Recompute against the implementation and put the formula in the comment |
+| **Directional** | The comment says "ascending / brighter / decreasing" but the opposite happens | Read the implementation's branches and confirm which path actually runs |
 
-方向型最集中的地方是顺序类参数（2.11）与被压缩的参数（6.2）。
+Directional defects cluster around ordering parameters (2.11) and compressed parameters (6.2).
 
-**规则：凡是注释里出现具体数字或方向词，就要能在实现里指出对应的那一行。**
-指不出来，就删掉那个数字，改成定性描述。
+**Rule: whenever a comment contains a concrete number or a direction word, you must be able to point at
+the line in the implementation that corresponds to it.** If you cannot, delete the number and replace it
+with a qualitative statement.
 
-### 6.2 参数写下的值 ≠ 听到的值
+### 6.2 The value you write ≠ the value you hear
 
-实现里常有「按比例压缩」「截断到上限」「钳制到区间」的逻辑，它们会让写下的数字与实际发声不符。
+Implementations routinely contain "compress proportionally", "truncate at the ceiling" and "clamp to
+range" logic, which makes the written number differ from what sounds.
 
-数值型最隐蔽的例子：包络的 A+D 若超过音符时值，实现会**按比例压缩**它们。
-于是注释里写的「3.5 秒起音」实际是 3.0 秒。**要么把数值调到不被压缩，
-要么在注释里说明会被压缩** —— 两者都行，装作没发生不行。
+The most insidious numeric example: if an envelope's A+D exceeds the note duration, the implementation
+**compresses them proportionally**. So a comment claiming a "3.5 second attack" is really 3.0 seconds.
+**Either adjust the value so it is not compressed, or say in the comment that it will be** — both are
+acceptable; pretending it does not happen is not.
 
-### 6.3 把自己上一轮写的注释也当作待审对象
+### 6.3 Treat your own previous comments as objects under review
 
-迭代同一个文件时，最容易留下的错误是**上一轮自己写的注释**。
-它们看起来「已经是审过的」，于是被跳过。
+When iterating the same file, the errors most likely to survive are **the comments you wrote in the
+previous round**. They look "already reviewed" and therefore get skipped.
 
-实操：每轮开始前，先把文件里所有含**具体数字、方向词、比较词**（「比…高」「低于」「唯一」）
-的注释行 grep 出来，逐条对着当前实现重验。改动过参数之后，
-这些注释几乎必然有一条已经过期。
+Practical method: before each round, grep out every comment line containing a **concrete number, a
+direction word, or a comparison word** ("higher than", "lower than", "only") and re-verify each one
+against the current implementation. After you change a parameter, one of them has almost certainly gone stale.
 
-**改动一处，搜一遍全局**：某声部的音区变了，所有说「高一个八度」「最低音是 X」的
-注释都要重算。这类注释散落在文件各处，不会因为改了一行而自动出现。
+**Change one thing, search globally**: if a part's register moved, every comment saying "an octave higher"
+or "the lowest note is X" must be recomputed. Such comments are scattered all over the file and will not
+announce themselves because you edited one line.
 
-### 6.4 不要用「原稿」当参照系
+### 6.4 Do not use "the original draft" as a frame of reference
 
-改写后的文件里出现「原稿这里写的是…」「比原来的 C3 高一个八度」这类句子，
-对读者没有价值 —— 原稿可能已被删除、改名或不在手边。
-**只写当前实现的技术理由**（「C3 会与长音撞同一音高，所以用 C4」），
-不要写「改自哪里」。
-
----
-
-## 七、命名：从结构里长出来
-
-给作品取名时，**不要用情绪标签**（「忧伤」「恐怖」「激烈」）——
-那等于替受众下了结论，而且任何同类作品都能套用。
-
-**从结构里找一个具体的、可验证的事实当名字**：某个声部始终不动、
-某次终止没有解决、某个数字反复出现。这样的名字：
-
-- 不需要受众预先知道这是什么情绪；
-- 名字自己说明了作品里发生了什么；
-- 无法被套用到别的作品上。
-
-命名与文件名是两回事：改名时同步更新文件内的标题与说明注释，**不要因为改名就动内容**。
+Sentences like "the original wrote this as…" or "an octave above the old C3" have no value for a reader —
+the original may have been deleted, renamed, or simply not be at hand.
+**Write only the technical reason for the current implementation** ("C3 would collide with the sustained
+note on the same pitch, so C4"), never "changed from where".
 
 ---
 
-## 八、验证边界
+## 7. Naming: grow the name out of the structure
 
-`npm run test:spg`（= `node test/index.js`）只编译 `services/AudioService.ts` 与 `meta`
-到 `test/build/`，然后跑引擎与兼容性用例。**它不读取 `.spg/` 下的任何脚本文件。**
+When naming a work, **do not use an emotion label** ("sorrowful", "horrific", "furious") — that draws the
+conclusion on the audience's behalf, and it fits any work of the same kind.
 
-所以：**手写的 SPG 脚本永远处于「未执行验证」状态**，除非有人在 GUI 里粘贴编译。
-交付时的正确说法是「已按实现逐条核对，未执行」，不是「已验证」（见 `verification-discipline`）。
+**Take a concrete, verifiable fact from the structure as the name**: a part that never moves, a cadence
+that never resolves, a number that keeps recurring. Such a name:
+
+- does not require the audience to know in advance what emotion is intended;
+- explains what happens in the work by itself;
+- cannot be applied to a different work.
+
+Naming and the file name are two separate things: when renaming, update the title and explanatory
+comments inside the file, **but do not change the content just because of a rename**.
+
+---
+
+## 8. Verification boundary
+
+`npm run test:spg` (= `node test/index.js`) compiles the modules listed in `test/tsconfig.json` —
+`app/renderer/services/AudioService.ts`, `SpgAiService.ts`, `LogService.ts`, `SearchService.ts`,
+`shared/ai/AiService.ts`, `shared/core/**`, `shared/meta/**` and some `extension/src/**` files — into
+`test/build/`, then runs the engine and compatibility cases. **It does not read any script under `.spg/`**
+(verified: no `.spg` reference in `test/index.js`).
+
+Therefore: **a hand-written SPG script is permanently in the "not executed" state** unless someone pastes
+it into the GUI to compile it. The correct wording on delivery is "checked item by item against the
+implementation, not executed", never "verified" (see `verification-discipline`).
