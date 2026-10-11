@@ -41,7 +41,7 @@ define_instrument(name="warm_piano") {
 // ---------------------------------------------------------------------------
 // 低频铺底：纯正弦地板，滤波固定不扫，全曲只承担和声骨架。
 // gain 0.42：按增益链算到输出端（baseGain × velScale × 音序 gain × master_gain），
-// 它与玻璃钟 ≈0.21、琶音 ≈0.19 同档，旋律是 0.45（第 3 轮 0.50）—— 骨架比旋律
+// 它与玻璃钟 ≈0.22、琶音 ≈0.18–0.22 同档，旋律是 0.44–0.55 —— 骨架比旋律
 // 低约 7dB，听得见和声走向，又不去和主旋律争位置。
 // 这里若沿用 0.17，铺底会落到旋律以下约 15dB，和声走向实际上听不出来。
 // ---------------------------------------------------------------------------
@@ -118,6 +118,7 @@ sequence(name="arps_a", instrument="warm_piano", gain=0.6, humanize=0.16) {
 // 均值只有 0.47，不写就会让这一轮比前两轮响出约 55%。四条取 0.50–0.58，
 // 整体比 arps_a 强约 14%，是高点轮该有的推动；代价是一条 arp 只能给一个
 // 力度值，因此没有 arps_a 那种逐音的重音起伏。
+// （arp 的 velocity 走逐音符表现力参数白名单，与 rate/duration 写在同一次调用里。）
 sequence(name="arps_b", instrument="warm_piano", gain=0.6, humanize=0.16) {
   arp(chord=["C3",  "Eb3", "G3", "Bb3"], pattern="upDown", rate="8n", duration="1n", velocity=0.56)
   arp(chord=["Ab2", "C3",  "Eb3", "Ab3"], pattern="upDown", rate="8n", duration="1n", velocity=0.50)
