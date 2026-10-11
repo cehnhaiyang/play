@@ -258,7 +258,7 @@ const main = async () => {
             && listed.every((t) => /^https?:/.test(t.url)),
             `${listed.length} 个标签页`);
 
-        const victim = await browser.newTab(`${base}/page?victim=1`);
+        await browser.newTab(`${base}/page?victim=1`);
         await sleep(300);
         const victimId = await sw.evaluate(
             `chrome.tabs.query({ url: '${base}/page?victim=1' }).then(list => (list[0] || {}).id ?? -1)`,
@@ -272,7 +272,6 @@ const main = async () => {
         check('从球上关闭标签页会真的关掉浏览器里那个标签页',
             closed?.result?.closed === true && stillThere === false,
             `closed=${closed?.result?.closed}，浏览器里还在=${stillThere}`);
-        void victim;
 
         await ask({ target: 'sw', kind: 'sniffer-set-enabled', enabled: false });
 
