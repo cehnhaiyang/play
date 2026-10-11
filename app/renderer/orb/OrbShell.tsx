@@ -41,10 +41,28 @@ export const OrbShell = ({ icon, accent, label, hint, toolbar, children }: OrbSh
     const [isDragging, setIsDragging] = useState(false);
     const hasMoved = useRef(false);
     const raf = useRef<number | null>(null);
+    /* 缩放与拖动各自一套状态，理由见下面 onResizeDown 那段 */
+    const [isResizing, setIsResizing] = useState(false);
+    const resizeRaf = useRef<number | null>(null);
 
-    /* 主进程改了窗口尺寸 → 切换形态。尺寸本身不在这里设，见文件头 */
+    /*
+     * 主进程改了窗口尺寸 → 切换形态。尺寸本身不在这里设，见文件头。
+     *
+     * 顺手把两条手势状态清掉：拖到一半按 Esc（收起）时，指针捕获还挂在
+     * 那个 header 上，而 header 随形态切换被卸载了 —— pointerup 落到球身上，
+     * 而球身上那次 `isDragging` 已经是 false，于是提前 return。
+     * 结果是两个标记都留着：
+     *   · `isDragging` / `isResizing` 留着 → 下一次 pointermove 被当成"还在拖"；
+     *   · `hasMoved` 留着 → 球的 onClick 永远认为"刚拖过"，**点不开了**。
+     * 主进程那边也在 setOpen 里清基准，同一个理由。
+     */
     useEffect(() => {
-        const off = window.orbApi?.onLayout(({ open }) => setIsOpen(open));
+        const off = window.orbApi?.onLayout(({ open }) => {
+            setIsOpen(open);
+            setIsDragging(false);
+            setIsResizing(false);
+            hasMoved.current = false;
+        });
         return off;
     }, []);
 
@@ -135,9 +153,6 @@ export const OrbShell = ({ icon, accent, label, hint, toolbar, children }: OrbSh
      * 这里**只报指针位置**，尺寸怎么算全在主进程（增量、下限、贴边平移）。
      * 渲染层自己算的话，那几条约束就得分叉成两份。
      */
-    const [isResizing, setIsResizing] = useState(false);
-    const resizeRaf = useRef<number | null>(null);
-
     const onResizeDown = useCallback((event: React.PointerEvent) => {
         // 防的是浏览器把这次按下当成选择/原生拖拽的起点（面板本身已 select-none）
         event.preventDefault();

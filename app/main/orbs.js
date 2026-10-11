@@ -325,6 +325,19 @@ const setOpen = (id, open) => {
     const entry = orbs.get(id);
     if (!entry) return;
 
+    /*
+     * 收起时把两条手势的基准一起丢掉。
+     *
+     * 这是"球已经收起了"这件事的**唯一**落点，所以清理也放这里。不丢的话：
+     * 拖到一半按 Esc，窗口缩回 64×64，而指针捕获还在渲染层手里 ——
+     * 接下来任何一个 pointermove 都会带着旧基准算尺寸，把**球**撑成面板大小。
+     * 拖动那边同理，只是后果轻一些（球被挪走）。
+     */
+    if (!open) {
+        grabOffsets.delete(id);
+        resizeAnchors.delete(id);
+    }
+
     // 展开时以球心为中心铺开：球在哪，面板就从哪长出来
     const current = entry.win.getBounds();
     const center = { x: current.x + current.width / 2, y: current.y + current.height / 2 };
