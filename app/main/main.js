@@ -1281,9 +1281,25 @@ async function downloadWithFfmpeg(url, filePath, customReferer, onProgress, hand
  */
 const activeMediaDownloads = new Map();
 
+/**
+ * 媒体下载进度的转发者。
+ *
+ * `sendMediaDownloadProgress` 是唯一的产生点，而消费者有两个：主窗口自己的
+ * 下载列表，以及发起下载的悬浮球。用一张表而不是在主窗口那条路径里判断
+ * "球在不在" —— 球可能没开，也可能刚被销毁。
+ */
+const mediaProgressForwarders = new Set();
+
 function sendMediaDownloadProgress(progress) {
     if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('media-download-progress', progress);
+    }
+    for (const forward of mediaProgressForwarders) {
+        try {
+            forward(progress);
+        } catch (_e) {
+            // 单个转发者出错（窗口刚好被销毁）不影响其它的
+        }
     }
 }
 
@@ -3369,6 +3385,23 @@ function registerOrbChannels() {
     bridge.onEvent((event, payload) => {
         for (const [, entry] of orbs.entriesForBroadcast()) {
             entry.win.webContents.send('orb:event', { event, payload });
+        }
+    });
+
+    /*
+     * 媒体下载进度也要推给球。
+     *
+     * `sendMediaDownloadProgress` 只发给主窗口，而下载的发起方现在是球 ——
+     * 不转发的话，用户点了「下载」之后球上没有任何反馈：界面停在原地，
+     * 而 ffmpeg 已经在跑。一次流媒体下载可能几分钟，那是一块死界面。
+     *
+     * 用独立的通道名（`orb:` 前缀）而不是复用 `media-download-progress`：
+     * 主窗口那条订阅的是"应用自己的下载列表"，两者的消费者不同，
+     * 共用一条会让球收到它不认识的事件。
+     */
+    mediaProgressForwarders.add((progress) => {
+        for (const [, entry] of orbs.entriesForBroadcast()) {
+            entry.win.webContents.send('orb:media-download-progress', progress);
         }
     });
 }

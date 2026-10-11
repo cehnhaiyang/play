@@ -54,29 +54,31 @@ const ENDPOINT_FILE = path.join(
 );
 
 /**
- * 退出码 1 且写 stderr 的场景：拿不到端点信息。
+ * 致命错误的出口。
  *
- * 这时候**不要静默退出**。Chrome 会把本进程的 stderr 收进扩展的错误日志，
- * 而"插件连上了但什么都没发生"是最难查的一种。宁可写一行原因。
+ * 只有"这条通道已经不可能再用"才走这里。Chrome 会把本进程的 stderr 收进扩展
+ * 的错误日志，所以宁可写一行原因，也不要静默退出。
+ *
+ * ⚠️ **连不上应用不属于致命错误**，那只是等待状态 —— 见 `scheduleReconnect`。
  */
 const fail = (message) => {
     process.stderr.write(`[theplay-host] ${message}\n`);
     process.exit(1);
 };
 
+/**
+ * 读应用写下的连接信息。**读不到返回 null，不退出。**
+ *
+ * 应用可能只是还没启动，也可能正在重启 —— 它每次启动都会换端口和 token，
+ * 所以这个文件必须在每次重连前重新读一遍，缓存住旧值就永远接不上新实例。
+ */
 const readEndpoint = () => {
     try {
-        const raw = fs.readFileSync(ENDPOINT_FILE, 'utf8');
-        const parsed = JSON.parse(raw);
-        if (typeof parsed?.port !== 'number' || typeof parsed?.token !== 'string') {
-            fail(`端点文件格式不对：${ENDPOINT_FILE}`);
-        }
+        const parsed = JSON.parse(fs.readFileSync(ENDPOINT_FILE, 'utf8'));
+        if (typeof parsed?.port !== 'number' || typeof parsed?.token !== 'string') return null;
         return parsed;
-    } catch (e) {
-        if (e && e.code === 'ENOENT') {
-            fail(`应用没有在运行（找不到 ${ENDPOINT_FILE}）。请先启动 The Play 应用。`);
-        }
-        fail(`读端点文件失败：${e && e.message}`);
+    } catch {
+        return null;
     }
 };
 
@@ -168,47 +170,95 @@ const relay = {
 /* 3. 启动                                                                    */
 /* ========================================================================== */
 
-const endpoint = readEndpoint();
+/**
+ * 重连间隔。
+ *
+ * 应用重启是**正常操作**：它每次启动都会换端口与 token，所以旧连接必然断开。
+ * 断开之后本进程要自己接回去 —— 这是"重启应用不必重启浏览器"的全部实现。
+ *
+ * 取 1 秒：应用重启通常一两秒内完成；再密只是空转，再疏用户会明显等。
+ */
+const RECONNECT_MS = 1000;
 
-const socket = net.createConnection({ host: '127.0.0.1', port: endpoint.port }, () => {
-    // 第一行是握手：带上 token，应用据此确认这是自己的 host 而不是别的本机进程
-    socket.write(`${JSON.stringify({ hello: 'theplay-host', token: endpoint.token })}\n`);
-    relay.socket = socket;
+let socket = null;
+let reconnectTimer = null;
 
-    /*
-     * 第二行告诉插件"应用是谁、协议版本多少"。
-     *
-     * 插件据此比对版本 —— 不一致要明确报错而不是降级尝试，否则旧应用配新插件
-     * 会表现为"某些端点神秘失败"。
-     *
-     * 版本号是**硬编码**的，不从 shared/ 里 import：host.js 是 Chrome 用
-     * node 直接拉起的独立进程，不能依赖打包器解析 TS。改协议版本时
-     * 要同时改这里和 shared/meta/bridge.ts —— 两处不一致会立刻在握手时暴露，
-     * 这正是握手存在的意义。
-     */
-    send({ hello: 'theplay-host', protocol: BRIDGE_PROTOCOL_VERSION });
-
-    for (const message of relay.queue.splice(0)) {
-        socket.write(`${JSON.stringify(message)}\n`);
-    }
-});
-
-socket.on('data', (chunk) => relay.onData(chunk));
-
-socket.on('error', (e) => {
-    fail(`连接应用失败：${e && e.message}`);
-});
+const scheduleReconnect = () => {
+    if (reconnectTimer !== null) return;
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connect();
+    }, RECONNECT_MS);
+};
 
 /**
- * 应用退出 → 本进程也退出。
+ * 连一次应用。
  *
- * 不这么做的话 Chrome 会一直留着一个连不上的 host，插件的 `connectNative`
- * 看起来是成功的，但每条请求都石沉大海 —— 表现为"插件里点了没反应"，
- * 而原因在另一个进程里。
+ * **不在这里处理失败。** 连不上（应用没起来、刚退出、端点文件还没落盘）
+ * 都只是等待状态，一律交给 `close` 与 `scheduleReconnect` 走下一轮。
  */
-socket.on('close', () => {
-    process.exit(0);
-});
+const connect = () => {
+    if (socket) return;
+
+    const endpoint = readEndpoint();
+    if (!endpoint) {
+        scheduleReconnect();
+        return;
+    }
+
+    const created = net.createConnection({ host: '127.0.0.1', port: endpoint.port });
+    socket = created;
+
+    created.on('connect', () => {
+        // 第一行是握手：带上 token，应用据此确认这是自己的 host 而不是别的本机进程
+        created.write(`${JSON.stringify({ hello: 'theplay-host', token: endpoint.token })}\n`);
+
+        /*
+         * 第二行告诉插件"应用是谁、协议版本多少"。
+         *
+         * 插件据此比对版本 —— 不一致要明确报错而不是降级尝试，否则旧应用配新插件
+         * 会表现为"某些端点神秘失败"。
+         *
+         * 版本号是**硬编码**的，不从 shared/ 里 import：host.js 是 Chrome 用
+         * node 直接拉起的独立进程，不能依赖打包器解析 TS。改协议版本时
+         * 要同时改这里和 shared/meta/bridge.ts —— 两处不一致会立刻在握手时暴露，
+         * 这正是握手存在的意义。
+         */
+        send({ hello: 'theplay-host', protocol: BRIDGE_PROTOCOL_VERSION });
+
+        // 握手发完才开放转发，否则排队中的消息会插到握手前面
+        relay.socket = created;
+        for (const message of relay.queue.splice(0)) {
+            created.write(`${JSON.stringify(message)}\n`);
+        }
+    });
+
+    created.on('data', (chunk) => relay.onData(chunk));
+
+    created.on('error', () => {
+        // 'close' 会跟着来，这里不重复处理
+    });
+
+    /**
+     * 断开就重连，**不退出进程**。
+     *
+     * 原先这里是 `process.exit(0)`，那正是"重启应用必须重启浏览器"的根因：
+     * 本进程一退，插件的 Port 就断，而插件侧不会重连 —— 于是球永久显示
+     * "插件未连接"，用户唯一的出路是重启浏览器，让 Chrome 重新拉起本进程。
+     *
+     * 本进程的生死只该由一件事决定：Chrome 是否还留着这条 stdio（见文件末尾）。
+     * 只要插件还想要这条通道，应用起没起来就只是时间问题。
+     */
+    created.on('close', () => {
+        if (socket === created) socket = null;
+        if (relay.socket === created) relay.socket = null;
+        // 上一条连接的半截帧不能带进新连接
+        relay.buffer = Buffer.alloc(0);
+        scheduleReconnect();
+    });
+};
+
+connect();
 
 process.stdin.on('data', onStdinData);
 // Chrome 关掉管道就是"该结束了"。不监听它的话本进程会变成孤儿

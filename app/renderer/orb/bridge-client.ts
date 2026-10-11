@@ -1,4 +1,5 @@
-import type { AgentMessage, AgentState, AgentUsage } from '../../../shared/meta';
+import type { AgentMessage, AgentState, AgentUsage, MediaSourceChannel, MediaType } from '../../../shared/meta';
+import { requiresFfmpeg } from '../../../shared/core';
 
 /**
  * 球的桥客户端。
@@ -23,7 +24,7 @@ export interface SniffedMedia {
     title: string;
     type: string;
     ext: string;
-    source: 'network';
+    source: MediaSourceChannel;
     referer?: string;
     pageUrl?: string;
     foundAt: number;
@@ -34,6 +35,27 @@ export type BridgeEventName = 'sniffed-media' | 'agent-snapshot' | 'agent-delta'
 
 /** 引擎快照过桥后的形状。`actions` 是函数，JSON 序列化时被丢掉 —— 见下 */
 export type EngineSnapshot = Omit<AgentState, 'actions'> & { revision: number };
+
+/**
+ * 球对引擎发起的一次动作。形状与插件的 `AgentAction` 逐条对齐。
+ *
+ * 这里**再声明一份**而不是从插件 import：球与插件是两个独立的构建产物
+ * （插件由 `extension/vite.config.mts` 构建，球由根 `vite.config` 构建），
+ * 一个 import 另一个会把对方的整个依赖图拖进来。而 `test/manifest.test.js`
+ * 会比对两边的事件名，`agent-action` 的分支由插件的穷尽检查兜住 ——
+ * 漏一条在那里是类型错误，不是运行时的静默 undefined。
+ */
+export type AgentAction =
+    | { type: 'send'; prompt: string }
+    | { type: 'stop' }
+    | { type: 'clear' }
+    | { type: 'compact' }
+    | { type: 'set-compact-ratio'; ratio: number }
+    | { type: 'remove-message'; id: string }
+    | { type: 'rewind'; id: string }
+    | { type: 'run-script'; id: string }
+    | { type: 'remove-script'; id: string }
+    | { type: 'toggle-script'; id: string };
 
 const api = () => {
     const orb = window.orbApi;
@@ -99,28 +121,82 @@ export const onBridgeEvent = (
 };
 
 /* ========================================================================== */
-/* Agent 的两个动作                                                            */
+/* Agent 的动作                                                                */
 /* ========================================================================== */
-
-/** 球对引擎发起的一次动作。形状与插件的 AgentAction 逐条对齐 */
-export type AgentAction =
-    | { type: 'send'; prompt: string }
-    | { type: 'stop' }
-    | { type: 'clear' }
-    | { type: 'compact' }
-    | { type: 'set-compact-ratio'; ratio: number }
-    | { type: 'remove-message'; id: string }
-    | { type: 'rewind'; id: string }
-    | { type: 'run-script'; id: string }
-    | { type: 'remove-script'; id: string }
-    | { type: 'toggle-script'; id: string };
 
 export const agentAction = (action: AgentAction): Promise<unknown> =>
     bridge<{ result: unknown }>('agent-action', { action }).then((r) => r.result);
 
+/**
+ * 回退到某条消息之前，返回该条的提问原文。
+ *
+ * 单独一个函数而不是让调用方 `agentAction({type:'rewind'})` 再拆结果：
+ * 返回值形状是这条动作独有的（其它动作回 `{done:true}`），而"回退之后要把
+ * 提问填回输入框"是它唯一的用途 —— 让每个调用点自己拆一层 `result.prompt`
+ * 等于把同一个形状写两遍。
+ */
+export const rewindTo = async (id: string): Promise<string> => {
+    const result = await agentAction({ type: 'rewind', id }) as { prompt?: string } | null;
+    return result?.prompt || '';
+};
+
+/* ========================================================================== */
+/* 下载路由                                                                    */
+/* ========================================================================== */
+
+/**
+ * 下载一条嗅探结果。
+ *
+ * ## 为什么分岔判据放在球里
+ *
+ * 直链交给插件的 `chrome.downloads`，流媒体交给应用侧的 ffmpeg —— 这是
+ * `shared/meta/bridge.ts` 里 `download-media` 那条 `split` 路由的说明。
+ * 判据是 `requiresFfmpeg`（`shared/core/media.ts`，唯一真值）。
+ *
+ * 球**同时**能调这两边（它经桥调插件、经 preload 调主进程），所以分岔放在
+ * 这里最省：插件不需要知道应用有没有 ffmpeg，应用也不需要知道浏览器下到哪了。
+ *
+ * ## 直链为什么不能也走应用
+ *
+ * `chrome.downloads` 交给浏览器之后，用户在 Ctrl+J 里能看到进度、能暂停、
+ * 能断点续传、能重命名 —— 那些浏览器已经做好了。应用侧再实现一遍只会和
+ * Ctrl+J 显示得不一样，然后用户不知道该信哪个。
+ */
+export const downloadMedia = async (item: SniffedMedia): Promise<void> => {
+    if (requiresFfmpeg(item.type, item.ext)) {
+        const api = window.electronAPI;
+        if (!api?.downloadMedia) throw new Error('应用侧下载接口不可用（preload 未加载）。');
+        const result = await api.downloadMedia({
+            url: item.url,
+            title: item.title,
+            type: item.type as MediaType,
+            ext: item.ext,
+            // 防盗链：多数站点校验的是"从哪个页面来的"，所以取 pageUrl 而不是媒体自身地址
+            referer: item.referer || item.pageUrl,
+        });
+        if (!result.success && !result.cancelled) throw new Error(result.message || '下载失败');
+        return;
+    }
+
+    await bridge('downloads-start', { url: item.url, filename: item.title || undefined });
+};
+
 /* ========================================================================== */
 /* 展示辅助                                                                    */
 /* ========================================================================== */
+
+/**
+ * 嗅探来源的角标文案。
+ *
+ * 三个来源对用户有实质区别：`network` 是页面真的请求过的（一定能下），
+ * `local` 是页内扫描找到的地址，`ai` 是模型从源码里挑的（**可能是猜的**）。
+ * 不标出来的话，用户分不清"这条下载失败"是站点的问题还是模型编的地址。
+ */
+export const SOURCE_LABEL: Record<MediaSourceChannel, string> = {
+    network: '网络',
+    local: '页面',
+    ai: 'AI',
+};
 
 /** 上下文占用。只给量级 —— 精确到个位的数字每秒都在变，读它没有意义 */
 export const formatTokens = (usage?: AgentUsage): string => {

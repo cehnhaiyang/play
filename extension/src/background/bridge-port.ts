@@ -114,6 +114,9 @@ const connect = (): chrome.runtime.Port => {
                 return;
             }
             post({ hello: 'theplay-extension', protocol: BRIDGE_PROTOCOL_VERSION });
+            // 握手成功才把退避重置：connectNative 不抛只说明 host 进程起来了，
+            // 而"起来了但应用没在跑"同样要退避，不能当成功
+            reconnectDelay = RECONNECT_MIN_MS;
             notifyReady(true);
             return;
         }
@@ -125,15 +128,45 @@ const connect = (): chrome.runtime.Port => {
         if (port === created) port = null;
         notifyReady(false);
         /*
-         * 断开之后**不在这里自动重连**。
+         * 断开就重连，**但带退避**。
          *
-         * `onDisconnect` 里立刻 connectNative 会在应用没运行时变成一个
-         * 无限重连循环，每轮都在控制台留一条错误。重连交给 `ensureBridge`：
-         * 它由真实需求（球打开、用户操作）触发，那时重试是有意义的。
+         * 断开有四种原因，只有一种该放弃：
+         *   · 应用重启（端口与 token 都换了）→ 必须重连，这是主要场景；
+         *   · host 进程被杀 → 必须重连；
+         *   · SW 即将被回收 → 重连一次把它留住；
+         *   · host 没注册（没跑过 host:install）→ 重连必然再失败。
+         *
+         * 最后一种靠退避兜住：失败间隔一路涨到上限，不会变成刷屏的忙循环。
+         * 而没有重连的话，用户唯一的出路是重启浏览器 —— 那正是要消掉的事。
          */
+        scheduleReconnect();
     });
 
     return created;
+};
+
+/**
+ * 重连退避。
+ *
+ * 从 1 秒翻倍到 30 秒封顶。前几轮快是为了让"应用重启"这种最常见的场景
+ * 在一两秒内恢复；封顶是为了让"host 没装"这种必然失败的场景安静下来。
+ */
+const RECONNECT_MIN_MS = 1000;
+const RECONNECT_MAX_MS = 30000;
+
+let reconnectDelay = RECONNECT_MIN_MS;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+const scheduleReconnect = (): void => {
+    if (reconnectTimer !== null) return;
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        if (port) return;
+        const ok = ensureBridge();
+        reconnectDelay = ok ? RECONNECT_MIN_MS : Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
+        // 连上了不代表握手成功，下一轮失败时还要退避，所以这里不重置
+        if (!ok) scheduleReconnect();
+    }, reconnectDelay);
 };
 
 /**

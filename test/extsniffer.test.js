@@ -305,9 +305,211 @@ const run = () => {
     });
 
     /* ====================================================================== */
-    /* 9. shared/core 的宿主无关性（service worker 能安全 import）              */
+    /* 8.1 页内扫描的后缀判据（classifyByExt）                                   */
     /* ====================================================================== */
 
+    /**
+     * 页内扫描的候选**没有响应头** —— 那些地址很多根本没被请求过，正是这一层
+     * 要捞的东西。所以它只能走后缀判据，而这条路径必须与网络层同结论：
+     * 同一个地址走两条路得出两个类型，筛选栏与实际下载方式就会对不上。
+     */
+    check('classifyByExt 与 classifyResponse 对同一地址同结论', () => {
+        const cases = [
+            ['https://a.com/movie.mp4', 'mp4', 'video'],
+            ['https://a.com/song.flac', 'flac', 'audio'],
+            ['https://a.com/list.m3u8', 'm3u8', 'stream'],
+            ['https://a.com/pic.avif', 'avif', 'image'],
+        ];
+        for (const [url, ext, expected] of cases) {
+            eq(C.classifyByExt(url, ext)?.type, expected, `${url} 的页内分类`);
+            eq(classify(url, '')?.type, expected, `${url} 的网络层分类`);
+        }
+    });
+
+    check('classifyByExt 认不出时返回 null（不硬套一个类型）', () => {
+        // 页内扫描的候选里混着 JS、CSS、字体。认不出就丢，硬套类型会往列表里灌噪声。
+        eq(C.classifyByExt('https://a.com/app.js', 'js'), null);
+        eq(C.classifyByExt('https://a.com/style.css', 'css'), null);
+        eq(C.classifyByExt('https://a.com/font.woff2', 'woff2'), null);
+        eq(C.classifyByExt('https://a.com/x', ''), null);
+    });
+
+    check('classifyByExt 也丢 HLS 分片（否则一次扫描灌进几百条）', () => {
+        // 网络层那条路已经拦了；页内扫描（Performance / 源码正则）会捞到整页
+        // segNNN.ts，少了这道闸一次扫描就能把列表刷满。
+        eq(C.classifyByExt('https://a.com/seg/000.ts', 'ts'), null);
+        eq(C.classifyByExt('https://a.com/ts/1.ts', 'ts'), null);
+        // 整段 .ts 仍要保留（分片判据不能过宽）
+        assert(C.classifyByExt('https://a.com/video/2024/lecture.ts', 'ts') !== null,
+            '整段 .ts 不该被页内扫描丢掉');
+    });
+
+    check('classifyByExt 看 query 里藏的后缀', () => {
+        // 页内扫描捞到的地址常常没有路径后缀（`/api/play?file=movie.mp4`）
+        eq(C.classifyByExt('https://a.com/get?file=movie.mp4', '')?.type, 'video');
+        eq(C.classifyByExt('https://a.com/get?url=a%2Fb.m3u8', '')?.type, 'stream');
+    });
+
+    /* ====================================================================== */
+    /* 8.2 页内扫描脚本的注入契约                                               */
+    /* ====================================================================== */
+
+    /**
+     * `IN_PAGE_SCAN` 会被 `toString()` 之后在目标页面里**重新求值**。
+     *
+     * 所以它不能引用任何外层作用域的东西 —— 包括 import 进来的常量。哪怕
+     * TypeScript 编译通过，运行时那个标识符在页面里根本不存在，表现为
+     * "扫描静默返回空"：不报错、不抛异常，列表就是空的。
+     *
+     * 这条断言必须存在，因为上面那个失败模式没有任何其它检查能挡住它。
+     */
+    check('IN_PAGE_SCAN 不引用外层作用域（注入后仍能求值）', () => {
+        const src = fs.readFileSync(
+            path.join(ROOT, 'extension', 'src', 'shared', 'inpage.ts'), 'utf8');
+        const start = src.indexOf('export const IN_PAGE_SCAN');
+        assert(start > 0, 'inpage.ts 里找不到 IN_PAGE_SCAN');
+        // 取到函数体结束：下一个顶层 `};` 收尾
+        const body = src.slice(start, src.indexOf('\n};', start));
+
+        /*
+         * 判据一：函数体里出现的标识符，只能是参数、局部声明、或宿主全局。
+         * 这里用**编译产物**跑真值而不是读源码：源码里的类型标注会被擦除，
+         * 拿源码判会误报。
+         */
+        const built = require('./build/extension/src/shared/inpage.js');
+        assert(typeof built.IN_PAGE_SCAN === 'function', '编译产物里没有 IN_PAGE_SCAN');
+
+        const text = built.IN_PAGE_SCAN.toString();
+        assert(text.includes('location.href'), 'IN_PAGE_SCAN 里应读取页面自身地址');
+        // 自由变量：源码里不得出现 `config.` 之外的模块级标识符引用。
+        // 保守判据 —— 只钉住最容易犯的那一类：直接引用 import 进来的常量名。
+        for (const name of ['STREAM_EXTS', 'VIDEO_EXTS', 'AUDIO_EXTS', 'IMAGE_EXTS', 'MEDIA_EXTENSIONS']) {
+            assert(!new RegExp(`\\b${name}\\b`).test(body),
+                `IN_PAGE_SCAN 引用了外层常量 ${name} —— 注入到页面后它是 undefined，扫描会静默返回空。`
+                + '需要的表要经 args 传进来。');
+        }
+    });
+
+    check('IN_PAGE_SCAN 在无 DOM 的沙箱里可求值，且候选来源齐全', () => {
+        /*
+         * 真跑一遍：造一个最小的 DOM 桩，确认五条采集路径都被走到。
+         *
+         * 这是**契约断言**不是实现断言 —— 旧实现（useBrowse 的
+         * IN_PAGE_INSPECTOR_SCRIPT）有四条路，一条少了就是能力缺失，
+         * 而"少了一条"在真浏览器里只表现为"某些站点嗅不到"。
+         */
+        const built = require('./build/extension/src/shared/inpage.js');
+        const created = [];
+
+        const makeElement = (tag, attrs = {}) => ({
+            tagName: tag.toUpperCase(),
+            getAttribute: (k) => (k in attrs ? attrs[k] : null),
+            querySelectorAll: () => [],
+            currentSrc: attrs.currentSrc || '',
+            src: attrs.src || '',
+        });
+
+        const media = makeElement('video', { src: '/movie.mp4' });
+        media.currentSrc = '/movie.mp4';
+        const audio = makeElement('audio', { src: '/song.mp3' });
+        const frame = makeElement('iframe', { src: 'https://other.com/embed' });
+
+        const documentStub = {
+            title: '测试页面',
+            querySelectorAll: (selector) => {
+                if (selector === 'video, audio') return [media, audio];
+                if (selector === 'iframe') return [frame];
+                return [];
+            },
+            documentElement: {
+                outerHTML: '<html><script>var x = "https://cdn.com/a.m3u8";</script></html>',
+            },
+        };
+
+        const locationStub = { href: 'https://page.com/watch' };
+        const windowStub = {
+            __playinfo__: {
+                data: {
+                    dash: {
+                        video: [{ baseUrl: 'https://cdn.com/v.m4s' }],
+                        audio: [{ baseUrl: 'https://cdn.com/a.m4s' }],
+                    },
+                },
+            },
+        };
+        const performanceStub = {
+            getEntriesByType: () => [
+                { name: 'https://cdn.com/perf.mp4', initiatorType: 'video' },
+                { name: 'https://cdn.com/app.js', initiatorType: 'script' },
+            ],
+        };
+
+        const vm = require('vm');
+        const sandbox = { document: documentStub, location: locationStub, window: windowStub, performance: performanceStub, URL, Set, Array, JSON, RegExp, String };
+        vm.createContext(sandbox);
+        const result = vm.runInContext(
+            `(${built.IN_PAGE_SCAN.toString()})(${JSON.stringify({
+                allExts: ['m3u8', 'mp4', 'mp3', 'm4s'],
+                limit: 100,
+                htmlLimit: 100000,
+                matchLimit: 100,
+            })})`,
+            sandbox,
+        );
+
+        const urls = result.items.map((i) => i.url);
+        const hints = new Set(result.items.map((i) => i.hint));
+        eq(result.pageUrl, 'https://page.com/watch', '页面地址应由页面自己报');
+        eq(result.pageTitle, '测试页面');
+
+        assert(urls.includes('https://page.com/movie.mp4'), 'DOM 里的 <video src> 应被收到');
+        assert(urls.includes('https://page.com/song.mp3'), 'DOM 里的 <audio src> 应被收到');
+        assert(urls.includes('https://cdn.com/perf.mp4'), 'Performance 里的资源应被收到');
+        assert(urls.includes('https://cdn.com/v.m4s'), '__playinfo__ 的 dash 视频轨应被收到');
+        assert(urls.includes('https://cdn.com/a.m4s'), '__playinfo__ 的 dash 音频轨应被收到');
+        assert(urls.includes('https://other.com/embed'), 'iframe src 应被收到');
+        assert(urls.includes('https://cdn.com/a.m3u8'), '页面源码里的直链应被正则捞到');
+
+        for (const hint of ['video', 'audio', 'perf', 'playinfo-video', 'playinfo-audio', 'frame', 'source']) {
+            assert(hints.has(hint), `候选来源 ${hint} 没有产出任何条目 —— 一条采集路径漏了`);
+        }
+        void created;
+    });
+
+    check('IN_PAGE_SCAN 丢掉 blob: 与相对地址归一', () => {
+        // blob: 是页面自己那块内存的句柄，点下载必然失败；
+        // 相对地址不归一的话送回 SW 之后已经不知道它是相对谁的了。
+        const built = require('./build/extension/src/shared/inpage.js');
+        const vm = require('vm');
+        const media = {
+            tagName: 'VIDEO',
+            getAttribute: () => 'blob:https://page.com/abc',
+            querySelectorAll: () => [],
+            currentSrc: 'blob:https://page.com/abc',
+            src: '',
+        };
+        const sandbox = {
+            document: {
+                title: '',
+                querySelectorAll: (s) => (s === 'video, audio' ? [media] : []),
+                documentElement: { outerHTML: '' },
+            },
+            location: { href: 'https://page.com/x' },
+            window: {},
+            performance: { getEntriesByType: () => [] },
+            URL, Set, Array, JSON, RegExp, String,
+        };
+        vm.createContext(sandbox);
+        const result = vm.runInContext(
+            `(${built.IN_PAGE_SCAN.toString()})(${JSON.stringify({ allExts: ['mp4'], limit: 10, htmlLimit: 10, matchLimit: 10 })})`,
+            sandbox,
+        );
+        eq(result.items.length, 0, 'blob: 不该进候选');
+    });
+
+    /* ====================================================================== */
+    /* 9. shared/core 的宿主无关性（service worker 能安全 import）              */
+    /* ====================================================================== */
     check('shared/core 索引里没有碰宿主全局的模块', () => {
         /*
          * 这是整个 shared/ 分层存在的理由，必须被钉住。

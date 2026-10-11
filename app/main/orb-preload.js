@@ -82,4 +82,22 @@ contextBridge.exposeInMainWorld('orbApi', {
         ipcRenderer.on('orb:event', handler);
         return () => ipcRenderer.removeListener('orb:event', handler);
     },
+
+    /* ---- 应用侧下载 ---- */
+    /*
+     * 这三条**不过桥**：ffmpeg、文件系统、子进程都在应用这一侧，插件做不到
+     * （见 shared/meta/bridge.ts 里 `download-media` 那条 split 路由）。
+     * 球同时握着两条路，所以"直链走浏览器、流媒体走应用"这个分岔在球里判
+     * （见 bridge-client.ts 的 downloadMedia）—— 插件与应用都不需要知道对方。
+     */
+    downloadMedia: (payload) => ipcRenderer.invoke('download-media', payload),
+    cancelMediaDownload: (url) => ipcRenderer.invoke('cancel-media-download', url),
+    getDownloadCapabilities: () => ipcRenderer.invoke('get-download-capabilities'),
+
+    /** 流媒体下载进度。ffmpeg 一次可能跑几分钟，没有进度就是一块死界面 */
+    onMediaDownloadProgress: (callback) => {
+        const handler = (_event, payload) => callback(payload);
+        ipcRenderer.on('orb:media-download-progress', handler);
+        return () => ipcRenderer.removeListener('orb:media-download-progress', handler);
+    },
 });

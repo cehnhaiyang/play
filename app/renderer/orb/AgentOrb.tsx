@@ -1,9 +1,29 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { AgentMessage, AgentUsage } from '../../../shared/meta';
+import type { AgentMessage, AgentScript, AgentUsage } from '../../../shared/meta';
+import { exportAgentSession } from '../../../shared/core';
 import { OrbShell } from './OrbShell';
 import { TerminalIcon } from './icons';
-import { agentAction, bridge, bridgeConnected, formatTokens, onBridgeEvent, onBridgeStatus } from './bridge-client';
+import {
+    agentAction,
+    bridge,
+    bridgeConnected,
+    formatTokens,
+    onBridgeEvent,
+    onBridgeStatus,
+    rewindTo,
+} from './bridge-client';
 import type { AgentAction, EngineSnapshot } from './bridge-client';
+
+/**
+ * 压缩档位候选。
+ *
+ * 与插件的 `COMPACT_RATIOS`（`agent/prompt.ts`）逐字一致。这里再写一份而不是
+ * import：球与插件是两个独立的构建产物，互相 import 会把对方的整个依赖图拖
+ * 进来（见 bridge-client.ts 里 AgentAction 那段）。而档位是**用户界面**的事实
+ * —— 传一个插件不认的值时引擎直接忽略（`setCompactRatio` 自己校验取值），
+ * 不会静默改成别的档位。
+ */
+const COMPACT_RATIOS = [0.4, 0.6, 0.8, 1] as const;
 
 /**
  * Agent 球。
@@ -29,6 +49,13 @@ import type { AgentAction, EngineSnapshot } from './bridge-client';
  *
  * `agent-delta` 用来让文字实时滚起来，`agent-snapshot` 才是真值。所以每收到
  * 一次快照就丢掉本地累积的增量 —— 两者叠加会让文字重复一遍。
+ *
+ * ## 两个页签
+ *
+ * 「对话」与「脚本」。脚本页不是装饰：`script_store` 工具能让模型存下脚本并
+ * 按 URL 自动执行，而**只有这个界面能让人看见存了什么、改掉它、或者停掉它**。
+ * 没有它的话，模型偷偷装上一个每次打开某站点就自动跑的脚本，用户无从知晓 ——
+ * 那既是能力缺失也是安全问题。
  */
 
 export const AgentOrb = () => {
@@ -37,6 +64,7 @@ export const AgentOrb = () => {
     const [input, setInput] = useState('');
     const [error, setError] = useState('');
     const [connected, setConnected] = useState(true);
+    const [tab, setTab] = useState<'chat' | 'scripts'>('chat');
 
     /* 桥的连接状态：查一次，之后跟着推送走。理由见 SniffOrb 同名那段 */
     useEffect(() => {
@@ -102,12 +130,43 @@ export const AgentOrb = () => {
         void act({ type: 'send', prompt: text });
     }, [act, input]);
 
+    /**
+     * 回退到某条消息之前。
+     *
+     * 把该条的提问填回输入框 —— 用户的意图几乎总是"改一下再问一遍"，
+     * 而回退已经把那条连同之后的全部删了。不填回去等于让他凭记忆重打。
+     */
+    const rewind = useCallback(async (id: string) => {
+        setError('');
+        try {
+            const prompt = await rewindTo(id);
+            if (prompt) setInput(prompt);
+            setConnected(true);
+        } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+            setConnected(await bridgeConnected());
+        }
+    }, []);
+
     const state = snapshot;
     const busy = state?.status !== 'idle';
     const messages = state?.messages || [];
+    const scripts = state?.scripts || [];
+    const canEdit = state?.canEdit !== false && !busy;
 
     const toolbar = (
         <>
+            <button
+                type="button"
+                onClick={() => setTab((v) => (v === 'chat' ? 'scripts' : 'chat'))}
+                className={`shrink-0 rounded-lg px-2 py-1 text-[10px] font-medium transition ${
+                    tab === 'scripts'
+                        ? 'bg-fuchsia-500/20 text-fuchsia-200'
+                        : 'bg-white/[0.06] text-slate-400 hover:bg-white/[0.12] hover:text-slate-200'
+                }`}
+            >
+                脚本{scripts.length > 0 ? ` ${scripts.length}` : ''}
+            </button>
             {busy && (
                 <button
                     type="button"
@@ -127,16 +186,17 @@ export const AgentOrb = () => {
             </button>
         </>
     );
-
     return (
         <OrbShell
             label="Agent"
             hint={
                 !connected
                     ? '插件未连接'
-                    : busy
-                        ? '正在执行…'
-                        : `上下文 ${formatTokens(state?.usage)}`
+                    : state?.compacting
+                        ? '正在压缩上下文…'
+                        : busy
+                            ? '正在执行…'
+                            : `上下文 ${formatTokens(state?.usage)}`
             }
             accent="from-fuchsia-500 via-purple-500 to-indigo-500"
             icon={<TerminalIcon className="h-6 w-6" />}
@@ -168,64 +228,140 @@ export const AgentOrb = () => {
                 </div>
             )}
 
-            <div className="min-h-0 flex-1 overflow-y-auto">
-                {messages.length === 0 && !streaming ? (
-                    <p className="p-4 text-[11px] leading-relaxed text-slate-500">
-                        在已登录的页面里执行脚本。模型可以直接调用页面自己的函数、读带凭证的
-                        fetch 结果，并在跨页面导航后继续同一轮任务。
-                    </p>
-                ) : (
-                    <ul className="divide-y divide-white/5">
-                        {messages.map((message) => (
-                            <MessageRow key={message.id} message={message} />
-                        ))}
-                    </ul>
-                )}
-
-                {streaming && (streaming.content || streaming.reasoning) && (
-                    <div className="border-t border-white/5 px-3 py-2">
-                        {streaming.reasoning && (
-                            <pre className="mb-1 max-h-32 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[9px] leading-relaxed text-slate-500">
-                                {streaming.reasoning}
-                            </pre>
+            {tab === 'scripts' ? (
+                <ScriptList
+                    scripts={scripts}
+                    busy={busy}
+                    onToggle={(id) => void act({ type: 'toggle-script', id })}
+                    onRun={(id) => void act({ type: 'run-script', id })}
+                    onRemove={(id) => void act({ type: 'remove-script', id })}
+                />
+            ) : (
+                <>
+                    <div className="min-h-0 flex-1 overflow-y-auto">
+                        {messages.length === 0 && !streaming ? (
+                            <p className="p-4 text-[11px] leading-relaxed text-slate-500">
+                                在已登录的页面里执行脚本。模型可以直接调用页面自己的函数、读带凭证的
+                                fetch 结果，并在跨页面导航后继续同一轮任务。
+                            </p>
+                        ) : (
+                            <ul className="divide-y divide-white/5">
+                                {messages.map((message) => (
+                                    <MessageRow
+                                        key={message.id}
+                                        message={message}
+                                        canEdit={canEdit}
+                                        onRemove={() => void act({ type: 'remove-message', id: message.id })}
+                                        onRewind={() => void rewind(message.id)}
+                                    />
+                                ))}
+                            </ul>
                         )}
-                        {streaming.content && (
-                            <pre className="whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-slate-300">
-                                {streaming.content}
-                            </pre>
+
+                        {streaming && (streaming.content || streaming.reasoning) && (
+                            <div className="border-t border-white/5 px-3 py-2">
+                                {streaming.reasoning && (
+                                    <pre className="mb-1 max-h-32 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[9px] leading-relaxed text-slate-500">
+                                        {streaming.reasoning}
+                                    </pre>
+                                )}
+                                {streaming.content && (
+                                    <pre className="whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-slate-300">
+                                        {streaming.content}
+                                    </pre>
+                                )}
+                            </div>
                         )}
                     </div>
-                )}
-            </div>
 
-            <div className="shrink-0 border-t border-white/10 p-2">
-                <div className="flex items-end gap-1.5">
-                    <textarea
-                        value={input}
-                        onChange={(e) => setInput(e.target.value)}
-                        onKeyDown={(e) => {
-                            // Enter 发送，Shift+Enter 换行。与聊天界面一致；
-                            // 不拦 IME 组合中的 Enter，否则中文输入法选词会误发。
-                            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                                e.preventDefault();
-                                send();
-                            }
-                        }}
-                        rows={2}
-                        placeholder="Enter 发送，Shift+Enter 换行"
-                        disabled={busy || state?.contextFull}
-                        className="min-h-0 flex-1 resize-none rounded-xl border border-white/10 bg-slate-950/60 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-slate-200 outline-none transition placeholder:text-slate-600 focus:border-white/25 disabled:opacity-50"
-                    />
-                    <button
-                        type="button"
-                        onClick={send}
-                        disabled={busy || !input.trim() || state?.contextFull}
-                        className="shrink-0 rounded-xl bg-indigo-500 px-3 py-2 text-[11px] font-semibold text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                        发送
-                    </button>
-                </div>
-            </div>
+                    <div className="shrink-0 border-t border-white/10 p-2">
+                        {/*
+                          次要动作放在输入框上方，不占标题栏。
+                          标题栏只有 440px 宽，塞进「脚本 / 停止 / 压缩 / 导出 /
+                          简洁 / 清空 / 收起」七个按钮会把标签挤到看不见。
+                        */}
+                        <div className="mb-1.5 flex items-center gap-2 px-0.5">
+                            <button
+                                type="button"
+                                onClick={() => void act({ type: 'compact' })}
+                                disabled={busy || state?.compacting || !state?.canCompact}
+                                title="把分界线之后的旧消息压成摘要（不可逆，但比清空保留更多）"
+                                className="text-[10px] text-slate-500 transition hover:text-slate-300 disabled:opacity-30"
+                            >
+                                {state?.compacting ? '压缩中…' : '压缩上下文'}
+                            </button>
+                            <span className="h-3 w-px bg-white/10" />
+                            <button
+                                type="button"
+                                onClick={() => exportAgentSession(messages)}
+                                disabled={messages.length === 0}
+                                title="导出完整会话（含推理过程）"
+                                className="text-[10px] text-slate-500 transition hover:text-slate-300 disabled:opacity-30"
+                            >
+                                导出
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => exportAgentSession(messages, { includeReasoning: false })}
+                                disabled={messages.length === 0}
+                                title="导出不含推理过程的版本（适合分享）"
+                                className="text-[10px] text-slate-500 transition hover:text-slate-300 disabled:opacity-30"
+                            >
+                                简洁版
+                            </button>
+                            <span className="ml-auto shrink-0 font-mono text-[9px] text-slate-600">
+                                档位
+                            </span>
+                            {/*
+                              压缩档位：决定"保留最近多少"（0.4 只留四成，1 全留）。
+                              它是**用户的选择**而不是模型能改的东西 —— 压缩不可逆，
+                              留多少该由人定。所以按钮放在这里而不是让模型调。
+                            */}
+                            {COMPACT_RATIOS.map((ratio) => (
+                                <button
+                                    key={ratio}
+                                    type="button"
+                                    onClick={() => void act({ type: 'set-compact-ratio', ratio })}
+                                    disabled={busy || state?.compacting}
+                                    className={`shrink-0 rounded px-1 text-[9px] transition disabled:opacity-30 ${
+                                        state?.compactRatio === ratio
+                                            ? 'bg-fuchsia-500/20 text-fuchsia-200'
+                                            : 'text-slate-600 hover:text-slate-300'
+                                    }`}
+                                >
+                                    {ratio}
+                                </button>
+                            ))}
+                        </div>
+                        <div className="flex items-end gap-1.5">
+                            <textarea
+                                value={input}
+                                onChange={(e) => setInput(e.target.value)}
+                                onKeyDown={(e) => {
+                                    // Enter 发送，Shift+Enter 换行。与聊天界面一致；
+                                    // 不拦 IME 组合中的 Enter，否则中文输入法选词会误发。
+                                    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                                        e.preventDefault();
+                                        send();
+                                    }
+                                }}
+                                rows={2}
+                                placeholder="Enter 发送，Shift+Enter 换行"
+                                disabled={busy || state?.contextFull}
+                                className="min-h-0 flex-1 resize-none rounded-xl border border-white/10 bg-slate-950/60 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-slate-200 outline-none transition placeholder:text-slate-600 focus:border-white/25 disabled:opacity-50"
+                            />
+                            <button
+                                type="button"
+                                onClick={send}
+                                disabled={busy || !input.trim() || state?.contextFull}
+                                className="shrink-0 rounded-xl bg-indigo-500 px-3 py-2 text-[11px] font-semibold text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                                发送
+                            </button>
+                        </div>
+                    </div>
+                </>
+            )}
         </OrbShell>
     );
 };
@@ -234,7 +370,17 @@ export const AgentOrb = () => {
 /* 消息行                                                                      */
 /* ========================================================================== */
 
-const MessageRow = ({ message }: { message: AgentMessage }) => {
+const MessageRow = ({
+    message,
+    canEdit,
+    onRemove,
+    onRewind,
+}: {
+    message: AgentMessage;
+    canEdit: boolean;
+    onRemove: () => void;
+    onRewind: () => void;
+}) => {
     const [expanded, setExpanded] = useState(false);
 
     const tone = useMemo(() => {
@@ -257,8 +403,33 @@ const MessageRow = ({ message }: { message: AgentMessage }) => {
     const long = body.length > 400;
     const shown = expanded || !long ? body : `${body.slice(0, 400)}…`;
 
+    /* 压缩分界线单独画：它既不是模型说的话也不是用户的提问 */
+    if (message.compaction) {
+        return (
+            <li className="bg-white/[0.03] px-3 py-2">
+                <div className="mb-1 flex items-center gap-2">
+                    <span className="h-px flex-1 bg-white/10" />
+                    <span className="text-[9px] text-slate-500">上下文已压缩</span>
+                    <span className="h-px flex-1 bg-white/10" />
+                </div>
+                <button
+                    type="button"
+                    onClick={() => setExpanded((v) => !v)}
+                    className="text-[9px] text-slate-500 hover:text-slate-300"
+                >
+                    {expanded ? '收起摘要' : '查看摘要'}
+                </button>
+                {expanded && (
+                    <pre className="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[9px] leading-relaxed text-slate-500">
+                        {message.compaction.summary}
+                    </pre>
+                )}
+            </li>
+        );
+    }
+
     return (
-        <li className="px-3 py-2">
+        <li className="group px-3 py-2">
             <div className="mb-0.5 flex items-center gap-1.5">
                 <span className="rounded bg-white/10 px-1 py-0.5 font-mono text-[9px] text-slate-400">
                     {badge}
@@ -276,6 +447,31 @@ const MessageRow = ({ message }: { message: AgentMessage }) => {
                     >
                         {expanded ? '收起' : '展开'}
                     </button>
+                )}
+                {/*
+                  两条历史编辑操作。只在引擎允许时出现（canEdit）：运行中或
+                  压缩中改动 messages 会和主循环抢同一个数组，而那个抢法没有
+                  正确答案 —— 界面禁用比让用户点了没反应好。
+                */}
+                {canEdit && (
+                    <span className={`${long ? '' : 'ml-auto'} flex shrink-0 gap-1 opacity-0 transition group-hover:opacity-100`}>
+                        <button
+                            type="button"
+                            onClick={onRewind}
+                            title="回退到这条之前（这条及之后的全部移除），提问会填回输入框"
+                            className="text-[9px] text-slate-500 hover:text-amber-300"
+                        >
+                            回退
+                        </button>
+                        <button
+                            type="button"
+                            onClick={onRemove}
+                            title="只删这一条"
+                            className="text-[9px] text-slate-500 hover:text-rose-300"
+                        >
+                            删除
+                        </button>
+                    </span>
                 )}
             </div>
 
@@ -295,6 +491,134 @@ const MessageRow = ({ message }: { message: AgentMessage }) => {
                 </pre>
             )}
         </li>
+    );
+};
+
+/* ========================================================================== */
+/* 脚本页                                                                      */
+/* ========================================================================== */
+
+/**
+ * 脚本清单。
+ *
+ * ## 为什么这个页面必须存在
+ *
+ * `script_store` 工具让**模型自己**存脚本，而 `urlPattern` 非空的脚本会在
+ * 页面就绪时自动执行 —— 也就是说模型可以装上一个"每次打开某站点就自动跑"
+ * 的东西。用户必须能看见它、停掉它、删掉它。没有这个页面，那件事就是
+ * 完全隐形的，而这既是能力缺失也是安全问题。
+ *
+ * ## 为什么没有"新建"按钮
+ *
+ * 脚本由模型写（它才有页面上下文去验证选择器）。手工从零写一段要在页面里跑的
+ * 代码，在球这个 440×640 的窗口里做不了，做了也是个更差的编辑器。
+ * 用户能做的是**审阅、启停、立刻跑一次、删掉** —— 那正是这里提供的四件事。
+ */
+const ScriptList = ({
+    scripts,
+    busy,
+    onToggle,
+    onRun,
+    onRemove,
+}: {
+    scripts: AgentScript[];
+    busy: boolean;
+    onToggle: (id: string) => void;
+    onRun: (id: string) => void;
+    onRemove: (id: string) => void;
+}) => {
+    const [expanded, setExpanded] = useState('');
+
+    if (scripts.length === 0) {
+        return (
+            <p className="p-4 text-[11px] leading-relaxed text-slate-500">
+                还没有保存的脚本。模型可以用 <code className="font-mono">script_store</code> 把
+                验证过的代码存下来，填了 URL 匹配的脚本会在页面打开时自动执行 ——
+                存下来的东西都会出现在这里。
+            </p>
+        );
+    }
+
+    return (
+        <div className="min-h-0 flex-1 overflow-y-auto">
+            <ul className="divide-y divide-white/5">
+                {scripts.map((script) => (
+                    <li key={script.id} className="px-3 py-2">
+                        <div className="flex items-center gap-1.5">
+                            {/*
+                              启停开关。自动执行的脚本靠它停 —— 删掉是另一个决定
+                              （下次还想跑就得让模型重写一遍），所以两者分开。
+                            */}
+                            <button
+                                type="button"
+                                onClick={() => onToggle(script.id)}
+                                disabled={busy}
+                                title={script.enabled ? '已启用：URL 命中时自动执行' : '已停用'}
+                                className={`h-3.5 w-6 shrink-0 rounded-full transition disabled:opacity-40 ${
+                                    script.enabled ? 'bg-emerald-500/70' : 'bg-white/15'
+                                }`}
+                            >
+                                <span
+                                    className={`block h-2.5 w-2.5 rounded-full bg-white transition ${
+                                        script.enabled ? 'translate-x-3' : 'translate-x-0.5'
+                                    }`}
+                                />
+                            </button>
+                            <span className="min-w-0 flex-1 truncate text-[11px] text-slate-200" title={script.description}>
+                                {script.name}
+                            </span>
+                            <button
+                                type="button"
+                                onClick={() => onRun(script.id)}
+                                disabled={busy}
+                                title="立刻在当前页面跑一次，结果会进对话"
+                                className="shrink-0 text-[9px] text-slate-500 transition hover:text-emerald-300 disabled:opacity-30"
+                            >
+                                运行
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => onRemove(script.id)}
+                                disabled={busy}
+                                className="shrink-0 text-[9px] text-slate-500 transition hover:text-rose-300 disabled:opacity-30"
+                            >
+                                删除
+                            </button>
+                        </div>
+
+                        {script.urlPattern && (
+                            <div className="mt-0.5 truncate font-mono text-[9px] text-slate-600" title={script.urlPattern}>
+                                匹配 {script.urlPattern}
+                            </div>
+                        )}
+                        {script.description && (
+                            <div className="mt-0.5 text-[9px] leading-relaxed text-slate-500">
+                                {script.description}
+                            </div>
+                        )}
+
+                        <button
+                            type="button"
+                            onClick={() => setExpanded((v) => (v === script.id ? '' : script.id))}
+                            className="mt-0.5 text-[9px] text-slate-500 hover:text-slate-300"
+                        >
+                            {expanded === script.id ? '收起代码' : '查看代码'}
+                        </button>
+                        {expanded === script.id && (
+                            <pre className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap break-words rounded bg-white/[0.03] p-1.5 font-mono text-[9px] leading-relaxed text-slate-400">
+                                {script.code}
+                            </pre>
+                        )}
+
+                        {script.lastResult && (
+                            <div className="mt-1 truncate font-mono text-[9px] text-slate-600" title={script.lastResult}>
+                                上次：{script.lastResult.slice(0, 120)}
+                            </div>
+                        )}
+                    </li>
+                ))}
+            </ul>
+        </div>
     );
 };
 

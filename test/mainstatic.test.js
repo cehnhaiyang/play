@@ -167,6 +167,16 @@ function collectDeclared(code) {
         [/\b(?:const|let|var)\s+([^;=\n{}[\]()]+)/g, addSimple],
         [/\b(?:const|let|var)\s*\{([^}]*)\}/g, addObjectPattern],
         [/\b(?:const|let|var)\s*\[([^\]]*)\]/g, addArrayPattern],
+        /*
+         * `for (const x of xs)` 的循环变量。
+         *
+         * 必须单列一条：上面那条简单声明模式取的是「const 之后到 = 或括号之前」
+         * 的整段，于是 `const x of xs` 被当成一个名字交给 addSimple，
+         * 而它含空格、过不了标识符判据 —— x 就没被登记，下面把它当未声明的调用报红。
+         * 实测：主进程里写一个 `for (const forward of set)` 就会得到一条假失败，
+         * 而假失败会训练人忽略这个检查，比没有检查更糟。
+         */
+        [/\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s+of\b/g, add],
         [/\bfunction\s+([A-Za-z_$][\w$]*)/g, add],
         [/\bclass\s+([A-Za-z_$][\w$]*)/g, add],
         [/\bcatch\s*\(\s*([A-Za-z_$][\w$]*)/g, add],

@@ -9,107 +9,340 @@
  *    表现为"用一会儿就不工作了"。所以下面所有 `addListener` 都在模块顶层，
  *    不包任何异步外壳。
  *
- * 2. **内存状态不可依赖。**
- *    开关与结果都落 `chrome.storage`。内存里只留"重建成本高且丢了无害"的东西
- *    （比如去重用的时间戳表 —— 丢了最多多推一条）。
+ * 2. **内存状态要有落盘副本，且落盘不能拖慢热路径。**
+ *    开关与结果都落 `chrome.storage`，但**读一律走内存镜像**（见 `sniffItems`）。
+ *    每次写入都去 `storage.get` 一次读回全量是错的：那是 O(n) 的，
+ *    页面上几百个响应涌进来时会把主路径从毫秒级拖到秒级 ——
+ *    表现为"嗅探结果出得极慢"，而单看任何一个函数都看不出问题。
  *
  * 3. **没有 DOM。**
  *    `document`、`window`、`localStorage` 都不存在。所以共享的 `const.ts`
  *    只能取它的纯函数与常量，不能碰它的存储工具函数。
  */
 import {
+    classifyByExt,
     classifyResponse,
     deriveTitle,
+    pathExtOf,
+    pathnameOf,
+    AUDIO_EXTS,
+    IMAGE_EXTS,
+    STREAM_EXTS,
+    VIDEO_EXTS,
 } from '../shared/classify';
+import { IN_PAGE_SCAN, type ScanCandidate, type ScanConfig } from '../shared/inpage';
 import {
     MAX_SNIFFED_ITEMS,
-    SNIFF_DEDUP_MS,
     STORAGE_KEYS,
     type BallEvent,
     type BallRequest,
     type ExtensionResponse,
     type SniffedMedia,
 } from '../shared/protocol';
+import type { MediaType } from '../../../shared/meta';
 import { agentBridge } from './agent-bridge';
-import { emitBridgeEvent, ensureBridge, isBridgeReady, setDispatcher } from './bridge-port';
+import { emitBridgeEvent, ensureBridge, setDispatcher } from './bridge-port';
 import type { AgentEngine } from '../agent/engine';
+import { isGenericTitle, isLinkFromPage } from '../../../shared/core/sniff';
 
 /* ========================================================================== */
 /* 1. 状态：一律落 storage，内存只做缓存                                       */
 /* ========================================================================== */
 
-/** 去重表：URL → 上次推送时间。丢了无害（最多多推一条），所以留在内存 */
+/**
+ * 写盘去抖窗口。
+ *
+ * 取 200ms：一次页面加载的几十条结果通常落在同一个窗口里，合并成一次写；
+ * 而用户手动点"清空"之后最多 200ms 盘上就同步了，不需要为它单独走一条同步路径。
+ */
+const FLUSH_DEBOUNCE_MS = 200;
+
+/**
+ * 嗅探结果的**内存镜像**，也是热路径上唯一被读的那一份。
+ *
+ * ## 为什么必须有它
+ *
+ * 原先是每次写入都 `storage.session.get` 读回全量数组、push、再整体写回。
+ * 单条代价看着很小（读 500 条约 8ms、写 500 条约 58ms），但两个问题叠在一起
+ * 就致命：
+ *
+ *   1. **写是 O(n)**。第 k 条要序列化 k 条记录，n 条下来总量是 O(n²)；
+ *   2. **写是串行的**（原来的 `serialize` 闸门）。一页几百个响应几乎同时
+ *      到达时，每个响应都要排在自己前面所有写操作之后，而每个写操作又越来越贵。
+ *
+ * 实测（`tools/_sniff-latency.js`，一张图都没有的干净页面 → 带 300 个响应的页面）：
+ *
+ *     页面上 0 个无关响应    → 媒体结果落库    34 ms
+ *     页面上 300 个无关响应  → 媒体结果落库  2867 ms
+ *
+ * 而真实网页动辄几百个请求，于是用户看到的就是"嗅探结果出得极其缓慢"。
+ * 更糟的是 `getEnabled()` 也走 `chrome.storage`，它排在同一个事件循环上，
+ * 于是连"要不要嗅探"这个判断本身都被拖慢。
+ *
+ * 改成内存镜像之后：判断与追加都是 O(1)，只有写盘是 O(n) 且**不阻塞追加**。
+ *
+ * ## 为什么不是"干脆不落盘"
+ *
+ * 结果要活过 service worker 的回收（空闲约 30 秒）—— 球下次打开时
+ * `sniffer-get-state` 得拿得到东西。所以盘上那份还是要写，只是不再由它当权威。
+ */
+let sniffItems: SniffedMedia[] = [];
+let sniffLoaded = false;
+
+/**
+ * 去重表：URL → 上次记录时间。
+ *
+ * 两条采集路径（网络层、页内扫描）都会撞上同一个地址，而它们的代价完全不同：
+ * 网络层每条都要解析分类，页内扫描一次能吐几百条。没有这张表的话，一个视频站
+ * 开着一晚上会把同一批分片地址反复推进列表。
+ *
+ * **丢了无害**（最多多记一条重复），所以留在内存里，不落盘。
+ */
 const recentUrls = new Map<string, number>();
 
 /**
- * 写操作的串行化闸门。
+ * 同一 URL 在这个窗口内不重复记录。
  *
- * `chrome.storage` 的读-改-写不是原子的：两个响应几乎同时到达时，
- * 两边都读到同一份旧数组、各自 push、后写的覆盖先写的 —— 结果是**丢条目**。
- * 嗅探恰恰是高频并发的（一个页面同时发几十个请求），所以必须串起来。
+ * 取 5 秒而不是更长：有些站点用同一个地址轮询（`/api/live` 每次都是新内容），
+ * 窗口太长会让"重新嗅探一次"看不出任何变化。而 5 秒足够盖住
+ * "网络层与页内扫描几乎同时发现同一个地址"这个主要场景。
  */
-let writeChain: Promise<unknown> = Promise.resolve();
-const serialize = <T>(task: () => Promise<T>): Promise<T> => {
-    const next = writeChain.then(task, task);
-    // 链上保留失败，避免一次拒绝卡死后续所有写操作
-    writeChain = next.catch(() => undefined);
-    return next;
+const SNIFF_DEDUP_MS = 5000;
+
+/**
+ * 记一次"这个地址刚刚被记录过"，顺便把过期的键清掉。
+ *
+ * 返回 true 表示这次该记（不在窗口内），false 表示刚记过、跳过。
+ * 清理跟着写入走，不另起定时器 —— 表的上限由调用频率自然限制在
+ * `1000 条` 这个量级，而一个空闲的 SW 不该留着定时器。
+ */
+const markRecent = (url: string, now: number): boolean => {
+    const last = recentUrls.get(url);
+    if (last && now - last < SNIFF_DEDUP_MS) return false;
+    recentUrls.set(url, now);
+    if (recentUrls.size > 1000) {
+        for (const [key, at] of recentUrls) {
+            if (now - at > SNIFF_DEDUP_MS) recentUrls.delete(key);
+        }
+    }
+    return true;
 };
 
+/** 写盘的去抖句柄。见 `flushItems` */
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * 把内存镜像写回 `storage.session`。
+ *
+ * ## 为什么是"首次排程"而不是"每次重置"
+ *
+ * 原先每追加一条就 `clearTimeout` 再重排，那在持续有请求的页面上会**永远不写盘**：
+ * 一个视频站的分片请求间隔小于 200ms，计时器每轮都被推后，SW 一旦被回收，
+ * 攒下的几百条全部消失。所以只在**没有待写时**排一次，之后不再推后 ——
+ * 上限是 200ms 一次写，而不是"最后一次请求之后 200ms"。
+ *
+ * ## 为什么值得去抖
+ *
+ * 一次页面加载能出几十条结果，逐条写就是几十次全量序列化，而中间那些状态
+ * 没有任何人会看到 —— 球拿的是内存镜像推过去的事件，不是盘上那份。
+ */
+const flushItems = (): void => {
+    if (flushTimer !== null) return;
+    flushTimer = setTimeout(() => {
+        flushTimer = null;
+        void chrome.storage.session.set({ [STORAGE_KEYS.SNIFFED_ITEMS]: sniffItems });
+    }, FLUSH_DEBOUNCE_MS);
+};
+
+/**
+ * 首次读盘，把镜像填上。
+ *
+ * 只做一次：SW 被回收后重新求值本文件时镜像会重建，
+ * 那时盘上那份就是上次去抖写下去的结果。
+ */
+const loadItems = async (): Promise<void> => {
+    if (sniffLoaded) return;
+    sniffLoaded = true;
+    const got = await chrome.storage.session.get(STORAGE_KEYS.SNIFFED_ITEMS);
+    const items = got[STORAGE_KEYS.SNIFFED_ITEMS];
+    sniffItems = Array.isArray(items) ? (items as SniffedMedia[]) : [];
+};
+
+/**
+ * 收下一条嗅探结果。
+ *
+ * ## 按 URL 合并，不是无脑追加
+ *
+ * 同一个地址会被**多条路径**发现：网络层看到它被请求、页内扫描在 DOM 里读到它、
+ * AI 又把它挑出来一次。而每一条路径拿到的标题质量不同 —— 网络层只有 URL 末段
+ * （`index.m3u8`），页内扫描有页面标题。无脑追加的话列表里会出现三条一模一样的
+ * 地址，其中两条标题是文件名，用户完全分不清该点哪一条。
+ *
+ * 所以这里以 URL 为键做 upsert，与旧实现（`useBrowse.ts` 的 `addLinks`）
+ * 同一套语义：
+ *   · 已存在且**旧标题没信息量、新标题有** → 用新的顶掉（升级）；
+ *   · 已存在且旧标题更好 → 保持原样（后来的"文件名"不该把页面标题挤掉）；
+ *   · 不存在 → 追加到最前。
+ *
+ * ## 为什么"没信息量"的判据要共用一份
+ *
+ * `isGenericTitle` 在 `shared/core/sniff.ts`，界面与插件读同一份。判据分叉过：
+ * 新增那条用较全的、更新那条只看 `startsWith('Media_')`，于是标题是文件名
+ * （`index.m3u8`，入库时页面标题还没拿到）的条目**永远升不了级**。
+ */
+const pushItem = (item: SniffedMedia): void => {
+    const index = sniffItems.findIndex((existing) => existing.url === item.url);
+    if (index < 0) {
+        sniffItems = [item, ...sniffItems].slice(0, MAX_SNIFFED_ITEMS);
+        flushItems();
+        return;
+    }
+
+    const existing = sniffItems[index];
+    // 只有"旧标题没用、新标题有用"才替换。两个都没用时保持原样 ——
+    // 否则一次网络层推送就能把 `index.m3u8` 换成更差的 `Media_stream`
+    if (!isGenericTitle(item.title) || isGenericTitle(existing.title)) {
+        // 保留首次发现时间：列表按它排序，"这个地址是什么时候出现的"不该
+        // 因为后来又被发现一次而跳到最前面
+        const merged = { ...existing, ...item, foundAt: existing.foundAt };
+        sniffItems = [...sniffItems];
+        sniffItems[index] = merged;
+        flushItems();
+    }
+};
+
+const clearItems = (): void => {
+    sniffItems = [];
+    sniffLoaded = true;
+    flushItems();
+};
+
+/**
+ * 清掉某个页面来的结果。
+ *
+ * 判据与界面上的「仅当前页」筛选**必须是同一条**（`isLinkFromPage`）：
+ * 列表里看得见的当前页条目，点「清空当前页」必须都能清掉。两处各写一份判据
+ * 的后果实测过 —— 没有 pageUrl 的条目在筛选下可见却清不掉，看起来像按钮没生效。
+ */
+const clearPage = (pageUrl: string): number => {
+    const before = sniffItems.length;
+    sniffItems = sniffItems.filter((item) => !isLinkFromPage(item, pageUrl));
+    flushItems();
+    return before - sniffItems.length;
+};
+
+/**
+ * 「清空当前页」的目标地址。
+ *
+ * 球传了自己的 pageUrl 就用它；没传时问**当前活动的标签页** ——
+ * 与 `sniffer-scan` 同一套解析，两处不能各问一次不同的问题。
+ */
+const resolveClearTarget = async (pageUrl?: string): Promise<string> => {
+    if (pageUrl) return pageUrl;
+    const tabId = await resolveTabId(undefined);
+    if (tabId === null) return '';
+    try {
+        const tab = await chrome.tabs.get(tabId);
+        return tab.url || '';
+    } catch {
+        return '';
+    }
+};
+
+/**
+ * 解析要操作哪个标签页。
+ *
+ * 球跑在 Electron 里，它**不知道** chrome 的 tabId（那是浏览器的概念）。
+ * 所以它一律不传，由这里问"当前活动的那个" —— 这也正是用户操作时看着的那个。
+ * 传了的话就用传的（自检脚本要指定标签页）。
+ */
+const resolveTabId = async (tabId?: number): Promise<number | null> => {
+    if (typeof tabId === 'number' && tabId >= 0) return tabId;
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    return typeof tab?.id === 'number' ? tab.id : null;
+};
+
+/** 同上，但没有标签页时直接报错 —— 扫描类操作没有目标可做 */
+const requireTabId = async (tabId?: number): Promise<number> => {
+    const resolved = await resolveTabId(tabId);
+    if (resolved === null) throw new Error('没有可扫描的标签页（当前窗口没有活动页面）');
+    return resolved;
+};
+
+/**
+ * 当前活动标签页的地址与标题。
+ *
+ * 球的「仅当前页」筛选与「清空当前页」都读它 —— 而"当前是哪个页面"是
+ * **浏览器侧的事实**，球（Electron 窗口）无从得知。
+ */
+const activePageInfo = async (): Promise<{ pageUrl: string; title: string }> => {
+    const tabId = await resolveTabId(undefined);
+    if (tabId === null) return { pageUrl: '', title: '' };
+    try {
+        const tab = await chrome.tabs.get(tabId);
+        return { pageUrl: tab.url || '', title: tab.title || '' };
+    } catch {
+        // 标签页刚好被关掉：返回空，让界面退回"全部"而不是拿着过期地址去清错页面
+        return { pageUrl: '', title: '' };
+    }
+};
+
+/**
+ * 总开关的内存镜像。
+ *
+ * 与 `sniffItems` 同一个理由，但更严重：`getEnabled()` 在**每一个响应**上都要
+ * 被问一次。走 `chrome.storage.local` 的话，一页几百个请求就是几百次跨进程读，
+ * 全部串在 `handleResponse` 的最前面 —— 那正是"嗅探结果出得极慢"的另一半原因
+ * （前一半是写盘 O(n²)，见 `sniffItems`）。
+ *
+ * 默认**关闭**：与应用侧"持续嗅探"开关同语义，不打开就不推任何结果。
+ * 默认开启会让用户一装插件就被动收集浏览记录。
+ */
+let snifferEnabled = false;
+let enabledLoaded = false;
+
 const getEnabled = async (): Promise<boolean> => {
-    const got = await chrome.storage.local.get(STORAGE_KEYS.SNIFFER_ENABLED);
-    // 默认**关闭**：与应用侧"持续嗅探"开关同语义，不打开就不推任何结果。
-    // 默认开启会让用户一装插件就被动收集浏览记录。
-    return got[STORAGE_KEYS.SNIFFER_ENABLED] === true;
+    if (!enabledLoaded) {
+        enabledLoaded = true;
+        const got = await chrome.storage.local.get(STORAGE_KEYS.SNIFFER_ENABLED);
+        snifferEnabled = got[STORAGE_KEYS.SNIFFER_ENABLED] === true;
+    }
+    return snifferEnabled;
 };
 
 const setEnabled = async (enabled: boolean): Promise<void> => {
+    snifferEnabled = enabled;
+    enabledLoaded = true;
     await chrome.storage.local.set({ [STORAGE_KEYS.SNIFFER_ENABLED]: enabled });
 };
 
+/**
+ * 读全部结果。
+ *
+ * 先等首次读盘完成（SW 刚被唤醒时镜像是空的，而盘上可能有上次的几十条），
+ * 之后一律直接返回内存镜像。
+ */
 const getItems = async (): Promise<SniffedMedia[]> => {
-    const got = await chrome.storage.session.get(STORAGE_KEYS.SNIFFED_ITEMS);
-    const items = got[STORAGE_KEYS.SNIFFED_ITEMS];
-    return Array.isArray(items) ? (items as SniffedMedia[]) : [];
+    await loadItems();
+    return sniffItems;
 };
 
 /**
- * 追加一条嗅探结果。
+ * 把一条事件广播出去。
  *
- * 列表是**工作列表不是归档**：超过上限丢最旧的。不设上限的话，
- * 开着嗅探刷一晚上视频，storage.session 会顶到 10MB 配额然后**所有写操作
- * 一起失败**（包括开关），表现为"插件整个失灵"。
- */
-const pushItem = (item: SniffedMedia): Promise<SniffedMedia[]> =>
-    serialize(async () => {
-        const items = await getItems();
-        const next = [item, ...items].slice(0, MAX_SNIFFED_ITEMS);
-        await chrome.storage.session.set({ [STORAGE_KEYS.SNIFFED_ITEMS]: next });
-        return next;
-    });
-
-const clearItems = (): Promise<void> =>
-    serialize(async () => {
-        await chrome.storage.session.set({ [STORAGE_KEYS.SNIFFED_ITEMS]: [] });
-    });
-
-/**
- * 把一条事件推给悬浮球。
+ * ## 为什么保留 `sendMessage` 这一条
  *
- * ## `target: 'ball'` 不能省
+ * 球已经搬到 Electron 窗口里，不再需要它 —— 但 offscreen 宿主文档
+ * （`offscreen/host.ts` 的 `ai-delta` / `ai-done`）仍然走同一条广播。
+ * 这里只负责把事件交出去，**收件人是谁由各自的 `target` 过滤决定**。
  *
- * 球的监听器按 `target === 'ball'` 过滤（它必须过滤 —— 否则 offscreen 的
- * 流式增量也会被它当成嗅探结果）。漏掉这个字段时，事件发得出去、球收得到，
- * 但**被球自己丢掉**：表现为"打开嗅探开关后列表一直是空的，刷新页面才出现"。
- * 这类故障没有任何报错，只能靠盯住这里的字段。
+ * ## 没人听时 sendMessage 会抛
  *
- * ## 球没开时 sendMessage 会抛
- *
- * "Could not establish connection" 是**正常情况**不是错误 —— 用户没在看那个
- * 标签页时球可能还没注入。必须吞掉，否则每次嗅探都在控制台刷一条红色报错，
+ * "Could not establish connection" 是**正常情况**不是错误 ——
+ * 没有任何监听者时它必然抛。必须吞掉，否则每次嗅探都在控制台刷一条红色报错，
  * 真正的故障反而被淹没。
  */
-const notifyBall = (event: BallEvent): void => {
+const broadcast = (event: BallEvent): void => {
     chrome.runtime.sendMessage(event).catch(() => undefined);
 };
 
@@ -219,14 +452,7 @@ const handleResponse = async (details: chrome.webRequest.OnResponseStartedDetail
     if (!classified) return;
 
     const now = Date.now();
-    const last = recentUrls.get(url);
-    if (last && now - last < SNIFF_DEDUP_MS) return;
-    recentUrls.set(url, now);
-    if (recentUrls.size > 1000) {
-        for (const [key, t] of recentUrls) {
-            if (now - t > SNIFF_DEDUP_MS) recentUrls.delete(key);
-        }
-    }
+    if (!markRecent(url, now)) return;
 
     /*
      * 页面地址已在上面的 resolvePageUrl 里查过，这里直接用。
@@ -245,8 +471,8 @@ const handleResponse = async (details: chrome.webRequest.OnResponseStartedDetail
         foundAt: now,
     };
 
-    await pushItem(item);
-    notifyBall({ target: 'ball', kind: 'sniffed-media', item });
+    pushItem(item);
+    broadcast({ target: 'ball', kind: 'sniffed-media', item });
     /*
      * 同一条结果也要推给应用里的悬浮球。
      *
@@ -256,6 +482,251 @@ const handleResponse = async (details: chrome.webRequest.OnResponseStartedDetail
      * 应用没连上时 `emitBridgeEvent` 自己会丢弃，不需要在外面判断。
      */
     emitBridgeEvent('sniffed-media', item);
+};
+
+/* ========================================================================== */
+/* 2.1 页内扫描                                                               */
+/* ========================================================================== */
+
+/**
+ * 一次页内扫描的采集配置。
+ *
+ * 后缀表**在这里现取**，不写死在 `inpage.ts` 里：那张表只有一份权威
+ * （`classify.ts` 从 `shared/core/media.ts` 派生），页面里的正则要拿它圈候选。
+ * 表变了而这里没跟着变，表现是"新后缀的网络层能嗅到、页内扫描永远嗅不到"。
+ */
+const scanConfig = (): ScanConfig => ({
+    allExts: [...STREAM_EXTS, ...VIDEO_EXTS, ...AUDIO_EXTS, ...IMAGE_EXTS],
+    limit: 400,
+    htmlLimit: 500_000,
+    matchLimit: 300,
+});
+
+/**
+ * 页内候选 → 一条嗅探结果。
+ *
+ * ## 分类一律走共享判据
+ *
+ * 候选里带 `hint`（元素标签、轨道类型），但它**只在分类器认不出时**兜底：
+ * `<video src="/play?id=1">` 既没有后缀也没有 content-type，只有标签能说明
+ * 它是什么。反过来，`hint='perf'` 的候选（Performance 里混着 JS 与 CSS）
+ * 没有任何类型信息，分类器认不出就必须丢掉 —— 按 hint 硬套一个类型会往
+ * 列表里灌一堆非媒体。
+ */
+const itemFromCandidate = (
+    candidate: ScanCandidate,
+    pageUrl: string,
+    pageTitle: string,
+): SniffedMedia | null => {
+    const { url, hint } = candidate;
+    if (!url) return null;
+
+    const classified = classifyByExt(url, pathExtOf(pathnameOf(url)));
+    const fallbackType: MediaType | null = hint === 'video' || hint === 'playinfo-video'
+        ? 'video'
+        : hint === 'audio' || hint === 'playinfo-audio'
+            ? 'audio'
+            : null;
+
+    const type = classified?.type ?? fallbackType;
+    if (!type) return null;
+
+    const ext = classified?.ext || DEFAULT_EXT_OF[type];
+    /*
+     * 标题优先用页面标题 + 轨道标签：`<video>` 的地址常常是 `/play?id=1`
+     * 这种没有文件名的形式，取 URL 末段只会得到 "id=1"。
+     */
+    const base = pageTitle || deriveTitle(url, '', ext);
+    const title = candidate.label ? `${base} - ${candidate.label}` : base;
+
+    return {
+        url,
+        title: title.slice(0, 120),
+        type,
+        ext,
+        source: 'local',
+        referer: pageUrl,
+        pageUrl,
+        foundAt: Date.now(),
+    };
+};
+
+/**
+ * 分类器认不出、又靠元素标签兜底时的后缀。
+ *
+ * 与旧实现（`useBrowse.ts` 的 `getMediaInfo`）同一取舍：条目没有后缀时
+ * 界面上的类型徽章会空着，而下载侧按 ext 决定文件名与方式。
+ */
+const DEFAULT_EXT_OF: Record<MediaType, string> = {
+    stream: 'm3u8',
+    video: 'mp4',
+    audio: 'mp3',
+    image: 'jpg',
+    document: 'txt',
+    gallery: 'gallery',
+    other: 'unknown',
+};
+
+/**
+ * 在指定标签页里跑一次全面扫描，把结果并进列表。
+ *
+ * ## 为什么只在开关打开或用户手动点时才跑
+ *
+ * 页内扫描要把代码送进页面执行（`chrome.scripting`），代价是页面上下文里
+ * 多跑一段脚本。默认关闭 = 用户不打开嗅探就一个字节都不进页面，
+ * 与"默认关闭"这个产品决定保持一致。
+ *
+ * ## 必须读 `frameId` 过滤
+ *
+ * 广告 iframe 里也有 video。不过滤的话一次扫描会把几十个广告素材收进来，
+ * 而它们全都归到主页面名下 —— 用户看到的是"这个页面怎么这么多东西"。
+ * 只扫主框架：子框架的资源在网络层那条路里仍然会以它自己的 URL 被嗅到。
+ */
+const scanTab = async (tabId: number): Promise<{ added: number }> => {
+    let results: chrome.scripting.InjectionResult<ReturnType<typeof IN_PAGE_SCAN>>[];
+    try {
+        results = await chrome.scripting.executeScript({
+            target: { tabId, frameIds: [0] },
+            func: IN_PAGE_SCAN,
+            args: [scanConfig()],
+        });
+    } catch (e) {
+        /*
+         * 扫描失败不是错误：`chrome://` 页面、扩展商店、PDF 阅读器都不允许注入，
+         * 而用户完全可能正在看那些页面。报一条红字只会让人以为功能坏了。
+         */
+        void e;
+        return { added: 0 };
+    }
+
+    const result = results?.[0]?.result;
+    if (!result) return { added: 0 };
+
+    const pageUrl = result.pageUrl || '';
+    const pageTitle = result.pageTitle || '';
+    let added = 0;
+
+    for (const candidate of result.items) {
+        const item = itemFromCandidate(candidate, pageUrl, pageTitle);
+        if (!item) continue;
+        // 页内扫描与网络层共用同一张去重表：同一个地址两条路径都发现时只留一条
+        if (!markRecent(item.url, Date.now())) continue;
+
+        pushItem(item);
+        emitBridgeEvent('sniffed-media', item);
+        added += 1;
+    }
+
+    return { added };
+};
+
+/**
+ * 页面加载完成 → 开关打开时自动扫一次。
+ *
+ * 这一条补的是网络层的**盲区**：开关是用户手动打开的，而页面早就加载完了，
+ * 那时网络层一条都看不到。用户打开开关的意图就是"把当前这页的东西列出来"，
+ * 只等新请求等于什么都没做。
+ */
+chrome.webNavigation.onCompleted.addListener((details) => {
+    // 只扫主框架，理由见 scanTab
+    if (details.frameId !== 0 || details.tabId < 0) return;
+    void (async () => {
+        if (!(await getEnabled())) return;
+        await scanTab(details.tabId);
+    })();
+});
+
+/**
+ * AI 深度嗅探：把页面源码交给模型，让它挑出结构化资源。
+ *
+ * ## 与页内扫描的分工
+ *
+ * 页内扫描是**确定性**的（正则 + API），它捞的是"页面上已经存在的地址"。
+ * 有些站点的直链不在页面里，而在接口返回的 JSON 里、或者被拼装出来 ——
+ * 那种只能靠模型读源码猜。所以这两条是互补的，不是替代关系。
+ *
+ * ## 走 offscreen 而不是在 SW 里 fetch
+ *
+ * 与 Agent 的模型调用同一条约束：一次补全可能十几秒到几分钟，而 SW 空闲
+ * 约 30 秒被回收。所以这里复用 Agent 那条 `ChatPort`，让 offscreen 文档
+ * 去发请求 —— 不另开一条通道，否则"模型调用在哪发"这件事会有两个答案。
+ *
+ * ## 页面源码从哪来
+ *
+ * 用页内扫描的同一个注入通道取 `documentElement.outerHTML`，不在 SW 里
+ * `fetch` 页面地址：那会丢掉登录态渲染出来的内容（SPA 尤其明显），
+ * 而"已登录页面上有什么"正是这个功能的用途。
+ */
+const AI_SNIFF_HTML_LIMIT = 80_000;
+
+const aiSniffTab = async (tabId: number): Promise<{ added: number }> => {
+    let html = '';
+    let pageUrl = '';
+    let pageTitle = '';
+    try {
+        const results = await chrome.scripting.executeScript({
+            target: { tabId, frameIds: [0] },
+            func: (limit: number) => ({
+                html: document.documentElement.outerHTML.slice(0, limit),
+                pageUrl: location.href,
+                pageTitle: (document.title || '').trim(),
+            }),
+            args: [AI_SNIFF_HTML_LIMIT],
+        });
+        const result = results?.[0]?.result;
+        if (!result) return { added: 0 };
+        html = result.html;
+        pageUrl = result.pageUrl;
+        pageTitle = result.pageTitle;
+    } catch (e) {
+        void e;
+        return { added: 0 };
+    }
+
+    if (!html.trim()) return { added: 0 };
+
+    /*
+     * 模型调用交给 offscreen 文档。
+     *
+     * SW 里**不能** import `shared/ai/AiService.ts`：它顶层 import 了
+     * `shared/core/storage.ts`，那个模块碰 `localStorage` —— 而 SW 里没有。
+     * 表现是"插件装上就崩"，且崩在模块顶层、没有任何指向性错误信息。
+     * `test/extsniffer.test.js` 有一条沙箱断言正是盯着这类问题。
+     */
+    await agentBridge.ensureOffscreen();
+    const response = (await chrome.runtime.sendMessage({
+        target: 'host',
+        kind: 'ai-extract-links',
+        html,
+        title: pageTitle,
+    })) as ExtensionResponse<{ links: Array<Pick<SniffedMedia, 'url' | 'title' | 'type' | 'ext'>> }> | undefined;
+
+    if (!response) throw new Error('offscreen 宿主无响应（可能创建失败）');
+    if (!response.ok) throw new Error(response.error || 'AI 提取失败');
+    const extracted = response.result?.links || [];
+
+    let added = 0;
+    for (const link of extracted) {
+        const now = Date.now();
+        if (!markRecent(link.url, now)) continue;
+
+        const item: SniffedMedia = {
+            url: link.url,
+            title: link.title,
+            type: link.type,
+            ext: link.ext,
+            // 来源标 'ai'：与页内扫描（'local'）、网络层（'network'）分开，
+            // 用户能看出这条是模型猜的还是页面里确实有的
+            source: 'ai',
+            referer: pageUrl,
+            pageUrl,
+            foundAt: now,
+        };
+        pushItem(item);
+        emitBridgeEvent('sniffed-media', item);
+        added += 1;
+    }
+    return { added };
 };
 
 /* ========================================================================== */
@@ -367,13 +838,41 @@ const dispatchBridge = async (method: string, params: unknown): Promise<unknown>
         case 'sniffer-get-state':
             return { enabled: await getEnabled(), items: await getItems() };
 
-        case 'sniffer-set-enabled':
-            await setEnabled(Boolean((args as { enabled?: boolean }).enabled));
+        case 'sniffer-set-enabled': {
+            const enabled = Boolean((args as { enabled?: boolean }).enabled);
+            await setEnabled(enabled);
+            /*
+             * 打开开关时立刻扫一次当前标签页。
+             *
+             * 不这么做的话，用户点开开关看到的是一个空列表 —— 网络层只能看到
+             * **之后**发生的请求，而页面早就加载完了。旧实现（useBrowse 的
+             * `setSniffEnabled`）就是"打开 = 切页自动扫描 + 网络层持续推送"，
+             * 这里保持一致。
+             */
+            if (enabled) {
+                const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                if (typeof tab?.id === 'number') await scanTab(tab.id);
+            }
             return { enabled: await getEnabled() };
+        }
 
         case 'sniffer-clear':
-            await clearItems();
+            clearItems();
             return { cleared: true };
+
+        case 'sniffer-clear-page': {
+            const pageUrl = await resolveClearTarget((args as { pageUrl?: string }).pageUrl);
+            return { removed: clearPage(pageUrl) };
+        }
+
+        case 'sniffer-scan':
+            return scanTab(await requireTabId());
+
+        case 'sniffer-active-page':
+            return activePageInfo();
+
+        case 'sniffer-ai-scan':
+            return aiSniffTab(await requireTabId());
 
         case 'downloads-start': {
             const p = args as unknown as { url: string; filename?: string };
@@ -482,8 +981,22 @@ const dispatchBall = async (message: BallRequest): Promise<unknown> => {
             return { enabled: await getEnabled(), items: await getItems() };
 
         case 'sniffer-clear':
-            await clearItems();
+            clearItems();
             return { cleared: true };
+
+        case 'sniffer-clear-page': {
+            const pageUrl = await resolveClearTarget(message.pageUrl);
+            return { removed: clearPage(pageUrl) };
+        }
+
+        case 'sniffer-scan':
+            return scanTab(await requireTabId(message.tabId));
+
+        case 'sniffer-active-page':
+            return activePageInfo();
+
+        case 'sniffer-ai-scan':
+            return aiSniffTab(await requireTabId(message.tabId));
 
         case 'downloads-start':
             return { downloadId: await downloadsStart(message.url, message.filename) };

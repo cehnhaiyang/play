@@ -30,7 +30,7 @@
  * 会让"这个字段能不能放"变成看运气 —— 在这里随手塞一张 base64 图片没问题，
  * 同样的代码走桥就会静默失败。
  */
-import type { AiChatMessage, AiUsage, MediaType } from '../../../shared/meta';
+import type { AiChatMessage, AiUsage, MediaSourceChannel, MediaType } from '../../../shared/meta';
 
 /* ========================================================================== */
 /* 0. 公共                                                                     */
@@ -46,15 +46,23 @@ export interface ExtensionResponse<T = unknown> {
 /**
  * 一条嗅探结果。
  *
- * 形状与 `shared/meta/interface.ts` 的 `FoundLink` 对齐（`source` 固定 'network'），
- * 这样将来交给播放器时不需要再转一次。
+ * 形状与 `shared/meta/interface.ts` 的 `FoundLink` 对齐，这样将来交给播放器时
+ * 不需要再转一次。
  */
 export interface SniffedMedia {
     url: string;
     title: string;
     type: MediaType;
     ext: string;
-    source: 'network';
+    /**
+     * 这条是怎么来的。
+     *
+     * 三个值对用户有实质区别，不是同义标签：
+     *   · `network` —— webRequest 观察到的真实请求（最可信，一定能下）；
+     *   · `local` —— 页内扫描（DOM / Performance / 源码正则）找到的地址；
+     *   · `ai` —— 模型从页面源码里挑出来的候选（**可能是猜的**）。
+     */
+    source: MediaSourceChannel;
     /** 防盗链 Referer。Chrome 的 webRequest **不提供** referrer，靠请求头捕获 */
     referer?: string;
     /** 发起该请求的页面地址 */
@@ -65,9 +73,6 @@ export interface SniffedMedia {
 
 /** 嗅探列表上限。超过后丢最旧的：这是工作列表不是归档 */
 export const MAX_SNIFFED_ITEMS = 500;
-
-/** 同一 URL 在这个窗口内不重复推送（毫秒） */
-export const SNIFF_DEDUP_MS = 5000;
 
 /** 嗅探列表上限在界面上也要用（面板与悬浮球各自裁剪本地副本） */
 export const SNIFF_RENDER_MAX = 300;
@@ -109,6 +114,24 @@ export type BallRequest =
     | { target: 'sw'; kind: 'sniffer-get-state' }
     | { target: 'sw'; kind: 'sniffer-set-enabled'; enabled: boolean }
     | { target: 'sw'; kind: 'sniffer-clear' }
+    /** 清掉某个页面来的全部结果（「清空当前页」）。不传 pageUrl 时清当前活动标签页 */
+    | { target: 'sw'; kind: 'sniffer-clear-page'; pageUrl?: string }
+    /**
+     * 手动嗅探一次：页内扫描（DOM / Performance / __playinfo__ / 源码正则）。
+     *
+     * 与"持续嗅探"开关无关 —— 开关关着时点它也只扫这一次，
+     * 网络层不会因此开始推送。旧实现（useBrowse 的 `scan`）就是这个语义。
+     */
+    | { target: 'sw'; kind: 'sniffer-scan'; tabId?: number }
+    /** AI 深度嗅探：把页面源码交给模型挑结构化资源 */
+    | { target: 'sw'; kind: 'sniffer-ai-scan'; tabId?: number }
+    /**
+     * 当前活动标签页。
+     *
+     * 球需要它来判「仅当前页」与「清空当前页」—— 而"当前是哪个页面"是
+     * **浏览器侧的事实**，球（Electron 窗口）无从得知。
+     */
+    | { target: 'sw'; kind: 'sniffer-active-page' }
     | { target: 'sw'; kind: 'downloads-start'; url: string; filename?: string }
     /** 读引擎当前快照。球每次打开面板都要一次 —— 它可能刚随页面注入 */
     | { target: 'sw'; kind: 'agent-snapshot' }
@@ -174,7 +197,18 @@ export type HostRequest =
     | HostChatRequest
     | { target: 'host'; kind: 'ai-ready' }
     /** 用户点了停止：中止在途的那次补全 */
-    | { target: 'host'; kind: 'ai-cancel'; requestId: string };
+    | { target: 'host'; kind: 'ai-cancel'; requestId: string }
+    /**
+     * AI 深度嗅探：把页面源码交给模型挑出结构化资源。
+     *
+     * 与 `ai-chat` 分开而不是复用它：这一条**不需要流式**（一次返回一个数组），
+     * 所以走普通的请求/应答就够，不必套上增量广播与 requestId 认领那一套。
+     *
+     * 它必须落在 offscreen 的理由与 ai-chat 完全相同：SW 空闲约 30 秒被回收，
+     * 而一次提取可能要十几秒。SW 侧不 import AiService —— 那个模块会拖进
+     * 整个服务商预设表与 fetch 封装，而 SW 里连 `localStorage` 都没有。
+     */
+    | { target: 'host'; kind: 'ai-extract-links'; html: string; title: string };
 
 /** 宿主文档推给悬浮球的流式增量与终局 */
 export type HostEvent =

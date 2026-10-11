@@ -25,6 +25,7 @@
     "../shared/core/**/*.ts",
     "../shared/meta/**/*.ts",
     "../extension/src/shared/classify.ts",
+    "../extension/src/shared/inpage.ts",
     "../extension/src/agent/**/*.ts"
   ]
 }

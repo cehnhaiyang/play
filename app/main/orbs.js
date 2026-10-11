@@ -17,6 +17,17 @@
  * Electron 这边三样都成立：`frame: false` 去掉标题栏，`transparent: true`
  * 让四角真正透明（否则圆角外面是一块方形的底色），`setAlwaysOnTop` 置顶。
  *
+ * ## 置顶必须是**常驻**的，展开时也不能取消
+ *
+ * 曾经写成"收起态才置顶，展开成一个面板还压在所有窗口上面很烦人"。那是错的，
+ * 而且是实测出来的：置顶窗口（WS_EX_TOPMOST）与普通窗口**不在同一个 Z 序带**里，
+ * 一个普通窗口无论怎么点、怎么抢焦点，都盖不住置顶窗口 —— 反过来也一样，
+ * 一旦把置顶取消，球立刻掉到**所有**普通窗口下面，而不只是"不再压着别人"。
+ *
+ * 症状就是"球不在最上层"：桌面上任何窗口（浏览器、资源管理器、甚至被最小化
+ * 又恢复的那个）都能把它盖住，而用户点球是点不到的。实测数据：
+ * 展开前球心处 `WindowFromPoint` 是球自己，展开后同一个点变成了浏览器窗口。
+ *
  * ## 每个球一个独立窗口
  *
  * 不是"一个窗口放两个球"。两个球各自有生命周期、各自的位置、各自的展开尺寸，
@@ -211,6 +222,15 @@ const createOrb = (id) => {
         skipTaskbar: true,
         hasShadow: false,
         show: false,
+        /*
+         * 置顶在**构造参数**里给，而不是等 ready-to-show 再调。
+         *
+         * 两者差在"球第一次画出来时是不是已经置顶"：构造参数生效于窗口创建，
+         * `showInactive()` 之后不可能出现一帧没置顶的球。等到 ready-to-show
+         * 再调的话，球会先以普通窗口的身份出现、再跳上去 —— 用户看到的是
+         * 球闪一下才到最上层，而且这一帧里点它会被下面的窗口接走。
+         */
+        alwaysOnTop: true,
         webPreferences: {
             preload: path.join(__dirname, 'orb-preload.js'),
             contextIsolation: true,
@@ -229,7 +249,8 @@ const createOrb = (id) => {
 
     win.once('ready-to-show', () => {
         win.showInactive();
-        // 收起态才置顶：展开成一个 440×640 的面板还压在所有窗口上面很烦人
+        // 层级名 'floating'：悬浮球要压住普通窗口，但不该压住系统级的东西
+        // （任务栏、输入法候选、UAC 弹窗）。'screen-saver' 那一档会盖住它们。
         win.setAlwaysOnTop(true, 'floating');
     });
 
@@ -256,7 +277,15 @@ const setOpen = (id, open) => {
 
     const area = workAreaFor(center);
     entry.win.setBounds(frameFor(center, size, area));
-    entry.win.setAlwaysOnTop(!open, 'floating');
+    /*
+     * 改完尺寸**重申一次置顶**，而不是按 open 切换它。
+     *
+     * Windows 上改窗口尺寸会重建非客户区，某些路径下 WS_EX_TOPMOST 会跟着丢
+     * （任务栏挪位、DPI 变化、以及"另一个置顶窗口刚被销毁"时都会触发重排）。
+     * 重申的代价是一次 SetWindowPos，而丢掉的代价是球沉到所有窗口下面 ——
+     * 用户点不到它，也没有任何办法把它叫回来（球没有系统菜单、不在任务栏里）。
+     */
+    entry.win.setAlwaysOnTop(true, 'floating');
     entry.open = open;
 
     // 把球心记下来。展开态的中心与球形态的中心在收敛后可能不同，

@@ -13,6 +13,7 @@
     "tabs",
     "webRequest",
     "webNavigation",
+    "scripting",
     "cookies",
     "downloads",
     "debugger",

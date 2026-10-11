@@ -85,6 +85,28 @@ const main = async () => {
             `${info?.bounds?.width}x${info?.bounds?.height}`);
         check('窗口可见', info?.isVisible === true, `isVisible=${info?.isVisible}`);
 
+        /*
+         * 展开之后**仍然**置顶。
+         *
+         * 这一条单独存在，是因为"折叠态置顶"曾经是真的、"展开态置顶"是假的：
+         * setOpen 里写着 `setAlwaysOnTop(!open)`，展开时主动把置顶取消了。
+         * 只测折叠态的检查永远发现不了它 —— 而用户看到的就是"球不在最上层"。
+         */
+        await page.evaluate('window.orbApi.setOpen(true)');
+        await sleep(600);
+        const opened = await page.evaluate('window.orbApi.windowInfo()');
+        check('展开态仍然置顶', opened?.isAlwaysOnTop === true,
+            `isAlwaysOnTop=${opened?.isAlwaysOnTop}`);
+        check('展开态尺寸是面板尺寸', opened?.bounds?.width > 64 && opened?.bounds?.height > 64,
+            `${opened?.bounds?.width}x${opened?.bounds?.height}`);
+
+        await page.evaluate('window.orbApi.setOpen(false)');
+        await sleep(600);
+        const closed = await page.evaluate('window.orbApi.windowInfo()');
+        check('收起后回到 64x64 且仍置顶',
+            closed?.bounds?.width === 64 && closed?.bounds?.height === 64 && closed?.isAlwaysOnTop === true,
+            `${closed?.bounds?.width}x${closed?.bounds?.height} topmost=${closed?.isAlwaysOnTop}`);
+
         centers.push({
             title: t.title,
             x: (info?.bounds?.x ?? 0) + (info?.bounds?.width ?? 0) / 2,

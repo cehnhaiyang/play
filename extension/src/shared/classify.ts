@@ -164,6 +164,54 @@ export interface ClassifiedMedia {
     ext: string;
 }
 
+/**
+ * 按**后缀**分类，不看 content-type。
+ *
+ * 页内扫描（`shared/inpage.ts` 的候选）没有响应头可读 —— 那些地址很多根本
+ * 没被请求过，正是这一层要捞的东西。所以它只能走后缀判据。
+ *
+ * 与 `classifyResponse` 共用 `STREAM_EXTS` 等派生表，不另写一份：
+ * 同一个地址走网络层与走页内扫描必须同结论。
+ */
+export const classifyByExt = (url: string, ext: string): ClassifiedMedia | null => {
+    const e = (ext || '').toLowerCase();
+    /*
+     * 后缀为空**不能提前返回**。
+     *
+     * 页内扫描捞到的地址大多是 `/api/play?file=movie.mp4` 这种没有路径后缀的
+     * 形式，真正的类型藏在 query 里。早返回会让整条 query 判据永远走不到，
+     * 表现为"页内扫描对这类站点一条都认不出来"。
+     */
+    if (e) {
+        /*
+         * TS 分片同样要丢。页内扫描（Performance、源码正则）会捞到整页
+         * `segNNN.ts`，少了这道闸一次扫描就能灌进几百条噪声 —— 而网络层那条路
+         * 已经拦了，同一个页面走两条路径不该得出不同结论。
+         */
+        if (e === 'ts' && isHlsSegment(url, pathnameOf(url))) return null;
+        if (STREAM_EXTS.includes(e)) return { type: 'stream', ext: e };
+        if (VIDEO_EXTS.includes(e)) return { type: 'video', ext: e };
+        if (AUDIO_EXTS.includes(e)) return { type: 'audio', ext: e };
+        if (IMAGE_EXTS.includes(e)) return { type: 'image', ext: e };
+    }
+
+    // 路径后缀认不出时再看 query 里藏的。与 classifyResponse 的第 3 步同一判据，
+    // 只是那边有 content-type 挡在前面。
+    try {
+        for (const [, val] of new URL(url).searchParams.entries()) {
+            const hitStream = matchExtInValue(val, STREAM_EXTS);
+            if (hitStream) return { type: 'stream', ext: hitStream };
+            const hitVideo = matchExtInValue(val, VIDEO_EXTS);
+            if (hitVideo) return { type: 'video', ext: hitVideo };
+            const hitAudio = matchExtInValue(val, AUDIO_EXTS);
+            if (hitAudio) return { type: 'audio', ext: hitAudio };
+        }
+    } catch {
+        // 解析不出 query 就只靠路径后缀
+    }
+    return null;
+};
+
 export interface ClassifyInput {
     url: string;
     /** 响应头里的 content-type（大小写不敏感，可带参数） */

@@ -84,6 +84,25 @@ export const BRIDGE_ENDPOINTS = {
         route: 'extension',
         reason: '清空的是插件的 storage.session，应用没有这份数据。',
     },
+    'sniffer-clear-page': {
+        route: 'extension',
+        reason: '同 sniffer-clear。判据（isLinkFromPage）也长在插件里，'
+            + '应用再写一份会出现"界面看得见、清不掉"的条目。',
+    },
+    'sniffer-scan': {
+        route: 'extension',
+        reason: '页内扫描要 chrome.scripting 把代码送进目标标签页，应用没有这个能力；'
+            + '扫描结果也直接进插件的列表，不过桥。',
+    },
+    'sniffer-ai-scan': {
+        route: 'extension',
+        reason: '同 sniffer-scan：取页面源码靠 chrome.scripting，模型调用走插件的 offscreen 文档。',
+    },
+    'sniffer-active-page': {
+        route: 'extension',
+        reason: '"当前是哪个标签页"是浏览器的事实，只有 chrome.tabs 知道；'
+            + '球用它判「仅当前页」与「清空当前页」。',
+    },
     'downloads-start': {
         route: 'extension',
         reason: 'chrome.downloads 是浏览器的下载管理器，进度与断点都由它持有；'
