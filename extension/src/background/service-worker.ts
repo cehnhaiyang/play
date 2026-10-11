@@ -115,6 +115,11 @@ const SNIFF_DEDUP_MS = 5000;
  * 返回 true 表示这次该记（不在窗口内），false 表示刚记过、跳过。
  * 清理跟着写入走，不另起定时器 —— 表的上限由调用频率自然限制在
  * `1000 条` 这个量级，而一个空闲的 SW 不该留着定时器。
+ *
+ * ⚠️ **去重表与列表必须同生共死**：它记的是"这个地址已经在列表里了"，
+ * 所以列表被清空时它必须跟着清（见 `clearItems` / `clearPage`）。
+ * 只清列表不清它的话，"清空之后立刻再扫一次"会一条都扫不到 —— 而用户
+ * 刚清完正是最想重新扫一遍的时候。
  */
 const markRecent = (url: string, now: number): boolean => {
     const last = recentUrls.get(url);
@@ -159,13 +164,49 @@ const flushItems = (): void => {
  *
  * 只做一次：SW 被回收后重新求值本文件时镜像会重建，
  * 那时盘上那份就是上次去抖写下去的结果。
+ *
+ * ## 为什么是**合并**而不是覆盖
+ *
+ * 读盘是异步的，而追加是**同步**的（那是热路径，见 `pushItem`）。两者一交叠，
+ * 覆盖就会丢数据：
+ *
+ *     ① 扫描到一个媒体地址 → pushItem 把它放进镜像（同步，立即生效）
+ *     ② 球第一次问状态 → getItems → loadItems 开始读盘
+ *     ③ 读回来的是**上一次写盘**的内容，里面没有 ① 那条
+ *     ④ 直接赋值 → ① 那条没了
+ *
+ * 实测过：`sniffer-scan` 回 `{added: 2}`，紧接着 `sniffer-get-state` 返回空列表 ——
+ * 扫描说成功了，列表里什么都没有。用户看到的就是"点了嗅探没反应"。
+ *
+ * 合并按 URL 去重，并按发现时间重排：两个来源各自的顺序都是对的，
+ * 拼起来之后必须重新排一次，否则新条目会全部沉到旧条目后面。
+ *
+ * ## `clearedAt` 挡的是同一类竞态的另一半
+ *
+ * 合并的前提是"盘上那份是旧的、镜像是新的"。但用户在这段读盘期间点了"清空"
+ * 时前提反过来了：盘上那份成了**用户已经删掉的东西**，合并会把它们复活。
+ * 所以清空动作会盖一个时间戳，读盘回来发现它变了就不再合并。
  */
+let clearedAt = 0;
+
 const loadItems = async (): Promise<void> => {
     if (sniffLoaded) return;
     sniffLoaded = true;
+    const startedAt = clearedAt;
     const got = await chrome.storage.session.get(STORAGE_KEYS.SNIFFED_ITEMS);
-    const items = got[STORAGE_KEYS.SNIFFED_ITEMS];
-    sniffItems = Array.isArray(items) ? (items as SniffedMedia[]) : [];
+    if (clearedAt !== startedAt) return;
+
+    const saved = got[STORAGE_KEYS.SNIFFED_ITEMS];
+    if (!Array.isArray(saved) || saved.length === 0) return;
+
+    // 镜像里已有的（读盘期间进来的）优先：它们比盘上那份新
+    const known = new Set(sniffItems.map((item) => item.url));
+    const restored = (saved as SniffedMedia[]).filter((item) => item && !known.has(item.url));
+    if (restored.length === 0) return;
+
+    sniffItems = [...sniffItems, ...restored]
+        .sort((a, b) => b.foundAt - a.foundAt)
+        .slice(0, MAX_SNIFFED_ITEMS);
 };
 
 /**
@@ -214,6 +255,10 @@ const pushItem = (item: SniffedMedia): void => {
 const clearItems = (): void => {
     sniffItems = [];
     sniffLoaded = true;
+    // 盖时间戳：读盘在途时它会让那次读盘放弃合并，见 loadItems
+    clearedAt = Date.now();
+    // 去重表记的是"这个地址已经在列表里了"，列表空了它就得跟着空
+    recentUrls.clear();
     flushItems();
 };
 
@@ -226,7 +271,19 @@ const clearItems = (): void => {
  */
 const clearPage = (pageUrl: string): number => {
     const before = sniffItems.length;
+    const removed = sniffItems.filter((item) => isLinkFromPage(item, pageUrl));
     sniffItems = sniffItems.filter((item) => !isLinkFromPage(item, pageUrl));
+    // 同 clearItems：读盘在途时被清掉的条目不能从盘上复活
+    clearedAt = Date.now();
+    /*
+     * 去重表里**只摘掉被清的那些**。
+     *
+     * 整个清空是不行的：清掉 A 页的条目之后，A 页的地址要能重新被发现，
+     * 而 B 页那些还留在列表里的地址不该被重复记一遍 —— 那会让列表里
+     * 出现同一个地址的第二条（`pushItem` 按 URL 合并，所以实际是多一次
+     * 无谓的分类与写盘，且标题升级的判据会被绕过）。
+     */
+    for (const item of removed) recentUrls.delete(item.url);
     flushItems();
     return before - sniffItems.length;
 };
@@ -234,19 +291,12 @@ const clearPage = (pageUrl: string): number => {
 /**
  * 「清空当前页」的目标地址。
  *
- * 球传了自己的 pageUrl 就用它；没传时问**当前活动的标签页** ——
- * 与 `sniffer-scan` 同一套解析，两处不能各问一次不同的问题。
+ * 球传了自己的 pageUrl 就用它；没传时问当前活动的标签页 —— 判据与
+ * `sniffer-active-page` 同一个（`activePageInfo`），两处不能各问一次不同的问题。
  */
 const resolveClearTarget = async (pageUrl?: string): Promise<string> => {
     if (pageUrl) return pageUrl;
-    const tabId = await resolveTabId(undefined);
-    if (tabId === null) return '';
-    try {
-        const tab = await chrome.tabs.get(tabId);
-        return tab.url || '';
-    } catch {
-        return '';
-    }
+    return (await activePageInfo()).pageUrl;
 };
 
 /**
@@ -587,6 +637,21 @@ const scanTab = async (tabId: number): Promise<{ added: number }> => {
     try {
         results = await chrome.scripting.executeScript({
             target: { tabId, frameIds: [0] },
+            /*
+             * **必须进主世界。**
+             *
+             * `executeScript` 默认落在**隔离世界**（ISOLATED），那里有自己的一份
+             * `window` —— 页面的全局对象在那里根本不存在。而 `__playinfo__`、
+             * `dplayer` 这类播放器状态正是这一层要读的东西：少了这个参数，
+             * 整条"播放器全局对象"的采集路径永远返回空，且**不报任何错**。
+             *
+             * 实测过：一个只把地址写在 `__playinfo__` 里的页面，隔离世界下扫不到，
+             * 主世界下能扫到（test/e2e/verify-sniff-coverage.js）。
+             *
+             * 主世界注入不受页面 CSP 约束 —— 它不是 <script> 标签，是调试协议
+             * 直接求值，所以 `connect-src` 之类的白名单管不到它。
+             */
+            world: 'MAIN',
             func: IN_PAGE_SCAN,
             args: [scanConfig()],
         });
@@ -666,6 +731,8 @@ const aiSniffTab = async (tabId: number): Promise<{ added: number }> => {
     try {
         const results = await chrome.scripting.executeScript({
             target: { tabId, frameIds: [0] },
+            // 同 scanTab：页面自己的全局（`__playinfo__` 一类）只在主世界可见
+            world: 'MAIN',
             func: (limit: number) => ({
                 html: document.documentElement.outerHTML.slice(0, limit),
                 pageUrl: location.href,
@@ -827,9 +894,15 @@ const downloadsStart = async (url: string, filename?: string) => {
  *
  * `dispatchBall` 是**页面里那个球**（content script）走的路径，它自带
  * `chrome.runtime`，直接发消息即可。两者做的是同一批事，但入口不同：
- * 一个在扩展进程内，一个跨进程。**故意不合并成一个函数** ——
- * 合并就要把"调用方在哪"变成参数，而那个参数只影响怎么回包，
- * 不影响做什么；拆开之后每条路径都短，谁调谁一目了然。
+ * 一个在扩展进程内，一个跨进程。
+ *
+ * **重叠的部分只有这一份实现** —— `dispatchBall` 把嗅探、下载、Agent 那几条
+ * 原样转发到这里，只有球独有、面板没有上下文的（`cookies-*`、`host-ensure`、
+ * `page-eval`）留在那边。两份实现必然漂移，实测过一次：给
+ * `sniffer-set-enabled` 加了"打开时自动扫一次"，只加在这里，而球走的是
+ * `dispatchBall` 那一份 —— 用户点开开关看到的仍是空列表，插件自检却全绿。
+ *
+ * 所以：**新增端点一律加在这里**，`dispatchBall` 只需要多一条转发。
  */
 const dispatchBridge = async (method: string, params: unknown): Promise<unknown> => {
     const args = (params || {}) as Record<string, never>;
@@ -849,10 +922,7 @@ const dispatchBridge = async (method: string, params: unknown): Promise<unknown>
              * `setSniffEnabled`）就是"打开 = 切页自动扫描 + 网络层持续推送"，
              * 这里保持一致。
              */
-            if (enabled) {
-                const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-                if (typeof tab?.id === 'number') await scanTab(tab.id);
-            }
+            if (enabled) await scanTab(await requireTabId());
             return { enabled: await getEnabled() };
         }
 
@@ -866,13 +936,13 @@ const dispatchBridge = async (method: string, params: unknown): Promise<unknown>
         }
 
         case 'sniffer-scan':
-            return scanTab(await requireTabId());
+            return scanTab(await requireTabId((args as { tabId?: number }).tabId));
 
         case 'sniffer-active-page':
             return activePageInfo();
 
         case 'sniffer-ai-scan':
-            return aiSniffTab(await requireTabId());
+            return aiSniffTab(await requireTabId((args as { tabId?: number }).tabId));
 
         case 'downloads-start': {
             const p = args as unknown as { url: string; filename?: string };
@@ -967,40 +1037,57 @@ const errorText = (e: unknown): string => (e instanceof Error ? e.message : Stri
 /**
  * 悬浮球发来的请求。
  *
- * 与面板的 dispatch 分开：球能做的事**严格多于**面板（它能驱动 Agent、
- * 能附着调试器），而面板没有那个上下文。合成一个 switch 会让"面板能不能
- * 调 page-eval"这个问题永远没有答案。
+ * ## 与 `dispatchBridge` 的关系：**共用同一份实现**
+ *
+ * 两条路径做的是同一批事，只是入口不同 —— 一个在扩展进程内（球经 native
+ * messaging 转发过来），一个跨进程（页面里那个球走 `chrome.runtime`）。
+ *
+ * 原先这里是一份**独立的 switch**，理由写的是"球能做的事严格多于面板，
+ * 合并会让'面板能不能调 page-eval'没有答案"。那个理由对 `cookies-*` /
+ * `host-ensure` / `page-eval` 成立，但**对嗅探那一批不成立** —— 它们两边
+ * 一模一样，而两份实现必然漂移。
+ *
+ * 漂移实测过：给 `sniffer-set-enabled` 加了"打开时自动扫一次当前页"，
+ * 只加在 `dispatchBridge` 那一份上。球走的是**这一份**，于是用户点开开关
+ * 看到的仍然是空列表 —— 而插件那边的自检（走桥）全绿。
+ *
+ * 所以现在：**重叠的部分一律转发给 `dispatchBridge`**，只有球独有、面板
+ * 没有上下文的那些留在这里。新增嗅探类操作时只要往那边加一处，两条路径
+ * 一起生效；漏加在这里是一个类型错误（下面按 method 逐个列出）。
  */
 const dispatchBall = async (message: BallRequest): Promise<unknown> => {
     switch (message.kind) {
+        /* ---- 与桥共用：转发，不重写 ---- */
         case 'sniffer-set-enabled':
-            await setEnabled(message.enabled);
-            return { enabled: message.enabled };
+            return dispatchBridge('sniffer-set-enabled', { enabled: message.enabled });
 
         case 'sniffer-get-state':
-            return { enabled: await getEnabled(), items: await getItems() };
+            return dispatchBridge('sniffer-get-state', {});
 
         case 'sniffer-clear':
-            clearItems();
-            return { cleared: true };
+            return dispatchBridge('sniffer-clear', {});
 
-        case 'sniffer-clear-page': {
-            const pageUrl = await resolveClearTarget(message.pageUrl);
-            return { removed: clearPage(pageUrl) };
-        }
+        case 'sniffer-clear-page':
+            return dispatchBridge('sniffer-clear-page', { pageUrl: message.pageUrl });
 
         case 'sniffer-scan':
-            return scanTab(await requireTabId(message.tabId));
+            return dispatchBridge('sniffer-scan', { tabId: message.tabId });
 
         case 'sniffer-active-page':
-            return activePageInfo();
+            return dispatchBridge('sniffer-active-page', {});
 
         case 'sniffer-ai-scan':
-            return aiSniffTab(await requireTabId(message.tabId));
+            return dispatchBridge('sniffer-ai-scan', { tabId: message.tabId });
 
         case 'downloads-start':
-            return { downloadId: await downloadsStart(message.url, message.filename) };
+            return dispatchBridge('downloads-start', { url: message.url, filename: message.filename });
 
+        case 'agent-snapshot':
+            return dispatchBridge('agent-snapshot', {});
+
+        case 'agent-action':
+            return dispatchBridge('agent-action', { action: message.action });
+        /* ---- 球独有：面板没有那个上下文 ---- */
         case 'cookies-get':
             return cookiesGet(message.url);
 
@@ -1012,7 +1099,7 @@ const dispatchBall = async (message: BallRequest): Promise<unknown> => {
             return { removed: true };
 
         /*
-         * Agent 的三条：引擎挂在 agentBridge 上，球只负责转发。
+         * Agent 的两条：引擎挂在 agentBridge 上，球只负责转发。
          *
          * 这些消息**不带 tabId**：引擎每次都问宿主的 `activeTab()`，
          * 那是"当前操作哪个页面"的唯一权威。球传一个自己的 tabId 会让同一个
@@ -1021,16 +1108,6 @@ const dispatchBall = async (message: BallRequest): Promise<unknown> => {
         case 'host-ensure':
             await agentBridge.ensureOffscreen();
             return { ready: true };
-
-        case 'agent-snapshot': {
-            const engine = await agentBridge.getEngine();
-            return { snapshot: engine.snapshot() };
-        }
-
-        case 'agent-action': {
-            const engine = await agentBridge.getEngine();
-            return { result: await runAgentAction(engine, message) };
-        }
 
         case 'page-eval': {
             /*

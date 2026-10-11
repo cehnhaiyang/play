@@ -508,6 +508,61 @@ const run = () => {
     });
 
     /* ====================================================================== */
+    /* 8.3 两条采集路径不得各写一份实现                                          */
+    /* ====================================================================== */
+
+    /**
+     * `dispatchBridge`（应用/球经 native messaging）与 `dispatchBall`
+     * （页面里的球走 `chrome.runtime`）做的是同一批事，只是入口不同。
+     *
+     * **重叠的部分只能有一份实现。** 两份实现必然漂移，而漂移的表现是
+     * "某一端点了没反应"—— 实测过一次：给 `sniffer-set-enabled` 加了
+     * "打开开关时自动扫一次当前页"，只加在 `dispatchBridge` 那一份上。
+     * 球走的是 `dispatchBall`，于是用户点开开关看到的仍是空列表，
+     * 而插件自检（走桥）全绿。
+     *
+     * 判据：`dispatchBall` 里凡是与桥重叠的 kind，都必须**转发**而不是
+     * 重新实现。转发写起来就是一个 `dispatchBridge('...')` 调用，
+     * 重新实现则是去碰 `clearItems` / `scanTab` / `getItems` 这些内部函数。
+     */
+    check('dispatchBall 与 dispatchBridge 重叠的部分只有一份实现', () => {
+        const src = fs.readFileSync(
+            path.join(ROOT, 'extension', 'src', 'background', 'service-worker.ts'), 'utf8');
+        const start = src.indexOf('const dispatchBall');
+        assert(start > 0, '找不到 dispatchBall');
+        // 取到函数结束：下一个顶层 `};` 收尾
+        const body = src.slice(start, src.indexOf('\n};', start));
+
+        /*
+         * 与桥重叠的 kind —— 它们必须转发。
+         * 不在这张表里的（cookies-*、host-ensure、page-eval、page-navigate）
+         * 是球独有、面板没有上下文的，允许直接实现。
+         */
+        const mustForward = [
+            'sniffer-set-enabled', 'sniffer-get-state', 'sniffer-clear',
+            'sniffer-clear-page', 'sniffer-scan', 'sniffer-active-page',
+            'sniffer-ai-scan', 'downloads-start', 'agent-snapshot', 'agent-action',
+        ];
+        for (const kind of mustForward) {
+            assert(body.includes(`'${kind}'`), `dispatchBall 少了 ${kind} 这条分支`);
+            // 该分支里必须出现一次转发调用
+            const at = body.indexOf(`case '${kind}'`);
+            const next = body.indexOf('case ', at + 6);
+            const branch = body.slice(at, next < 0 ? body.length : next);
+            assert(/dispatchBridge\(/.test(branch),
+                `dispatchBall 的 ${kind} 没有转发给 dispatchBridge，而是自己实现了一份 ——`
+                + '两份实现必然漂移，表现是"某一端点了没反应"。');
+        }
+
+        // 反向：转发之后不该再碰那些内部函数（碰了说明只转了一半）
+        for (const fn of ['clearItems(', 'scanTab(', 'aiSniffTab(', 'clearPage(', 'getItems(']) {
+            assert(!body.includes(fn),
+                `dispatchBall 里直接调了 ${fn} —— 与桥重叠的操作必须整条转发，`
+                + '只转一半等于又造了一份实现。');
+        }
+    });
+
+    /* ====================================================================== */
     /* 9. shared/core 的宿主无关性（service worker 能安全 import）              */
     /* ====================================================================== */
     check('shared/core 索引里没有碰宿主全局的模块', () => {
