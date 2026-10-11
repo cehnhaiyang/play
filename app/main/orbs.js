@@ -40,6 +40,22 @@
  * 关着，展开态的面板大小由渲染层右下角那个把手驱动（见第 7 节）。
  * 尺寸与球心的唯一权威是 `entry.panel` / `entry.center`，落盘走 `savePositions`。
  *
+ * ## 球心的唯一写入口是拖动
+ *
+ * `entry.center` 是"球在哪"这件事的唯一权威，而它**只能由用户拖动来改**。
+ * 展开、收起、缩放都只读它。
+ *
+ * 这条约束是实测事故换来的：早期有三处从窗口矩形反推球心 —— `setOpen`、
+ * `resize-end`、以及 `drag-end`。反推只在"窗口正好是球"时成立，而收起/缩放/
+ * 拖动面板的那一帧窗口是**面板**，面板中心根本不是球心（贴边被收敛时差 277px）。
+ * 于是"球放左上角，展开一次再收起，球跑到屏幕中间"；同理，拉一下面板大小、
+ * 或者按住标题栏挪一下面板，收起后球都会漂走（实测 416px / 315px）。
+ * 三处修掉之后，全仓库 `entry.center` 的赋值只剩拖动一处。
+ *
+ * 判据不是"有没有写它"，而是**写进去的那个值从哪来**：只要来源是某个窗口矩形
+ * 的中心，就是同一个 bug 复发。测试里有一条断言盯住赋值点数量（见
+ * test/mainstatic.test.js 的第 8 条）。
+ *
  * ## 透明窗口的三条约束
  *
  * 1. **`transparent: true` 必须配 `frame: false`**，两者一起才有意义。
@@ -225,8 +241,18 @@ const defaultCenter = (id, workArea) => {
 /** id → { win, open, center, panel } */
 const orbs = new Map();
 
-/** 拖动开始时的抓取偏移，屏幕坐标 → 窗口左上角的差 */
-const grabOffsets = new Map();
+/**
+ * 拖动开始时的基准，屏幕坐标 → 窗口左上角的差。
+ *
+ * 记两项：`grab` 是指针在窗口里的落点（拖动时照着它算窗口左上角），
+ * `ball` 是**球心**在窗口里的落点（拖动结束时照着它还原球心）。
+ *
+ * 为什么球心要单独记：展开态的窗口是面板，而面板中心不是球心 —— 面板被
+ * `frameFor` 收敛贴边时两者能差 277px。所以球心不能在拖动结束时从窗口矩形
+ * 反推，只能在开始那一刻记下相对位置。收起态两者恰好相等，因此"反推"这种
+ * 写法只在展开态下暴露（见第 6 节）。
+ */
+const dragAnchors = new Map();
 
 /** 缩放开始时的锚点偏移，屏幕坐标 → 窗口左上角的差。与拖动分开，见第 7 节 */
 const resizeAnchors = new Map();
@@ -257,6 +283,18 @@ const createOrb = (id) => {
         : defaultCenter(id, area);
 
     const frame = frameFor(center, { w: BALL_SIZE, h: BALL_SIZE }, area);
+    /*
+     * 球心按**收敛之后**的窗口矩形回写，让 `entry.center` 从第一帧起就等于
+     * "球真正所在的那个点"。
+     *
+     * 存下来的球心可能落在工作区外（显示器拔掉、分辨率变小），`frameFor` 会把它
+     * 拉回来。不回写的话 `entry.center` 与球的实际位置就不一致，而这个字段是
+     * 展开/收起的唯一基准（见第 5 节）—— 等于把"球在哪"交给每个读它的地方
+     * 各自靠 `frameFor` 去修。实测过：单看几何，回写与不回写的落点完全一样
+     * （`frameFor` 的收敛是幂等的），所以这里买的是**不变量的可信**，不是可见行为。
+     */
+    center.x = frame.x + BALL_SIZE / 2;
+    center.y = frame.y + BALL_SIZE / 2;
 
     const win = new BrowserWindow({
         ...frame,
@@ -334,14 +372,27 @@ const setOpen = (id, open) => {
      * 拖动那边同理，只是后果轻一些（球被挪走）。
      */
     if (!open) {
-        grabOffsets.delete(id);
+        dragAnchors.delete(id);
         resizeAnchors.delete(id);
     }
 
-    // 展开时以球心为中心铺开：球在哪，面板就从哪长出来
-    const current = entry.win.getBounds();
-    const center = { x: current.x + current.width / 2, y: current.y + current.height / 2 };
-    const area = workAreaFor(center);
+    /*
+     * 球心只有一个权威：`entry.center`（落盘，见第 2 节）。两个方向都从它出发 ——
+     * 展开时面板围着它铺开，收起时球回到它上面。
+     *
+     * ⚠️ **不要从 `entry.win.getBounds()` 反推球心。**
+     *
+     * 反推在展开时看着没问题（那时窗口就是球，矩形中心正好是球心），收起时却是
+     * 错的：那时窗口是**面板**，而面板被 `frameFor` 收敛回工作区之后，中心已经
+     * 不在球心上了。实测症状：球放在左上角，展开再收起，球跑到屏幕中间 ——
+     * 380×520 的面板围着左上角的球心铺开时被推到 (8,8)，中心变成 (198,268)，
+     * 收起时按这个中心摆 64px 的球，落点就是 (166,236)。
+     *
+     * 反推还有个更隐蔽的坏处：它让"球在哪"变成窗口矩形的函数，于是展开态下
+     * 任何一次窗口变动都会顺带改写球的位置。球心是**用户定下来的**，全仓库
+     * 只有拖动结束（第 6 节）有权写它。
+     */
+    const area = workAreaFor(entry.center);
 
     /*
      * 尺寸的唯一权威是 `entry.panel`（初值来自落盘，见 createOrb），不是 ORB_DEFS。
@@ -355,7 +406,7 @@ const setOpen = (id, open) => {
      */
     const size = open ? (entry.panel = clampPanel(id, entry.panel, area)) : { w: BALL_SIZE, h: BALL_SIZE };
 
-    entry.win.setBounds(frameFor(center, size, area));
+    entry.win.setBounds(frameFor(entry.center, size, area));
     /*
      * 改完尺寸**重申一次置顶**，而不是按 open 切换它。
      *
@@ -367,16 +418,47 @@ const setOpen = (id, open) => {
     entry.win.setAlwaysOnTop(true, 'floating');
     entry.open = open;
 
-    // 把球心记下来。展开态的中心与球形态的中心在收敛后可能不同，
-    // 但用户下次看到的是球，所以记球形态那个点
-    if (!open) entry.center = center;
-
     entry.win.webContents.send('orb:layout', { open, ballSize: BALL_SIZE });
 };
 
 /* ========================================================================== */
 /* 6. 拖动                                                                    */
 /* ========================================================================== */
+
+/**
+ * 拖动开始那一刻的基准：指针与**球心**各自在窗口里的落点。
+ *
+ * 球心必须在这里记，不能在结束时从窗口矩形反推 —— 展开态的窗口是面板，
+ * 面板中心不是球心（见 `centerAfterDrag`）。
+ */
+const dragAnchorAt = (frame, center, pointer) => ({
+    grab: { x: pointer.x - frame.x, y: pointer.y - frame.y },
+    /*
+     * 收起态是 (BALL_SIZE/2, BALL_SIZE/2)；展开态两个分量都可能为负 ——
+     * 面板贴左缘时球心就在面板左上角之外。
+     */
+    ball: { x: center.x - frame.x, y: center.y - frame.y },
+});
+
+/** 拖动中窗口的落点。按左上角直接落位，不做球心收敛 —— 那样手感会发飘 */
+const frameWhileDragging = (target, size, area) => ({
+    x: Math.round(clamp(target.x, area.x - size.w + 40, area.x + area.width - 40)),
+    y: Math.round(clamp(target.y, area.y, area.y + area.height - 40)),
+    width: size.w,
+    height: size.h,
+});
+
+/**
+ * 拖动结束后球心落在哪。
+ *
+ * **不是窗口矩形的中心。** 展开态下窗口是面板，而面板被 `frameFor` 收敛贴边时
+ * 中心与球心相差可达 277px —— 用中心当球心的话，用户按住标题栏挪一下面板再
+ * 收起，球就跑到别处去了。收起态下两者恰好相等，所以这个错法只在展开态暴露。
+ *
+ * 正确做法是拿开始那一刻记下的 `ball` 偏移还原：拖动是刚体平移，球与窗口的
+ * 相对位置在整个拖动过程中不变。
+ */
+const centerAfterDrag = (frame, anchor) => ({ x: frame.x + anchor.ball.x, y: frame.y + anchor.ball.y });
 
 /**
  * 拖动走 IPC 手动挪窗口，不用 `-webkit-app-region: drag`。
@@ -395,41 +477,34 @@ const registerDrag = () => {
         if (!id) return;
         const entry = orbs.get(id);
         if (!entry) return;
-        const b = entry.win.getBounds();
-        grabOffsets.set(id, { x: point.x - b.x, y: point.y - b.y });
+        dragAnchors.set(id, dragAnchorAt(entry.win.getBounds(), entry.center, point));
     });
 
     ipcMain.on('orb:drag-move', (event, point) => {
         const id = idOfSender(event);
         if (!id) return;
         const entry = orbs.get(id);
-        const grab = grabOffsets.get(id);
-        if (!entry || !grab) return;
+        const anchor = dragAnchors.get(id);
+        if (!entry || !anchor) return;
 
         // 展开态用 `entry.panel` 而不是 ORB_DEFS：拖过右下角之后，
         // 从默认尺寸取会把用户调好的面板在拖动第一帧就打回原形
         const size = entry.open
             ? entry.panel
             : { w: BALL_SIZE, h: BALL_SIZE };
-        const target = { x: point.x - grab.x, y: point.y - grab.y };
-        // 拖动时按窗口左上角直接落位，不做球心收敛 —— 那样手感会发飘
+        const target = { x: point.x - anchor.grab.x, y: point.y - anchor.grab.y };
         const area = workAreaFor({ x: target.x + size.w / 2, y: target.y + size.h / 2 });
-        entry.win.setBounds({
-            x: clamp(target.x, area.x - size.w + 40, area.x + area.width - 40),
-            y: clamp(target.y, area.y, area.y + area.height - 40),
-            width: size.w,
-            height: size.h,
-        });
+        entry.win.setBounds(frameWhileDragging(target, size, area));
     });
 
     ipcMain.on('orb:drag-end', (event) => {
         const id = idOfSender(event);
         if (!id) return;
-        grabOffsets.delete(id);
+        const anchor = dragAnchors.get(id);
+        dragAnchors.delete(id);
         const entry = orbs.get(id);
-        if (!entry) return;
-        const b = entry.win.getBounds();
-        entry.center = { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+        if (!entry || !anchor) return;
+        entry.center = centerAfterDrag(entry.win.getBounds(), anchor);
         savePositions(id, entry);
     });
 };
@@ -452,7 +527,7 @@ const registerDrag = () => {
  *
  * ## 缩放与拖动必须是两套状态
  *
- * 共用一套 `grabOffsets` 的话，"拖到一半又去抓把手"会让两条路径互相改写
+ * 共用一套 `dragAnchors` 的话，"拖到一半又去抓把手"会让两条路径互相改写
  * 对方的基准点，窗口会跳。所以下面用 `resizeAnchors` 单独记一份。
  */
 const registerResize = () => {
@@ -495,8 +570,18 @@ const registerResize = () => {
         resizeAnchors.delete(id);
         const entry = orbs.get(id);
         if (!entry) return;
-        const b = entry.win.getBounds();
-        entry.center = { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+        /*
+         * 只落盘，**不回写球心**。
+         *
+         * 这里曾经从窗口矩形反推球心，而缩放中的窗口是面板 —— 于是"拉一下
+         * 面板大小再收起，球就跑到别处去了"。实测：球在左上角时位移 416px，
+         * 比 `setOpen` 那一处漂得还远。
+         *
+         * 根子上，面板的**位置**从来就不是要被记住的东西：`entry.panel` 是
+         * `{ w, h }`，没有 x/y。面板在哪完全由球心与尺寸推出来（`frameFor`），
+         * 所以缩放只该改尺寸，位置一个字都不该碰。球心的唯一写入口是拖动
+         * （见第 6 节）。
+         */
         savePositions(id, entry);
     });
 };
@@ -636,5 +721,10 @@ module.exports = {
     // 纯几何，给 test/mainstatic.test.js 直接调用。它们不碰 Electron API，
     // 所以能在 Node 里跑 —— 而"缩放算得对不对"正是最容易悄悄错掉的一处。
     clampPanel,
+    frameFor,
     frameForResize,
+    // 拖动那条路径的几何：球心在展开态下不等于窗口中心，这个契约必须能被直接调用
+    dragAnchorAt,
+    frameWhileDragging,
+    centerAfterDrag,
 };

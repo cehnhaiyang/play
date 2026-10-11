@@ -1,0 +1,213 @@
+config {
+  tempo: 112
+  master_gain: 0.78
+  key: "C"
+  scale: "major"
+  swing: 0
+}
+
+// ---------- 乐器 ----------
+
+define_instrument(name="lead_bell") {
+  preset: "bell"
+  gain: 0.7
+  pan: 0.15
+  lfo: "sine(freq=5.5, amount=8, target=frequency, ramp=0.5)"
+  effect_chain {
+    delay(time=0.28, feedback=0.25, mix=0.18, damping=4000)
+    reverb(decay=2.5, mix=0.3, pre_delay=0.02, damping=5000)
+  }
+}
+
+define_instrument(name="pad_warm") {
+  preset: "warm_pad"
+  gain: 0.45
+  pan: -0.2
+  spread: 0.6
+  envelope: "adsr(1.2, 1.0, 0.85, 2.0, curve=linear)"
+}
+
+define_instrument(name="sparkle") {
+  preset: "glass"
+  gain: 0.4
+  pan: -0.35
+  effect_chain {
+    reverb(decay=2.0, mix=0.35, pre_delay=0.01)
+  }
+}
+
+define_instrument(name="comp_keys") {
+  preset: "piano"
+  gain: 0.35
+  pan: 0.3
+}
+
+define_instrument(name="bass_i") {
+  preset: "bass"
+  gain: 0.7
+  pan: 0
+  envelope: "adsr(0.005, 0.15, 0.7, 0.2)"
+}
+
+// ---------- 音序 ----------
+
+sequence(name="pads", instrument="pad_warm", humanize=0.1) {
+  progression(["Cmaj7","G","Am7","Fmaj7"], "1n", voicing="open")
+}
+
+sequence(name="sparkle_arp", instrument="sparkle", humanize=0.15) {
+  arp("Cmaj7", pattern="up", rate="8n", duration="1n", octaves=2, gate=0.6)
+  arp("G", pattern="up", rate="8n", duration="1n", octaves=2, gate=0.6)
+  arp("Am7", pattern="up", rate="8n", duration="1n", octaves=2, gate=0.6)
+  arp("Fmaj7", pattern="up", rate="8n", duration="1n", octaves=2, gate=0.6)
+}
+
+sequence(name="bassline", instrument="bass_i", gain=0.75, humanize=0.15) {
+  # C
+  note("C2","8n", velocity=0.85)
+  rest("8n")
+  note("C2","8n", velocity=0.6, gate=0.8)
+  note("C2","8n", velocity=0.7)
+  note("G2","8n", velocity=0.65)
+  rest("8n")
+  note("C2","8n", velocity=0.8)
+  note("C3","8n", velocity=0.6)
+  # G
+  note("G2","8n", velocity=0.85)
+  rest("8n")
+  note("G2","8n", velocity=0.6, gate=0.8)
+  note("G2","8n", velocity=0.7)
+  note("D3","8n", velocity=0.65)
+  rest("8n")
+  note("G2","8n", velocity=0.8)
+  note("B2","8n", velocity=0.6)
+  # Am
+  note("A2","8n", velocity=0.85)
+  rest("8n")
+  note("A2","8n", velocity=0.6, gate=0.8)
+  note("A2","8n", velocity=0.7)
+  note("E3","8n", velocity=0.65)
+  rest("8n")
+  note("A2","8n", velocity=0.8)
+  note("A3","8n", velocity=0.6)
+  # F
+  note("F2","8n", velocity=0.85)
+  rest("8n")
+  note("F2","8n", velocity=0.6, gate=0.8)
+  note("F2","8n", velocity=0.7)
+  note("C3","8n", velocity=0.65)
+  rest("8n")
+  note("F2","8n", velocity=0.8)
+  note("G2","8n", velocity=0.6)
+}
+
+sequence(name="drums", gain=0.9, humanize=0.1) {
+  hit("kick","8n", velocity=0.9, snap=0.6)
+  hit("hat","8n", velocity=0.5, pan=0.3)
+  hit("clap","8n", velocity=0.8)
+  hit("hat","8n", velocity=0.45, pan=-0.3)
+  hit("kick","8n", velocity=0.85)
+  hit("hat","8n", velocity=0.55, pan=0.3)
+  hit("clap","8n", velocity=0.85)
+  hit("open_hat","8n", velocity=0.5, pan=-0.2)
+
+  hit("kick","8n", velocity=0.9, snap=0.6)
+  hit("hat","8n", velocity=0.5, pan=0.3)
+  hit("clap","8n", velocity=0.8)
+  hit("hat","8n", velocity=0.45, pan=-0.3)
+  hit("kick","8n", velocity=0.8)
+  hit("kick","8n", velocity=0.6, tune=3, decay=0.6)
+  hit("clap","8n", velocity=0.85)
+  hit("hat","8n", velocity=0.6, pan=0.3)
+}
+
+sequence(name="comp", instrument="comp_keys", gain=0.4, humanize=0.25) {
+  rest("8n")
+  rest("8n")
+  chord("C","8n", strum=0.6, velocity=0.65, gate=0.6)
+  rest("8n")
+  rest("4n")
+  chord("C","8n", strum=0.5, velocity=0.55, gate=0.6)
+  rest("8n")
+
+  rest("8n")
+  rest("8n")
+  chord("G","8n", strum=0.6, velocity=0.65, gate=0.6)
+  rest("8n")
+  rest("4n")
+  chord("G","8n", strum=0.5, velocity=0.55, gate=0.6)
+  rest("8n")
+}
+
+sequence(name="melody", instrument="lead_bell", gain=0.78, humanize=0.2) {
+  # 1 (Cmaj7)
+  rest("8n")
+  note("E5","8n", velocity=0.6)
+  note("G5","8n", velocity=0.7)
+  note("C6","4n.", velocity=0.85)
+  note("B5","8n", velocity=0.7)
+  note("G5","8n", velocity=0.65)
+  # 2 (G)
+  note("A5","4n", velocity=0.75)
+  note("G5","8n", velocity=0.6)
+  note("D5","8n", velocity=0.65)
+  note("E5","4n", velocity=0.7)
+  note("D5","4n", velocity=0.65, gate=0.9)
+  # 3 (Am7)
+  note("C5","8n", velocity=0.6)
+  note("E5","8n", velocity=0.65)
+  note("A5","4n", velocity=0.8)
+  note("G5","4n", velocity=0.65)
+  note("E5","8n", velocity=0.6)
+  note("D5","8n", velocity=0.6)
+  # 4 (Fmaj7)
+  note("C5","4n.", velocity=0.7)
+  note("A4","8n", velocity=0.6)
+  note("F5","4n", velocity=0.75)
+  note("G5","8n", velocity=0.65)
+  note("A5","8n", velocity=0.8)
+  # 5 (Cmaj7)
+  rest("8n")
+  note("E5","8n", velocity=0.55)
+  note("G5","8n", velocity=0.65)
+  note("C6","2n", velocity=0.9)
+  rest("8n")
+  # 6 (G)
+  note("D6","4n", velocity=0.85)
+  note("B5","8n", velocity=0.7)
+  note("G5","4n.", velocity=0.7)
+  note("A5","8n", velocity=0.65)
+  note("B5","8n", velocity=0.7)
+  # 7 (Fmaj7)
+  note("C6","2n.", velocity=0.9)
+  note("A5","8n", velocity=0.7)
+  note("G5","8n", velocity=0.6)
+  # 8 (Cmaj7)
+  note("E5","4n", velocity=0.65)
+  note("G5","4n", velocity=0.7)
+  note("C6","2n", velocity=0.9, gate=1.4)
+}
+
+sequence(name="crash_in") {
+  hit("crash","2n", velocity=0.7)
+}
+
+// ---------- 全局效果 ----------
+
+effect_chain {
+  compressor(threshold=0.5, ratio=3, attack=0.01, release=0.25)
+  eq(low=1, mid=0, high=1.5)
+  reverb(decay=2.2, mix=0.22, damping=5500)
+}
+
+// ---------- 编排：前奏 -> 律动 -> 旋律 ----------
+
+mix {
+  track(source="pads", time=0, loop=2, gain=0.5)
+  track(source="sparkle_arp", time=0, loop=2, gain=0.45)
+  track(source="bassline", time=0, loop=2, gain=0.8)
+  track(source="crash_in", time="2m", loop=1, gain=0.6)
+  track(source="drums", time="2m", loop=3, gain=0.9)
+  track(source="comp", time="2m", loop=3, gain=0.4)
+  track(source="melody", time="4m", loop=1, gain=0.8)
+}

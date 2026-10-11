@@ -679,9 +679,13 @@ function run() {
     const AREA = { x: 0, y: 0, width: 1920, height: 1080 };
     const MARGIN = 8;
 
-    if (typeof orbMod.frameForResize !== 'function' || typeof orbMod.clampPanel !== 'function') {
-        orbProblems.push('orbs.js 没有导出 frameForResize / clampPanel（几何无法被断言）');
+    if (typeof orbMod.frameForResize !== 'function' || typeof orbMod.clampPanel !== 'function'
+        || typeof orbMod.frameFor !== 'function'
+        || typeof orbMod.dragAnchorAt !== 'function' || typeof orbMod.frameWhileDragging !== 'function'
+        || typeof orbMod.centerAfterDrag !== 'function') {
+        orbProblems.push('orbs.js 没有导出 frameFor / frameForResize / clampPanel / 拖动三件套（几何无法被断言）');
     } else {
+        const orbSrc = fs.readFileSync(path.join(ELECTRON_DIR, 'orbs.js'), 'utf8');
         const base = { x: 400, y: 300, width: 380, height: 520 };
 
         // 1) 按下不跳：指针没动，窗口就必须一个像素都不动
@@ -741,6 +745,136 @@ function run() {
             const got = orbMod.clampPanel('sniff', saved, AREA);
             if (got.w !== want.w || got.h !== want.h) {
                 orbProblems.push(`clampPanel ${label}：期望 ${want.w}x${want.h}，实际 ${got.w}x${got.h}`);
+            }
+        }
+
+        /*
+         * 7) 展开再收起，球必须回到**原来那个点**。
+         *
+         * 这是实测事故：球放在左上角，展开一次再收起，球跑到屏幕中间去了。
+         * 根因是 `setOpen` 从窗口矩形反推球心 —— 收起时窗口是面板，而面板
+         * 被 `frameFor` 收敛回工作区之后中心已经不在球心上了。球心是用户
+         * 定下来的，只能由拖动/缩放改，不能是窗口矩形的函数。
+         *
+         * `setOpen` 要 Electron 才能跑，所以下面分两步：
+         *   a. 先证明"反推"这条错法在贴边的两个角上**确实会漂**（用例有效性）；
+         *   b. 再对 `setOpen` 的取心方式下一道结构断言。
+         * 只做 b 的话，用例选错（比如只挑屏幕正中，那里面板不被收敛、反推
+         * 恰好也对）就会让守卫永远绿 —— 见下面注释里那个"为什么这 bug 一直
+         * 没被发现"的原因。
+         */
+        const ballSize = orbMod.BALL_SIZE;
+        const panelSize = { w: def.panel.w, h: def.panel.h };
+
+        // 屏幕正中不算：那里面板不被收敛，反推球心恰好等于真球心，
+        // 正是这个巧合让"球放在中间"的人一直没发现问题。
+        for (const [label, corner] of [
+            ['左上角', { x: AREA.x + MARGIN + ballSize / 2, y: AREA.y + MARGIN + ballSize / 2 }],
+            ['右下角', { x: AREA.width - MARGIN - ballSize / 2, y: AREA.height - MARGIN - ballSize / 2 }],
+        ]) {
+            const ball = orbMod.frameFor(corner, { w: ballSize, h: ballSize }, AREA);
+            const panel = orbMod.frameFor(corner, panelSize, AREA);
+
+            // 展开确实把窗口挪离了球心，否则这个用例证明不了任何事
+            const panelCenter = { x: panel.x + panel.width / 2, y: panel.y + panel.height / 2 };
+            const drift = Math.hypot(panelCenter.x - corner.x, panelCenter.y - corner.y);
+            if (drift < 1) {
+                orbProblems.push(
+                    `用例无效：「${label}」展开后窗口中心与球心重合（漂移 ${drift.toFixed(1)}px），`
+                    + '反推球心在这条路径上不会出错，拦不住真实事故');
+                continue;
+            }
+
+            // 老写法：拿面板矩形的中心当球心。必须与真球心摆出不同的位置
+            const wrong = orbMod.frameFor(panelCenter, { w: ballSize, h: ballSize }, AREA);
+            if (wrong.x === ball.x && wrong.y === ball.y) {
+                orbProblems.push(
+                    `用例无效：「${label}」反推球心摆出的位置与真球心相同（${ball.x},${ball.y}），`
+                    + '拦不住真实事故');
+            }
+        }
+
+        /*
+         * 结构断言：`setOpen` 的取心处不许出现 `getBounds`。
+         *
+         * 这是**形态断言，不是行为验证** —— 它拦得住"改回从窗口矩形反推"，
+         * 拦不住另一种同样错的写法。真正的行为验证需要 Electron 环境。
+         */
+        const setOpenSrc = orbSrc.slice(orbSrc.indexOf('const setOpen ='));
+        // 必须先剥注释：setOpen 的说明里正举着 `getBounds()` 当反面教材，
+        // 直接搜源码会命中那段注释，把正确的代码判成错的
+        const setOpenBody = stripLiterals(setOpenSrc.slice(0, setOpenSrc.indexOf('\n};')));
+        if (!/frameFor\(entry\.center,/.test(setOpenBody)) {
+            orbProblems.push('setOpen 没有用 entry.center 定位（球心必须只有一个权威）');
+        }
+        if (/getBounds\(\)/.test(setOpenBody)) {
+            orbProblems.push('setOpen 里出现了 getBounds()：从窗口矩形反推球心会让收起后的球漂走');
+        }
+
+        /*
+         * 8) 球心的写入口只能有一个。
+         *
+         * 上面那条只盯住了 `setOpen`，而同一个错法在 `resize-end` 里也有一份：
+         * 那里同样从窗口矩形反推球心，而缩放中的窗口是面板 —— 实测球在左上角时
+         * 位移 416px，比 setOpen 那处漂得还远。只修一处的话，用户"拉一下面板
+         * 大小再收起"照样看到球跑掉。
+         *
+         * 判据是**位置无关的**：只要"球心 = 某个窗口矩形的中心"这个写法再出现
+         * 在任何一处（除了拖动结束，那时窗口确实就是球），就是同一个 bug 复发。
+         */
+        const centerWrites = stripLiterals(orbSrc).match(/entry\.center\s*=/g) || [];
+        if (centerWrites.length !== 1) {
+            orbProblems.push(
+                `entry.center 有 ${centerWrites.length} 个写入口，应恰好 1 个（拖动结束）；`
+                + '多出来的那些会让球在展开/收起/缩放之间漂走');
+        }
+
+        /*
+         * 9) 拖动这条路径：球心必须跟着窗口平移，且**不能用窗口中心当球心**。
+         *
+         * 展开态的窗口是面板，面板被 `frameFor` 收敛贴边时中心与球心差 277px。
+         * 老写法（`centerAfterDrag` 里取窗口中心）只在收起态恰好正确，所以
+         * 用例必须走**展开态 + 贴边**这条路径，否则拦不住。
+         *
+         * 直接调用三个纯函数跑完整条链路，而不是查源码：这类错误全是"算得出
+         * 一个数、但那个数是错的"，正则看不出来。
+         */
+        const ballSize2 = orbMod.BALL_SIZE;
+        const panelSize2 = { w: def.panel.w, h: def.panel.h };
+
+        for (const [label, ballCenter, open, delta] of [
+            ['收起态拖球', { x: MARGIN + ballSize2 / 2, y: MARGIN + ballSize2 / 2 }, false, { x: 120, y: 90 }],
+            ['展开态拖面板（左上角，被收敛）', { x: MARGIN + ballSize2 / 2, y: MARGIN + ballSize2 / 2 }, true, { x: 60, y: 0 }],
+            ['展开态拖面板（右下角，被收敛）',
+                { x: AREA.width - MARGIN - ballSize2 / 2, y: AREA.height - MARGIN - ballSize2 / 2 }, true, { x: -70, y: -50 }],
+        ]) {
+            const ballBefore = orbMod.frameFor(ballCenter, { w: ballSize2, h: ballSize2 }, AREA);
+            // 球心是权威，展开**不会**改写它（面板位置由它推出来，不是反过来）
+            const center = { x: ballBefore.x + ballSize2 / 2, y: ballBefore.y + ballSize2 / 2 };
+            const win = open ? orbMod.frameFor(center, panelSize2, AREA) : ballBefore;
+
+            const pointer = { x: win.x + 30, y: win.y + 20 };
+            const anchor = orbMod.dragAnchorAt(win, center, pointer);
+            const moved = orbMod.frameWhileDragging(
+                { x: pointer.x - anchor.grab.x + delta.x, y: pointer.y - anchor.grab.y + delta.y },
+                open ? panelSize2 : { w: ballSize2, h: ballSize2 }, AREA);
+            const after = orbMod.centerAfterDrag(moved, anchor);
+
+            // 语义：拖面板 = 把球心平移同样的量
+            const want = { x: center.x + delta.x, y: center.y + delta.y };
+            if (!close(after.x, want.x) || !close(after.y, want.y)) {
+                orbProblems.push(
+                    `${label}：拖动后球心 ${after.x},${after.y}，应为 ${want.x},${want.y}`
+                    + `（漂了 ${Math.hypot(after.x - want.x, after.y - want.y).toFixed(0)}px）`);
+            }
+
+            // 用例有效性：这条路径上"用窗口中心当球心"必须真的会算错
+            if (open) {
+                const wrong = { x: moved.x + moved.width / 2, y: moved.y + moved.height / 2 };
+                if (close(wrong.x, want.x) && close(wrong.y, want.y)) {
+                    orbProblems.push(
+                        `用例无效：「${label}」面板未被收敛，用窗口中心当球心也算得对，拦不住真实事故`);
+                }
             }
         }
     }
