@@ -1479,6 +1479,24 @@ export interface ElectronAPI {
 }
 
 /**
+ * `spg.pick` 的回复。
+ *
+ * 单独命名是因为它有**三种**结果而不是两种：拿到源码、用户取消、失败。
+ * 取消不是失败 —— 混在一起，用户按了取消就会看到一条报错。
+ */
+export interface SpgPickResult {
+    success: boolean;
+    /** 用户主动取消。与 success=false 分开，调用方据此决定要不要报错 */
+    cancelled?: boolean;
+    filePath?: string;
+    /** 文件名（含后缀），用于推导工程名与留档名 */
+    name?: string;
+    /** 源码正文。主进程读好一起给：渲染层拿到路径也读不了文件 */
+    content?: string;
+    message?: string;
+}
+
+/**
  * SPG 源码留档与读取。
  *
  * 两个方向的落点都是**项目根的 .spg 目录**，由主进程决定（渲染层没有文件系统权限）。
@@ -1495,20 +1513,8 @@ export interface ElectronSpgAPI {
         filePath?: string;
         message?: string;
     }>;
-    /**
-     * 从 .spg 目录里挑一份源码并读出内容。
-     *
-     * 内容随返回值一起给：渲染层拿到路径也读不了文件。
-     * `cancelled` 与失败要分开 —— 用户主动取消不该报错。
-     */
-    pick: () => Promise<{
-        success: boolean;
-        cancelled?: boolean;
-        filePath?: string;
-        name?: string;
-        content?: string;
-        message?: string;
-    }>;
+    /** 从 .spg 目录里挑一份源码并读出内容（初始目录固定为项目根的 .spg） */
+    pick: () => Promise<SpgPickResult>;
 }
 
 /**

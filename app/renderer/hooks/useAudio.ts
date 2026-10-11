@@ -1,7 +1,7 @@
 /// <reference lib="dom" />
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type React from 'react';
-import { Project, AppState, ParserError, SPGWarning, getElectronAPI } from '../../../shared/meta';
+import { Project, AppState, ParserError, SPGWarning, SpgPickResult, getElectronAPI } from '../../../shared/meta';
 import { loadProjects, saveProjects, createNewProject, BrowserAudioEngine, bufferToWave, } from '../services/AudioService';
 import { generateSyntax, fixSyntax, refineSyntax } from '../services/SpgAiService';
 import { downloadBlob, loadJSON, removeStored, saveJSON } from '../../../shared/core';
@@ -21,6 +21,52 @@ export interface SpgSource {
     name: string;
     content: string;
 }
+
+/** 从文件名推出作品名：去掉 .spg / .txt 后缀 */
+export const spgBaseName = (fileName: string): string =>
+    fileName.replace(/\.(spg|txt)$/i, '');
+
+/**
+ * 把取件结果归一成两种给调用方：拿到源码，或者一句该报出来的错。
+ *
+ * 单独抽出来是因为它有**三种**结果而不是两种，而三者极易被合并成两种：
+ * - 取消不是失败。混在一起的话，用户按了取消就会看到一条报错。
+ * - 成功但正文缺失同样是失败。空源码进工程就是一首空曲子，
+ *   而界面上看不出哪里不对 —— 编译能过，就是没声音。
+ *
+ * `null` 表示桥没加载（preload 故障）。这条路径是用户主动点的按钮，
+ * 静默返回就是"点了没反应"。
+ */
+export const resolveSpgPick = (res: SpgPickResult | null): { source?: SpgSource; message?: string } => {
+    if (!res) return { message: '文件选择不可用：桥接未加载。' };
+    if (res.cancelled) return {};
+    if (!res.success || typeof res.content !== 'string') {
+        return { message: res.message || '读取文件失败。' };
+    }
+    return { source: { name: res.name || '未命名.spg', content: res.content } };
+};
+
+/** 导入：源码进一个**新**工程，名字取文件名 */
+export const buildImportedProject = (source: SpgSource): Project => {
+    const project = createNewProject();
+    project.name = spgBaseName(source.name) || 'Imported Project';
+    project.code = source.content;
+    return project;
+};
+
+/**
+ * 迭代：优化结果进一个**新**工程，名字标出"优化版"。
+ *
+ * 与导入分开是因为落点不同：导入是"把这份代码放进工作台"，
+ * 迭代是"让 AI 在它基础上改一版"。原稿一字不动是迭代的卖点 ——
+ * 覆盖它等于把用户的曲子弄丢了，而原稿只存在于工程里，没有第二份可以回退。
+ */
+export const buildRefinedProject = (source: SpgSource, code: string): Project => {
+    const project = createNewProject();
+    project.name = `${spgBaseName(source.name) || '迭代作品'} 优化版`;
+    project.code = code;
+    return project;
+};
 
 interface UseAudioReturn {
     state: {
@@ -269,9 +315,7 @@ export const useAudio = ({
     }, [activeProjectId]);
 
     const importProjectFromFile = useCallback((source: SpgSource, callback: (newId: string) => void) => {
-        const newProject = createNewProject();
-        newProject.name = source.name.replace(/\.(spg|txt)$/i, '') || 'Imported Project';
-        newProject.code = source.content;
+        const newProject = buildImportedProject(source);
 
         setProjects((prev) => [newProject, ...prev]);
         setActiveProjectId(newProject.id);
@@ -280,21 +324,12 @@ export const useAudio = ({
 
     /**
      * 弹系统文件框挑一份 .spg 源码，初始目录固定为项目根的 .spg。
-     *
-     * 失败与取消分开返回：取消是用户的正常操作，调用方不该弹错误。
-     * 桥没加载时（preload 故障）也要说一句 —— 这条路径是用户主动点的按钮，
-     * 静默失败就是"点了没反应"。
+     * 结果的三态归一见 resolveSpgPick。
      */
     const pickSpgSource = useCallback(async () => {
         const api = getElectronAPI();
-        if (!api?.spg?.pick) return { message: '文件选择不可用：桥接未加载。' };
-
-        const res = await api.spg.pick();
-        if (res.cancelled) return {};
-        if (!res.success || typeof res.content !== 'string') {
-            return { message: res.message || '读取文件失败。' };
-        }
-        return { source: { name: res.name || '未命名.spg', content: res.content } };
+        if (!api?.spg?.pick) return resolveSpgPick(null);
+        return resolveSpgPick(await api.spg.pick());
     }, []);
 
     // 2. 声音引擎状态
@@ -635,14 +670,12 @@ export const useAudio = ({
             }
 
             const code = await refineSyntax(source.content);
-            const baseName = source.name.replace(/\.(spg|txt)$/i, '') || '迭代作品';
+            const baseName = spgBaseName(source.name) || '迭代作品';
             // 留档沿用原文件名：优化版与原稿在 .spg 目录里靠时间戳区分，
             // 而不是靠改名 —— 改名会让"这是同一首曲子的第几版"看不出来
             archiveSpg(code, baseName);
 
-            const project = createNewProject();
-            project.name = `${baseName} 优化版`;
-            project.code = code;
+            const project = buildRefinedProject(source, code);
             setProjects((prev) => [project, ...prev]);
             setActiveProjectId(project.id);
 

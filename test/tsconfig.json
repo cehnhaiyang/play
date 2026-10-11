@@ -21,6 +21,7 @@
     "../app/renderer/services/SpgAiService.ts",
     "../app/renderer/services/LogService.ts",
     "../app/renderer/services/SearchService.ts",
+    "../app/renderer/hooks/useAudio.ts",
     "../shared/ai/AiService.ts",
     "../shared/core/**/*.ts",
     "../shared/meta/**/*.ts",

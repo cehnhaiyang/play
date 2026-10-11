@@ -2171,8 +2171,9 @@ check('迭代结果落进新工程，原工程一字不动（代码形状断言�
   assert(end > start, '找不到 refineSpg 的结束位置');
   const body = hookSrc.slice(start, end);
 
-  assert(/refineSyntax\(/.test(body), 'refineSpg 应调用 refineSyntax');
-  assert(/createNewProject\(\)/.test(body), '迭代结果必须进新工程');
+  assert(/refineSyntax\(source\.content\)/.test(body),
+    'refineSpg 必须把**正文**交给模型；传成文件名的话模型收到的是一句文件名');
+  assert(/buildRefinedProject\(/.test(body), '迭代结果必须进新工程');
   assert(/setProjects\(\(prev\)\s*=>\s*\[project,/.test(body), '新工程应加入工程列表');
   // 覆盖原稿的两条路径都必须不出现：改名式更新与代码式更新
   assert(!/updateActiveProject/.test(body), 'refineSpg 不得改写任何既有工程');
@@ -2216,6 +2217,64 @@ check('导入与迭代都从项目根的 .spg 目录取件（系统文件框，�
   assert(/refineSpg\(/.test(refineBody), '迭代应走 refineSpg');
 });
 
+check('取件结果的三态：拿到源码 / 取消 / 失败，取消不是失败', () => {
+  // 这是纯函数，直接调用。用源码扫描验不了它 —— 把 `if (res.cancelled) return {}`
+  // 删掉，源码里照样能找到那几行，只有调用才会发现取消变成了报错。
+  const { resolveSpgPick, spgBaseName, buildImportedProject, buildRefinedProject } =
+    require(`${ROOT}/hooks/useAudio`);
+
+  // 1. 成功：正文与文件名都要带出来
+  const ok = resolveSpgPick({ success: true, name: '未落.txt', content: 'config { tempo: 120 }' });
+  eq(ok.source && ok.source.name, '未落.txt', '成功时应带出文件名');
+  eq(ok.source && ok.source.content, 'config { tempo: 120 }', '成功时应带出正文');
+  eq(ok.message, undefined, '成功时不该有错误');
+
+  // 2. 取消：既没有源码，也**没有**错误 —— 混在一起的话按取消会看到报错
+  const cancelled = resolveSpgPick({ success: false, cancelled: true });
+  eq(cancelled.source, undefined, '取消不该给出源码');
+  eq(cancelled.message, undefined, '取消不是失败，不该报错');
+
+  // 3. 失败：必须给出可见的错误
+  const failed = resolveSpgPick({ success: false, message: '读取文件失败' });
+  eq(failed.source, undefined, '失败不该给出源码');
+  assert(typeof failed.message === 'string' && failed.message.length > 0, '失败必须给出错误文案');
+
+  // 4. success=true 但正文缺失同样是失败。空源码进工程就是一首空曲子，
+  //    编译能过、就是没声音，界面上看不出哪里不对
+  const empty = resolveSpgPick({ success: true, name: 'a.spg' });
+  eq(empty.source, undefined, '正文缺失不得当成成功');
+  assert(typeof empty.message === 'string' && empty.message.length > 0,
+    '正文缺失必须报错，否则空源码会静默进工程');
+
+  // 5. 桥没加载（preload 故障）：用户点的是按钮，静默返回就是"点了没反应"
+  const noBridge = resolveSpgPick(null);
+  eq(noBridge.source, undefined, '桥没加载时不该给出源码');
+  assert(typeof noBridge.message === 'string' && noBridge.message.length > 0,
+    '桥没加载必须报错，否则用户看到的是"点了没反应"');
+
+  // 文件名 → 作品名：后缀去掉，空名有兜底
+  eq(spgBaseName('忧伤_钢琴.txt'), '忧伤_钢琴', '应去掉 .txt 后缀');
+  eq(spgBaseName('美好世界.spg'), '美好世界', '应去掉 .spg 后缀');
+  eq(spgBaseName('无后缀'), '无后缀', '没有后缀时原样返回');
+
+  // 导入：正文必须真的进工程。丢了正文的工程打开是空的
+  const imported = buildImportedProject({ name: '三圈半.txt', content: 'config { tempo: 90 }' });
+  eq(imported.name, '三圈半', '导入的工程名取文件名');
+  eq(imported.code, 'config { tempo: 90 }', '导入必须把正文写进工程');
+
+  // 迭代：进新工程、名字标出"优化版"、正文是优化结果而不是原稿
+  const refined = buildRefinedProject({ name: '原地.txt', content: '原稿' }, '优化后的代码');
+  eq(refined.name, '原地 优化版', '迭代结果应标出优化版');
+  eq(refined.code, '优化后的代码', '迭代工程里应是优化结果');
+
+  // 每次迭代都必须是**新**工程。共用 id 的话，第二次迭代会覆盖第一次的结果，
+  // 而界面上只是列表少了一项 —— 用户不会意识到自己丢了一版
+  const again = buildRefinedProject({ name: '原地.txt', content: '原稿' }, '再优化一版');
+  assert(refined.id !== again.id, '两次迭代必须得到不同的工程 id，否则后一版会覆盖前一版');
+  assert(imported.id !== buildImportedProject({ name: 'a.spg', content: 'x' }).id,
+    '两次导入必须得到不同的工程 id');
+});
+
 check('取件通道把初始目录钉在项目根的 .spg（主进程 ↔ 桥 ↔ 渲染层三处对齐）', () => {
   // 三处必须同时存在，缺一处就表现为"点了按钮没反应"：
   // 主进程没注册 handler → 调用永远 pending；preload 没暴露 → 渲染层拿不到方法。
@@ -2224,10 +2283,18 @@ check('取件通道把初始目录钉在项目根的 .spg（主进程 ↔ 桥 �
   const pickStart = mainSrc.indexOf('async function handleSpgPick');
   assert(pickStart > 0, '主进程缺少 handleSpgPick');
   const pickBody = mainSrc.slice(pickStart, mainSrc.indexOf('\nfunction setupDownloadHandlers', pickStart));
-  // 落点与 handleSpgSave 必须是同一个目录：一个写、一个读，指到两处就是"存了却找不到"
-  assert(/path\.join\(app\.getAppPath\(\), '\.spg'\)/.test(pickBody),
-    '取件的初始目录必须是项目根的 .spg');
-  assert(/dialog\.showOpenDialog/.test(pickBody), '取件必须弹系统文件框');
+  // 落点与 handleSpgSave 必须是同一个目录：一个写、一个读，指到两处就是"存了却找不到"。
+  // 两条断言缺一不可 —— 只查 `path.join(..., '.spg')` 的话，把 defaultPath 换成
+  // 别的东西时那个 `dir` 变量还在，断言照样通过（实测确认过）。
+  assert(/const dir = path\.join\(app\.getAppPath\(\), '\.spg'\)/.test(pickBody),
+    '取件的目标目录必须是项目根的 .spg');
+  assert(/defaultPath:\s*dir/.test(pickBody),
+    '文件框的初始目录必须真的用上这个 dir，否则框会停在上次去过的地方');
+  // 文件路径必须**来自**系统文件框。只查 `dialog.showOpenDialog` 出现过是不够的：
+  // 把结果换成硬编码（或者把 dialog 调用挪到别处）时它照样在文件里，
+  // 而用户会看到一个永远选不了文件的框（实测确认过）。
+  assert(/const \{ canceled, filePaths \} = win\s*\?\s*await dialog\.showOpenDialog\(win, opts\)\s*:\s*await dialog\.showOpenDialog\(opts\)/.test(pickBody),
+    '文件名必须由系统文件框返回，不能硬编码');
   assert(/readFile\(/.test(pickBody), '内容要在主进程读出来：渲染层读不了文件');
   assert(/cancelled/.test(pickBody), '取消要与失败分开：取消不该报错');
   assert(/ipcMain\.handle\('spg-pick'/.test(mainSrc), 'spg-pick 必须在主进程注册');
