@@ -118,6 +118,8 @@ export const SniffOrb = () => {
     const [enabled, setEnabled] = useState(false);
     const [items, setItems] = useState<SniffedMedia[]>([]);
     const [tabs, setTabs] = useState<BrowserTab[]>([]);
+    /** 标签栏拉取失败的原因。空串表示没失败 */
+    const [tabsError, setTabsError] = useState('');
     const [error, setError] = useState('');
     const [connected, setConnected] = useState(true);
     const [busy, setBusy] = useState(false);
@@ -176,15 +178,25 @@ export const SniffOrb = () => {
      *
      * 触发点有两个：连上桥时拉一次，以及插件推 `tabs-changed` 时重拉
      * （见下面那个 effect）。
+     *
+     * ## 失败必须说出来，不能只是"标签栏没了"
+     *
+     * 这里原先把异常吞掉、`setTabs([])` 了事。后果实测过：**标签栏整条不画**
+     * （渲染条件是 `tabs.length > 0`），而"浏览器里一个标签页都没有"和
+     * "这个端点根本没通"在界面上长得一模一样 —— 都是什么都没有。
+     * 用户看到的是"标签页没法切换"，且没有任何线索。
+     *
+     * 最常见的失败原因是插件没重载（`sniffer-tabs` 是新增端点，
+     * 旧插件回"不认识的桥端点"），所以错误文案要把这条说出来。
      */
     const refreshTabs = useCallback(async () => {
         try {
             const result = await bridge<{ tabs: BrowserTab[] }>('sniffer-tabs');
             setTabs(result.tabs || []);
-        } catch {
-            // 标签栏拉不到不是致命错误：列表本身仍然可用（全部标签页混在一起）。
-            // 在这里报一条红字只会把"插件没连上"那句挤掉
+            setTabsError('');
+        } catch (e) {
             setTabs([]);
+            setTabsError(e instanceof Error ? e.message : String(e));
         }
     }, []);
 
@@ -518,8 +530,12 @@ export const SniffOrb = () => {
               横向滚动而不是换行：几十个标签页换行会占掉面板一大半高度，
               而列表才是主角。滚动条隐藏（`scrollbar-hide` 见 orb.css），
               靠滚轮与拖拽浏览。
+
+              「全部」那一项**始终画**，哪怕一个标签页都没有：它是"筛选轴存在"
+              的可见标志。整条不画的话，用户分不清"这个功能没有"和"暂时没有
+              标签页" —— 实测过一次，用户的原话是"我根本没看到怎么切换"。
             */}
-            {connected && tabs.length > 0 && (
+            {connected && (
                 <div className="scrollbar-hide flex shrink-0 items-center gap-1 overflow-x-auto border-b border-white/[0.07] px-2 py-1.5">
                     <button
                         type="button"
@@ -533,6 +549,22 @@ export const SniffOrb = () => {
                     >
                         全部 {items.length}
                     </button>
+                    {tabs.length === 0 && (
+                        /*
+                         * 拉不到标签页时**必须写出原因**。
+                         *
+                         * 最常见的失败是插件没重载（`sniffer-tabs` 是新增端点，
+                         * 旧插件回"不认识的桥端点"）—— 那和"浏览器里真没标签页"
+                         * 在界面上完全一样，都是空的一条。不说出来的话，用户只能
+                         * 得出"标签页切换坏了"这一个（错的）结论。
+                         */
+                        <span
+                            className="shrink-0 truncate px-1 text-[10px] text-amber-400/90"
+                            title={tabsError || '浏览器里没有可嗅探的标签页（只列 http/https 页面）'}
+                        >
+                            {tabsError ? `标签栏不可用：${tabsError}` : '没有可嗅探的标签页'}
+                        </span>
+                    )}
                     {tabs.map((tab) => {
                         const selected = tab.id === activeTabId;
                         const count = countByTab.get(tab.id) ?? 0;
