@@ -1,9 +1,9 @@
 /**
  * 插件内部的消息协议。
  *
- * ## 三条通道，刻意分开
+ * ## 三个执行环境，刻意分开
  *
- * 拆分之后插件里有四个执行环境，各有各的能力边界，消息**不能混着发**：
+ * 各有各的能力边界，消息**不能混着发**：
  *
  *   · **service worker**（`background/`）—— 有 `chrome.*` 全套，没有 DOM，
  *     空闲约 30 秒被回收。放短命、事件驱动的活：嗅探、cookie、下载、debugger。
@@ -11,7 +11,10 @@
  *     跟扩展走（不受 30 秒回收影响）。放长命、要持续在途的活：Agent 的模型调用。
  *   · **content script**（`content/`）—— 在页面里，有 DOM 但**受页面 CSP 约束**。
  *     只做展示与输入，不发任何网络请求。
- *   · **side panel**（`sidepanel/`）—— 扩展自己的页面，只有用户点开时才存在。
+ *
+ * 曾经还有第四个：side panel。它被删掉了 —— 悬浮球已经在页面上，侧边栏
+ * 只是同一批数据的第二个视图，而那个视图只有几百像素宽、还得用户主动点开。
+ * 留着它的代价是每个能力都要维护两条界面路径，收益是零。
  *
  * ## 为什么每条消息都带 `target`
  *
@@ -132,7 +135,6 @@ export type BallRequest =
 /** SW 推给悬浮球的事件（广播，不针对某一条请求） */
 export type BallEvent =
     | { target: 'ball'; kind: 'sniffed-media'; item: SniffedMedia }
-    | { target: 'ball'; kind: 'sniffer-state'; enabled: boolean; items: SniffedMedia[] }
     /** 引擎快照（消息、脚本、状态） */
     | { target: 'ball'; kind: 'agent-snapshot'; snapshot: unknown }
     /** 流式增量。整个快照太大，逐字重发不现实 */
@@ -179,25 +181,3 @@ export type HostEvent =
     | { target: 'ball'; kind: 'ai-delta'; requestId: string; content?: string; reasoning?: string }
     | { target: 'ball'; kind: 'ai-done'; requestId: string; reply?: string; usage?: AiUsage; error?: string };
 
-/* ========================================================================== */
-/* 3. side panel ↔ service worker                                              */
-/* ========================================================================== */
-
-/** 侧边栏 → service worker */
-export type PanelRequest =
-    | { kind: 'sniffer-get-state' }
-    | { kind: 'sniffer-set-enabled'; enabled: boolean }
-    | { kind: 'sniffer-clear' }
-    | { kind: 'cookies-get'; url: string }
-    | { kind: 'cookies-remove'; url: string; name: string }
-    | { kind: 'downloads-list' }
-    | { kind: 'downloads-action'; id: number; action: 'pause' | 'resume' | 'cancel' | 'erase' | 'show' }
-    | { kind: 'downloads-start'; url: string; filename?: string };
-
-/** service worker → 侧边栏 */
-export type PanelEvent =
-    | { kind: 'sniffed-media'; item: SniffedMedia }
-    | { kind: 'sniffer-state'; enabled: boolean; items: SniffedMedia[] };
-
-/** 侧边栏回包。保留旧名以免侧边栏大改 */
-export type PanelResponse<T = unknown> = ExtensionResponse<T>;

@@ -1986,7 +1986,7 @@ export interface TamperState {
  * （要 tabId、chrome.cookies、页面主世界执行），应用侧没有任何调用者。
  *
  * 这里只留 `AgentState` 与它引用的记录类型 —— 它们是**界面契约**，
- * 插件侧边栏与悬浮球都按这个形状渲染，而 `shared/core/agent-export.ts`
+ * 悬浮球按这个形状渲染，而 `shared/core/agent-export.ts`
  * 也按 `AgentMessage[]` 导出会话 Markdown。
  */
 

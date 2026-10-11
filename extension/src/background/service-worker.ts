@@ -1,5 +1,5 @@
 /**
- * MV3 service worker：嗅探、Cookie、下载。
+ * MV3 service worker：嗅探、Cookie、下载、Agent 引擎。
  *
  * ## 三条必须守住的 MV3 约束
  *
@@ -25,10 +25,9 @@ import {
     MAX_SNIFFED_ITEMS,
     SNIFF_DEDUP_MS,
     STORAGE_KEYS,
+    type BallEvent,
     type BallRequest,
     type ExtensionResponse,
-    type PanelRequest,
-    type PanelResponse,
     type SniffedMedia,
 } from '../shared/protocol';
 import { agentBridge } from './agent-bridge';
@@ -94,13 +93,22 @@ const clearItems = (): Promise<void> =>
     });
 
 /**
- * 通知侧边栏。
+ * 把一条事件推给悬浮球。
  *
- * 面板没开时 `sendMessage` 会抛 "Could not establish connection"，
- * 这是**正常情况**不是错误 —— 必须吞掉，否则每次嗅探都会在控制台刷一条
- * 红色报错，真正的故障反而被淹没。
+ * ## `target: 'ball'` 不能省
+ *
+ * 球的监听器按 `target === 'ball'` 过滤（它必须过滤 —— 否则 offscreen 的
+ * 流式增量也会被它当成嗅探结果）。漏掉这个字段时，事件发得出去、球收得到，
+ * 但**被球自己丢掉**：表现为"打开嗅探开关后列表一直是空的，刷新页面才出现"。
+ * 这类故障没有任何报错，只能靠盯住这里的字段。
+ *
+ * ## 球没开时 sendMessage 会抛
+ *
+ * "Could not establish connection" 是**正常情况**不是错误 —— 用户没在看那个
+ * 标签页时球可能还没注入。必须吞掉，否则每次嗅探都在控制台刷一条红色报错，
+ * 真正的故障反而被淹没。
  */
-const notifyPanel = (event: unknown): void => {
+const notifyBall = (event: BallEvent): void => {
     chrome.runtime.sendMessage(event).catch(() => undefined);
 };
 
@@ -237,7 +245,7 @@ const handleResponse = async (details: chrome.webRequest.OnResponseStartedDetail
     };
 
     await pushItem(item);
-    notifyPanel({ kind: 'sniffed-media', item });
+    notifyBall({ target: 'ball', kind: 'sniffed-media', item });
 };
 
 /* ========================================================================== */
@@ -301,43 +309,12 @@ const cookieSet = async (url: string, name: string, value: string): Promise<bool
 /* ========================================================================== */
 
 /**
- * 浏览器的下载列表。
- *
- * 与应用侧的 `browser-downloads` 不同：那是自建外壳自己记的账，
- * 这里是浏览器原生下载管理器，用户按 Ctrl+J 看到的就是同一份。
- */
-const downloadsList = async () => {
-    const items = await chrome.downloads.search({ orderBy: ['-startTime'], limit: 200 });
-    return items.map((d) => ({
-        id: d.id,
-        filename: d.filename,
-        url: d.url,
-        state: d.state,
-        paused: d.paused,
-        totalBytes: d.totalBytes,
-        // 字段名是 bytesReceived 不是 receivedBytes —— 后者是 Electron 的
-        // DownloadItem 用的名字，两边的 API 只是像，不通用。
-        receivedBytes: d.bytesReceived,
-        error: d.error,
-        startTime: d.startTime,
-    }));
-};
-
-const downloadAction = async (
-    id: number,
-    action: 'pause' | 'resume' | 'cancel' | 'erase' | 'show',
-) => {
-    switch (action) {
-        case 'pause': await chrome.downloads.pause(id); break;
-        case 'resume': await chrome.downloads.resume(id); break;
-        case 'cancel': await chrome.downloads.cancel(id); break;
-        case 'erase': await chrome.downloads.erase({ id }); break;
-        case 'show': chrome.downloads.show(id); break;
-    }
-};
-
-/**
  * 起一个下载。
+ *
+ * 只有这一个下载动作：球把嗅探到的地址交给浏览器，之后**进度与暂停归
+ * 浏览器自己的下载管理器管**（Ctrl+J）。原先还有一套"列出下载 / 暂停 / 取消"
+ * 的接口，那是侧边栏用来做一份浏览器已有界面的镜像 —— 侧边栏删掉后它们
+ * 一并消失：多一层重复的列表只会和 Ctrl+J 显示得不一样，然后用户不知道该信哪个。
  *
  * `conflictAction: 'uniquify'` 不能省：同名文件直接覆盖会让用户
  * 第二次下同一个片子时**悄悄丢掉第一次的结果**。
@@ -356,15 +333,12 @@ const downloadsStart = async (url: string, filename?: string) => {
 /* ========================================================================== */
 
 /**
- * 三条通道的消息都会到这里：面板（侧边栏）、球（content script）、
- * offscreen 宿主。**必须按 `target` 分流**。
+ * 两条通道的消息都会到这里：球（content script）与 offscreen 宿主。
+ * **必须按 `target` 分流**。
  *
- * 不分流会怎样：球发的 `ai-delta` 被面板的 handler 当成未知消息，
- * 面板回一条 `{ok:false}`，而球同时在等自己的回包 —— 于是"谁来回这一条"
- * 变成了竞态。协议里带 `target` 就是为了让这件事是确定的。
- *
- * 面板的消息没有 `target`（它是既有协议，改动它要动整个侧边栏），
- * 所以判据是"有 target 的走新路径，没有的按面板处理"。
+ * 不分流会怎样：宿主推的 `ai-delta` 被当成未知消息，SW 回一条 `{ok:false}`，
+ * 而球同时在等自己的回包 —— 于是"谁来回这一条"变成了竞态。
+ * 协议里带 `target` 就是为了让这件事是确定的。
  */
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
     const envelope = message as { target?: string; kind?: string } | null;
@@ -388,16 +362,19 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
      */
     if (envelope?.target === 'host' || envelope?.target === 'ball') return false;
 
-    // 其余按面板消息处理
-    void (async (): Promise<void> => {
-        try {
-            const result = await dispatch(message as PanelRequest);
-            sendResponse({ ok: true, result } satisfies PanelResponse);
-        } catch (e) {
-            sendResponse({ ok: false, error: errorText(e) } satisfies PanelResponse);
-        }
-    })();
-    return true;
+    /*
+     * 到这里说明消息既没有 target，也不属于已知广播。
+     *
+     * **必须回一条**：不回的话调用方会一直等（响应通道开着但没人写），
+     * 表现为"界面卡在转圈"。而真正的原因往往只是一个拼错的 target。
+     * 之前这里把无 target 的消息当成侧边栏请求处理 —— 侧边栏删掉之后，
+     * 那条路径会把任何漏写 target 的消息静默吞掉。
+     */
+    sendResponse({
+        ok: false,
+        error: `未知消息（缺少 target）：${String(envelope?.kind ?? message)}`,
+    } satisfies ExtensionResponse);
+    return false;
 });
 
 const errorText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -523,51 +500,3 @@ const runAgentAction = async (
     }
 };
 
-const dispatch = async (message: PanelRequest): Promise<unknown> => {
-    switch (message.kind) {
-        case 'sniffer-set-enabled':
-            await setEnabled(message.enabled);
-            return { enabled: message.enabled };
-
-        case 'sniffer-get-state':
-            return { enabled: await getEnabled(), items: await getItems() };
-
-        case 'sniffer-clear':
-            await clearItems();
-            return { cleared: true };
-
-        case 'cookies-get':
-            return cookiesGet(message.url);
-
-        case 'cookies-remove':
-            await cookieRemove(message.url, message.name);
-            return { removed: true };
-
-        case 'downloads-list':
-            return downloadsList();
-
-        case 'downloads-action':
-            await downloadAction(message.id, message.action);
-            return { done: true };
-
-        case 'downloads-start':
-            return { downloadId: await downloadsStart(message.url, message.filename) };
-
-        default: {
-            // 穷尽检查：新增 PanelRequest 分支却忘了在这里处理时，
-            // 这一行会变成类型错误，而不是运行时的静默 undefined。
-            const never: never = message;
-            throw new Error(`未知消息：${JSON.stringify(never)}`);
-        }
-    }
-};
-
-/* ========================================================================== */
-/* 6. 顶层注册：点图标开侧边栏                                                 */
-/* ========================================================================== */
-
-chrome.sidePanel
-    .setPanelBehavior({ openPanelOnActionClick: true })
-    .catch((error) => {
-        console.error('设置侧边栏行为失败：', error);
-    });

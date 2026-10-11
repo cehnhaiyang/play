@@ -2,11 +2,13 @@
 /**
  * 插件产物自检：`extension/dist` 是不是一个 Chrome 真能加载的包。
  *
- * 为什么需要这一步：manifest 与 panel.html 里引用的是**固定文件名**
- * （service-worker.js / panel.html / panel.js / assets/*.css），
+ * 为什么需要这一步：manifest 与各入口里引用的是**固定文件名**
+ * （service-worker.js / content.js / offscreen.html），
  * 构建配置里任何一处路径推导写错，产物都会缺文件或引用错路径 ——
  * 而 Chrome 报的永远是同一句"清单文件丢失或不可读取"，
  * 看不出到底缺哪个。这里把每个引用逐个落到磁盘上验证。
+ *
+ * 同时也反向检查：已删除的东西（side panel）不该还留在产物或清单里。
  */
 const fs = require('fs');
 const path = require('path');
@@ -75,18 +77,23 @@ const run = () => {
 
     // 声明了就必须存在 —— 这是"清单文件丢失或不可读取"之外最常见的加载失败
     ok('background.service_worker', mf.background.service_worker);
-    ok('side_panel.default_path', mf.side_panel.default_path);
 
     /*
-     * content_scripts 的每一个 js 文件。
+     * side_panel 必须**不存在**。
      *
-     * 这一条是本次新增的，因为 content.js 走的是**第二份构建配置**
-     * （vite.content.config.mts，IIFE 格式），它不被主构建的 emptyOutDir 覆盖，
-     * 顺序错了会把 panel.js 删掉，或者干脆没跑。
+     * 侧边栏已删除，但 manifest 里留着 `side_panel.default_path` 指向一个
+     * 不存在的 panel.html 时，Chrome **不会**报错 —— 它只是点图标时打开一个
+     * 空白面板。这类"声明了但没产物"的残留没有任何反馈，只能靠断言挡住。
      *
-     * 漏掉的症状特别隐蔽：扩展能装、侧边栏能用，只是**网页上什么都不出现**，
-     * 而 Chrome 的扩展页不报任何错。
+     * 同理 `sidePanel` 权限：留着它会让安装提示多一条无用的权限说明。
      */
+    if (mf.side_panel) {
+        fails.push('manifest 里还留着 side_panel —— 侧边栏已删除，点图标会打开一个空白面板');
+    }
+    if ((mf.permissions || []).includes('sidePanel')) {
+        fails.push('manifest 里还声明着 sidePanel 权限 —— 侧边栏已删除，这条权限没有用处');
+    }
+
     /*
      * content_scripts 必须**存在且非空**。
      *
@@ -120,11 +127,18 @@ const run = () => {
         : [];
     for (const ref of offscreenRefs) ok('offscreen.html', ref.replace(/^\//, ''));
 
-    // panel.html 里引用的每个资源都要落得到盘上
-    const html = fs.readFileSync(path.join(DIST, 'panel.html'), 'utf8');
-    const refs = [...html.matchAll(/(?:src|href)="([^"]+)"/g)].map((x) => x[1]);
-    if (refs.length === 0) fails.push('panel.html 里没有任何资源引用（构建可能没产出）');
-    for (const ref of refs) ok('panel.html', ref.replace(/^\//, ''));
+    /*
+     * panel.html 与 panel.js 必须**不存在**。
+     *
+     * 侧边栏删掉之后，主构建的 emptyOutDir 会清掉它们 —— 但如果哪天有人
+     * 把 panel 加回 vite 的 input，产物里就会重新出现一份没人加载的界面。
+     * 那种残留不会报错，只会让下一个读代码的人以为侧边栏还在。
+     */
+    for (const stale of ['panel.html', 'panel.js']) {
+        if (fs.existsSync(path.join(DIST, stale))) {
+            fails.push(`产物里还有 ${stale} —— 侧边栏已删除，它不该被构建出来`);
+        }
+    }
 
     /*
      * content.js 必须是**自包含的传统脚本**，不能含 import 语句。
@@ -186,6 +200,51 @@ const run = () => {
         const need = NEEDS[api];
         if (need && !declared.has(need)) {
             fails.push(`代码用了 chrome.${api} 但 manifest 没声明 "${need}" 权限`);
+        }
+    }
+
+    /*
+     * 发给球的每一条广播都必须带 `target: 'ball'`。
+     *
+     * 球的监听器按 `target === 'ball'` 过滤（它必须过滤 —— 否则 offscreen
+     * 的流式增量也会被它当成嗅探结果）。漏掉这个字段时事件发得出去、球也
+     * 收得到，但**被球自己丢掉**：表现为"打开嗅探开关后列表一直是空的，
+     * 刷新页面才出现"。
+     *
+     * 这个 bug 真实存在过：SW 发的是 `{kind:'sniffed-media'}`，没有 target，
+     * 而当时侧边栏的监听器不过滤 target —— 所以删掉侧边栏之前它一直没暴露。
+     *
+     * ## 为什么要跟一层调用
+     *
+     * SW 里不是内联字面量，而是 `notifyBall({...})`，函数体内才是
+     * `sendMessage(event)`。只扫 `sendMessage({...})` 会一个都匹配不到 ——
+     * 检查恒绿。变异测试抓到过这一点（去掉 target，4 项仍全过）。
+     * 所以这里按**两种形态**分别扫：内联字面量 + notifyBall 的实参。
+     */
+    const collectBallBroadcasts = (file) => {
+        const full = path.join(srcDir, file);
+        if (!fs.existsSync(full)) return [];
+        const src = stripComments(fs.readFileSync(full, 'utf8'));
+        const found = [];
+        // 形态一：sendMessage({ ... }) —— agent-bridge 用的是这种
+        for (const m of src.matchAll(/sendMessage\(\s*\{([\s\S]*?)\}\s*\)/g)) {
+            if (/kind:\s*'(sniffed-media|agent-snapshot|agent-delta)'/.test(m[1])) found.push(m[1]);
+        }
+        // 形态二：notifyBall({ ... }) —— service-worker 用的是这种
+        for (const m of src.matchAll(/notifyBall\(\s*\{([\s\S]*?)\}\s*\)/g)) found.push(m[1]);
+        return found;
+    };
+
+    const broadcasts = [
+        ...collectBallBroadcasts(path.join('background', 'service-worker.ts')),
+        ...collectBallBroadcasts(path.join('background', 'agent-bridge.ts')),
+    ];
+    if (broadcasts.length === 0) {
+        fails.push('找不到任何发给球的广播 —— 检查失效了（球的实时更新全靠这几条）');
+    }
+    for (const body of broadcasts) {
+        if (!/target:\s*'ball'/.test(body)) {
+            fails.push(`球事件缺少 target:'ball'（球会丢弃它）：${body.trim().replace(/\s+/g, ' ').slice(0, 70)}`);
         }
     }
 

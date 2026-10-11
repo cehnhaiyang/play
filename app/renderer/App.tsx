@@ -141,7 +141,7 @@ const PlayerLayout: React.FC = () => {
 
       {/* 悬浮球常驻挂载：切到音频工坊/画廊时只 display:none 藏起来，不卸载。
         之前这里 view !== 'player' 直接不渲染，切一次视图球内全部状态清零。
-        Agent 不在这里 —— 它随浏览器外壳迁到插件侧边栏 */}
+        Agent 不在这里 —— 它随浏览器外壳迁到插件的悬浮球 */}
       <div className={view === 'player' ? 'fixed inset-0 z-50 pointer-events-none block' : 'hidden'}>
         <Floating
           onOpenGallery={openGalleryView}

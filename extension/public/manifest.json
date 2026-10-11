@@ -8,22 +8,19 @@
     "service_worker": "service-worker.js",
     "type": "module"
   },
-  "action": {
-    "default_title": "The Play（点击打开侧边栏）"
-  },
-  "side_panel": {
-    "default_path": "panel.html"
-  },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle",
       "all_frames": false
     }
   ],
   "permissions": [
-    "sidePanel",
     "storage",
     "tabs",
     "webRequest",

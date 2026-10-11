@@ -4,7 +4,7 @@
  * ## 需要 DOM
  *
  * `FileReader` / `File` / `Blob` / `URL.createObjectURL` 在插件 service worker 里
- * 都不存在。这一层只在**有 DOM 的宿主**里用：Electron 渲染层、插件侧边栏。
+ * 都不存在。这一层只在**有 DOM 的宿主**里用，目前只有 Electron 渲染层。
  * service worker 侧要处理图片时走 `fetch` + `arrayBuffer`，不要 import 这里。
  */
 import { MEDIA_EXTENSIONS } from './media';

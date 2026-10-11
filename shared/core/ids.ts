@@ -1,7 +1,7 @@
 /**
  * 唯一标识生成。
  *
- * 与宿主无关：`crypto.randomUUID` 在 Electron 渲染层、插件侧边栏、
+ * 与宿主无关：`crypto.randomUUID` 在 Electron 渲染层、
  * 插件 service worker 里都存在，缺了也有时间戳兜底。
  */
 

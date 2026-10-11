@@ -1,17 +1,16 @@
 /*
  * 悬浮球的样式表。
  *
- * ## 为什么不是 panel.css 那份
+ * ## 为什么不能与页面共用一份
  *
- * 这份被 `?inline` 成字符串注入 Shadow Root，那份是 panel.html 的普通样式表。
- * 两者不能共用：Tailwind 的 preflight 会重置 `html` / `body` 的边距与字体，
- * 而 Shadow Root 里没有这两个元素 —— 共用只会让球自己的样式表带上一堆
- * 永不匹配的选择器。
+ * 这份被 `?inline` 成字符串注入 Shadow Root。Tailwind 的 preflight 会重置
+ * `html` / `body` 的边距与字体，而 Shadow Root 里没有这两个元素 ——
+ * 共用只会让球自己的样式表带上一堆永不匹配的选择器。
  *
- * ## source(none) 照旧
+ * ## source(none)
  *
- * 与 panel.css 同一理由：Tailwind 按 **CWD** 推断扫描范围，从仓库根调用
- * `npm run ext:build` 会把整个项目扫进去。这里显式声明唯一来源是本目录。
+ * Tailwind 按 **CWD** 推断扫描范围，从仓库根调用 `npm run ext:build`
+ * 会把整个项目扫进去。这里显式声明唯一来源是本目录。
  */
 @import "tailwindcss" source(none);
 

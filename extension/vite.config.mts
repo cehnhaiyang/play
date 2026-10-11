@@ -56,12 +56,11 @@ export default defineConfig({
         moduleSideEffects: (id) => !id.includes('jszip'),
       },
       input: {
-        panel: `${here}src/panel.html`,
         offscreen: `${here}src/offscreen.html`,
         'service-worker': `${here}src/background/service-worker.ts`,
       },
       output: {
-        // 固定名：manifest.json 与 panel.html 里引用的路径不能带 hash
+        // 固定名：manifest.json 里引用的路径不能带 hash
         entryFileNames: '[name].js',
         chunkFileNames: 'chunks/[name]-[hash].js',
         assetFileNames: 'assets/[name]-[hash][extname]',
