@@ -103,6 +103,81 @@ function Test-Deps {
     return $true
 }
 
+# ── 端口占用检查 ────────────────────────────────────────────
+<#
+  找出占用指定端口的进程。
+
+  ## 为什么需要这一步
+
+  vite.config.mts 里是 strictPort: true —— 5173 被占时 vite **直接退出**，
+  不换端口。而 concurrently 带 -k：一个进程退出就把另一个也 SIGTERM 掉，
+  于是整个 electron:dev 立刻结束。用户看到的是这么一段：
+
+      [0] Error: Port 5173 is already in use
+      [0] vite exited with code 1
+      --> Sending SIGTERM to other processes..
+
+  它没说"谁占着"，也没说"怎么办"。而真实原因几乎总是**上一次的开发环境
+  没退干净**（Ctrl+C 之后 vite 的子进程可能还活着，或另一个终端还开着）。
+
+  这里主动查出来并给出 PID，用户可以直接决定要不要清掉。
+#>
+function Get-PortOwner {
+    param([int]$Port)
+    try {
+        $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop
+    }
+    catch { return $null }
+    if (-not $conn) { return $null }
+    $pid_ = ($conn | Select-Object -First 1).OwningProcess
+    $proc = Get-Process -Id $pid_ -ErrorAction SilentlyContinue
+    $cmd = ''
+    try {
+        $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$pid_").CommandLine
+    }
+    catch { }
+    return [pscustomobject]@{ Pid = $pid_; Name = $(if ($proc) { $proc.ProcessName } else { '?' }); Command = $cmd }
+}
+
+# 若端口被占则报告并询问是否清掉。返回 $true 表示"可以继续"
+function Test-DevPort {
+    $owner = Get-PortOwner -Port 5173
+    if (-not $owner) { return $true }
+
+    Write-Err "端口 5173 已被占用，vite 会直接退出（strictPort: true）"
+    Write-Info "  占用者  PID $($owner.Pid)  $($owner.Name)"
+    if ($owner.Command) {
+        Write-Info "  命令    $($owner.Command.Substring(0, [Math]::Min(100, $owner.Command.Length)))"
+    }
+    Write-Host ""
+    Write-Info "  多半是上一次的开发环境没退干净。Ctrl+C 之后 vite 的子进程有时还活着。"
+
+    if ($script:BatchMode) {
+        Write-Err "请先结束该进程，或改用别的端口"
+        return $false
+    }
+
+    $kill = Read-Host "  结束 PID $($owner.Pid) 并继续？(y/N)"
+    if ($kill -ne 'y' -and $kill -ne 'Y') {
+        Write-Info "  已取消。请手动处理端口占用后重试。"
+        return $false
+    }
+    try {
+        Stop-Process -Id $owner.Pid -Force -ErrorAction Stop
+        Start-Sleep -Milliseconds 600
+        if (Get-PortOwner -Port 5173) {
+            Write-Err "PID $($owner.Pid) 已结束，但端口仍被占用（可能是另一个进程）"
+            return $false
+        }
+        Write-Ok "端口 5173 已释放"
+        return $true
+    }
+    catch {
+        Write-Err "结束进程失败：$($_.Exception.Message)"
+        return $false
+    }
+}
+
 # 执行 npm 命令；显式调用 npm.cmd 以确保 $LASTEXITCODE 可靠。
 # 必须用 -NpmArgs 具名传参：直接写 Invoke-Npm @('run','build') 会按位置
 # 把 'build' 绑到 SuccessMsg 上（数组 splat 的位置绑定），导致参数传错。
@@ -283,8 +358,8 @@ function Register-Host {
 function Start-Dev {
     if (-not (Test-Deps)) { Pause-Return; return }
 
-    # 球的可用性完全依赖本机桥：没注册的话球上只有一句"插件未连接"，
-    # 而那与"浏览器没开"长得一样，会让人往错的方向查。
+    # 球的可用性完全依赖本机桥：没注册的话球上只有一句「插件未连接」，
+    # 而那与「浏览器没开」长得一样，会让人往错的方向查。
     $hostOk = Show-HostStatus
     if (-not $hostOk) {
         Write-Host ""
@@ -292,6 +367,12 @@ function Start-Dev {
         $go = Read-Host "  仍要继续启动？(y/N)"
         if ($go -ne 'y' -and $go -ne 'Y') { Pause-Return; return }
     }
+
+    # 端口检查必须在启动之前。strictPort 下 vite 不会换端口，而是直接退出，
+    # concurrently 的 -k 又把它整个带停 —— 报出来只有一句 "Port already in use"，
+    # 不说谁占着、也不说怎么办。这里提前查出来并给出 PID。
+    Write-Host ""
+    if (-not (Test-DevPort)) { Pause-Return; return }
 
     Write-Step "开发环境（Vite + Electron）"
     Write-Info "页面地址 http://localhost:5173（vite.config.mts 中 strictPort: true）"
