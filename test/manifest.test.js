@@ -258,7 +258,7 @@ const run = () => {
      * 必须有对应的 `emitBridgeEvent(X, ...)`。按 kind 逐个比对，而不是数个数 ——
      * 数个数会在"加了新事件但忘了桥"时仍然相等。
      */
-    const BALL_KINDS = ['sniffed-media', 'agent-snapshot', 'agent-delta'];
+    const BALL_KINDS = ['sniffed-media', 'tabs-changed', 'agent-snapshot', 'agent-delta'];
     for (const file of ['background/service-worker.ts', 'background/agent-bridge.ts']) {
         const full = path.join(srcDir, file);
         if (!fs.existsSync(full)) continue;

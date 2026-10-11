@@ -1,25 +1,43 @@
 /**
  * 嗅探结果的归属与标题判定。
  *
- * 与宿主无关：Electron 的嗅探面板与插件的嗅探标签页读同一份判据 ——
- * 同一个地址在两边不该得出不同结论。
+ * 与宿主无关：Electron 的嗅探球与插件的嗅探逻辑读同一份判据 ——
+ * 同一个地址在两边不该得出不同结论。所以这个模块只放**纯函数**：
+ * 它会被 service worker import，那里没有 DOM（见 test/extsniffer.test.js
+ * 最后那组断言）。
  */
 
 /**
- * 这条嗅探结果是否属于某个页面。
+ * 这条资源是否属于某个标签页。
  *
- * **三处共用的唯一判据**：「仅当前页」筛选、当前页计数、「清空当前」。
- * 三处曾经各写一份，其中「清空当前」那份少了 `!pageUrl` 这一支 ——
- * 于是没有 pageUrl 的条目（旧缓存、网络层未带上）在「仅当前页」下可见却清不掉，
- * 用户点「清空当前」后列表里还剩几条，看起来像按钮没生效。
+ * **两端共用的唯一判据**：插件的「清空此标签页」与球上的标签栏筛选。
+ * 两处各写一份的后果实测过（那时判据是 pageUrl）：界面上看得见的条目清不掉，
+ * 用户点完发现列表里还剩几条，看起来像按钮没生效。
  *
- * pageUrl 为空视为属于当前页：那种条目无法归到任何具体页面，
- * 若不算进来就会永远清不掉，只能点「清空全部」。
+ * 判据是**数组包含**而不是相等：同一个地址可能被两个标签页请求过
+ * （同一个视频站开两个标签页、或共用的 CDN 资源），那两个标签页下都该看到它。
  */
-export const isLinkFromPage = (
-    link: { pageUrl?: string } | null | undefined,
-    pageUrl: string,
-): boolean => !!link && (!link.pageUrl || link.pageUrl === pageUrl);
+export const isFromTab = (
+    item: { tabIds?: number[] } | null | undefined,
+    tabId: number,
+): boolean => !!item && (item.tabIds || []).includes(tabId);
+
+/**
+ * 从一条结果的标签页归属里摘掉一个标签页。
+ *
+ * 返回 `null` 表示这条该**整条丢掉** —— 没有别的标签页还拥有它。
+ * 返回原对象（同一个引用）表示这个标签页本来就不拥有它，调用方据此跳过写盘。
+ *
+ * 单独一个函数而不是在两处各写一遍 `filter`：判据一旦分叉，"清掉 A 标签页
+ * 却把 B 标签页也有的条目一起删了"这种错在两端表现还不一样（一端多删、
+ * 一端少删），而两边都"成功"。
+ */
+export const withoutTab = <T extends { tabIds?: number[] }>(item: T, tabId: number): T | null => {
+    const tabIds = item.tabIds || [];
+    if (!tabIds.includes(tabId)) return item;
+    const rest = tabIds.filter((id) => id !== tabId);
+    return rest.length === 0 ? null : { ...item, tabIds: rest };
+};
 
 /**
  * 标题是不是"没信息量"的那种。

@@ -10,8 +10,8 @@ import {
     pushToPlayer,
     SOURCE_LABEL,
 } from './bridge-client';
-import type { SniffedMedia } from './bridge-client';
-import { isLinkFromPage, isPlayableMedia, requiresFfmpeg } from '../../../shared/core';
+import type { BrowserTab, SniffedMedia } from './bridge-client';
+import { isFromTab, isPlayableMedia, requiresFfmpeg, withoutTab } from '../../../shared/core';
 import type { MediaType, PlayMediaItem } from '../../../shared/meta';
 
 /**
@@ -26,17 +26,25 @@ import type { MediaType, PlayMediaItem } from '../../../shared/meta';
  * 列表互相漂移"这个问题从根上没有了 —— 这是从 content script 改成
  * 独立窗口之后顺带拿到的最大好处。
  *
+ * ## 作用域是"浏览器里打开的全部标签页"
+ *
+ * 嗅探不区分标签页：任何标签页里出现的媒体都会被收进来，包括后台那些。
+ * 球这边的**筛选轴是标签页**（顶部标签栏），而不是"当前页"——
+ * "当前"是浏览器里那个会随时变的状态，球拿到的永远是快照，
+ * 用户切一下标签页界面就过期了。
+ *
+ * 所以判据用 `SniffedMedia.tabIds`（`isFromTab`）：标签页 id 是稳定的身份，
+ * 导航之后不变。拿 pageUrl 当筛选键会在页面跳转的那一刻把选中的标签页弄丢。
+ *
  * ## 关掉嗅探时列表仍显示
  *
  * 这是有意的：用户关掉总开关往往正是为了**停下来看已经抓到的那些**。
  * 清空是另一个显式动作。
  *
- * ## 按页面分组
+ * ## 列表内仍按页面分组
  *
- * 插件的列表是**所有标签页混在一起**的一份（`pageUrl` 是唯一能把它们分开的
- * 字段）。平铺着画会有两个后果：看不出某条是哪个页面来的，以及一旦换个页面
- * 就以为"只嗅探了第一个页面" —— 实际上每条都带着自己的 pageUrl。
- * 所以这里按 pageUrl 分组，最近的页面排在最前。
+ * 一个标签页可以导航（点进第二页），那时它名下的资源来自两个页面地址。
+ * 平铺着画会看不出某条是导航前还是导航后来的，所以组内再按 pageUrl 分组。
  */
 
 /** 列表渲染上限。与插件的 SNIFF_RENDER_MAX 同一口径，超出的不画 */
@@ -96,19 +104,33 @@ const shortenPage = (pageUrl: string): string => {
     }
 };
 
+/** 标签栏上那一条的文案。标题常常为空（页面还在加载），那就退回域名 */
+const tabLabel = (tab: BrowserTab): string => {
+    if (tab.title) return tab.title;
+    try {
+        return new URL(tab.url).host;
+    } catch {
+        return tab.url || `标签页 ${tab.id}`;
+    }
+};
+
 export const SniffOrb = () => {
     const [enabled, setEnabled] = useState(false);
     const [items, setItems] = useState<SniffedMedia[]>([]);
+    const [tabs, setTabs] = useState<BrowserTab[]>([]);
     const [error, setError] = useState('');
     const [connected, setConnected] = useState(true);
     const [busy, setBusy] = useState(false);
     /** 页内扫描或 AI 分析在途。与 busy 分开：那两个可能几秒到几十秒，要给得出反馈 */
     const [scanning, setScanning] = useState('');
     const [filter, setFilter] = useState<MediaType | 'all'>('all');
-    /** 「仅当前页」：勾上之后只画活动标签页来的条目 */
-    const [currentOnly, setCurrentOnly] = useState(false);
-    /** 当前活动标签页地址。它是「仅当前页」与「清空当前页」的判据 */
-    const [activePage, setActivePage] = useState('');
+    /**
+     * 选中的标签页。
+     *
+     * `null` = 全部标签页。存 **id** 而不是 url：标签页导航之后 url 会变，
+     * 而用户选的是"那个标签页"，不是"那个地址"。
+     */
+    const [activeTabId, setActiveTabId] = useState<number | null>(null);
 
     /*
      * 桥的连接状态：查一次，之后跟着推送走。
@@ -143,31 +165,44 @@ export const SniffOrb = () => {
         })();
     }, [connected]);
 
-    /*
-     * 当前活动标签页。
+    /**
+     * 标签栏的数据源。
      *
-     * 「仅当前页」筛选与「清空当前页」都要它，而它是**浏览器侧的事实**，
-     * 只能问插件。没有这一条的话，那两个功能就只能退化成"用户自己看地址"。
+     * ## 为什么每次都重拉，而不是在本地维护一份
      *
-     * 桥连上、开关变化时各问一次：用户切标签页时不会通知球（球不在页面里），
-     * 所以只能在这些时刻刷新 —— 刷新频率够用，而轮询一个窗口状态是纯浪费。
+     * "浏览器里开着哪些标签页"是**浏览器侧的事实**，球（Electron 窗口）
+     * 无从得知。本地维护一份就意味着要自己处理新建、关闭、导航、窗口切换
+     * 四种变化，而插件那边一条 `chrome.tabs.query` 就是准确答案。
+     *
+     * 触发点有两个：连上桥时拉一次，以及插件推 `tabs-changed` 时重拉
+     * （见下面那个 effect）。
      */
+    const refreshTabs = useCallback(async () => {
+        try {
+            const result = await bridge<{ tabs: BrowserTab[] }>('sniffer-tabs');
+            setTabs(result.tabs || []);
+        } catch {
+            // 标签栏拉不到不是致命错误：列表本身仍然可用（全部标签页混在一起）。
+            // 在这里报一条红字只会把"插件没连上"那句挤掉
+            setTabs([]);
+        }
+    }, []);
+
     useEffect(() => {
         if (!connected) return;
-        void (async () => {
-            try {
-                const info = await bridge<{ pageUrl: string }>('sniffer-active-page');
-                setActivePage(info.pageUrl || '');
-            } catch {
-                // 问不到就当作"没有当前页"：筛选与清空都会退回"全部"，
-                // 而不是拿着一个过期的地址去清错页面
-                setActivePage('');
-            }
-        })();
-    }, [connected, enabled]);
+        void refreshTabs();
+    }, [connected, refreshTabs]);
 
-    /* 实时接收新结果。组件卸载时监听器随之消失 */
+    /*
+     * 实时接收新结果，以及"标签页集合变了"。
+     *
+     * 组件卸载时监听器随之消失。
+     */
     useEffect(() => onBridgeEvent((event, payload) => {
+        if (event === 'tabs-changed') {
+            void refreshTabs();
+            return;
+        }
         if (event !== 'sniffed-media') return;
         const item = payload as SniffedMedia;
         /*
@@ -184,23 +219,36 @@ export const SniffOrb = () => {
             next[index] = { ...prev[index], ...item, foundAt: prev[index].foundAt };
             return next;
         });
-    }), []);
+    }), [refreshTabs]);
+
+    /*
+     * 选中的标签页被关掉之后，选中项必须回到「全部」。
+     *
+     * 不清的话筛选条件会指向一个不存在的 id：列表永远是空的，而标签栏上
+     * 也看不出哪个是选中的（那一项已经没了）—— 用户看到的是"嗅探坏了"。
+     */
+    useEffect(() => {
+        if (activeTabId === null) return;
+        if (!tabs.some((tab) => tab.id === activeTabId)) setActiveTabId(null);
+    }, [tabs, activeTabId]);
 
     const toggle = useCallback(async () => {
         const next = !enabled;
         setError('');
         setBusy(true);
+        setScanning(next ? '正在扫描全部标签页…' : '');
         try {
             await bridge('sniffer-set-enabled', { enabled: next });
             setEnabled(next);
             setConnected(true);
-            // 打开开关时插件会顺手扫一次当前页，那批结果走事件推过来，
+            // 打开开关时插件会扫一遍全部标签页，那批结果走事件推过来，
             // 所以这里不必再拉一次全量
         } catch (e) {
             setError(e instanceof Error ? e.message : String(e));
             setConnected(await bridgeConnected());
         } finally {
             setBusy(false);
+            setScanning('');
         }
     }, [enabled]);
 
@@ -210,17 +258,30 @@ export const SniffOrb = () => {
      * 与"持续嗅探"开关无关：开关关着时点它也只扫这一次，网络层不会因此
      * 开始推送。扫的是页内那几条路（DOM / Performance / `__playinfo__` / 源码正则），
      * 结果由插件推事件回来 —— 所以这里只负责等，不负责取。
+     *
+     * 扫的是**全部标签页**，与嗅探本身的作用域一致。
      */
     const scan = useCallback(async (kind: 'sniffer-scan' | 'sniffer-ai-scan') => {
         setError('');
-        setScanning(kind === 'sniffer-scan' ? '正在扫描页面…' : 'AI 正在分析页面…');
+        const isAi = kind === 'sniffer-ai-scan';
+        setScanning(isAi ? 'AI 正在分析页面…' : '正在扫描全部标签页…');
         try {
-            const result = await bridge<{ added: number }>(kind);
+            /*
+             * AI 那条**只扫选中的那一个**（没选就是当前活动的）。
+             *
+             * 一次 AI 分析是一整份页面源码加一次模型往返；把几十个标签页
+             * 一起发出去不是点一下按钮该有的后果，用户也没法知道钱花在哪。
+             * 页内扫描是纯本地的，扫全部才符合"嗅探浏览器里的一切"。
+             */
+            const result = await bridge<{ added: number; scanned?: number }>(
+                kind,
+                isAi ? { tabId: activeTabId ?? undefined } : undefined,
+            );
             setConnected(true);
             if (result.added === 0) {
-                setError(kind === 'sniffer-scan'
-                    ? '这次扫描没有发现新的媒体地址（页面可能没有可嗅探的内容，或该页面不允许注入）。'
-                    : 'AI 没有从页面里找出新的媒体地址。');
+                setError(isAi
+                    ? 'AI 没有从页面里找出新的媒体地址。'
+                    : '这次扫描没有发现新的媒体地址（页面可能没有可嗅探的内容，或该页面不允许注入）。');
             }
         } catch (e) {
             setError(e instanceof Error ? e.message : String(e));
@@ -228,7 +289,7 @@ export const SniffOrb = () => {
         } finally {
             setScanning('');
         }
-    }, []);
+    }, [activeTabId]);
 
     const clear = useCallback(async () => {
         setError('');
@@ -240,26 +301,52 @@ export const SniffOrb = () => {
         }
     }, []);
 
-    /** 清掉当前页面来的条目。判据在插件侧与「仅当前页」共用一份（isLinkFromPage） */
-    const clearCurrentPage = useCallback(async () => {
+    /** 清掉选中标签页来的条目 */
+    const clearActiveTab = useCallback(async () => {
+        if (activeTabId === null) return;
         setError('');
         try {
-            const result = await bridge<{ removed: number }>('sniffer-clear-page', {
-                pageUrl: activePage || undefined,
-            });
+            const result = await bridge<{ removed: number }>('sniffer-clear-tab', { tabId: activeTabId });
             /*
              * 本地同步删掉同一批。
              *
              * 插件不会为"被清掉的条目"推事件（推送只表示"发现了新的"），
              * 所以不在这里删的话，界面上会一直显示已经不在列表里的东西 ——
-             * 用户再点一次"清空当前页"会得到"没有可清的了"，而列表还在。
+             * 用户再点一次会得到"没有可清的了"，而列表还在。
+             *
+             * 用 `withoutTab` 而不是整条过滤：别的标签页也请求过的地址只摘掉
+             * 这个标签页的归属，条目本身留着 —— 整条删掉的话它在另一个标签页
+             * 下也消失了，而那个标签页并没有被清。
              */
-            setItems((prev) => prev.filter((item) => !isLinkFromPage(item, activePage)));
-            if (result.removed === 0) setError('当前页面没有可清空的条目。');
+            setItems((prev) => prev.flatMap((item) => {
+                const kept = withoutTab(item, activeTabId);
+                return kept ? [kept] : [];
+            }));
+            if (result.removed === 0) setError('这个标签页没有可清空的条目。');
         } catch (e) {
             setError(e instanceof Error ? e.message : String(e));
         }
-    }, [activePage]);
+    }, [activeTabId]);
+
+    /**
+     * 关闭一个浏览器标签页。
+     *
+     * 球上点 × 就该等于在浏览器里关掉它 —— 只从球上藏起来会让用户以为
+     * 关掉了，而浏览器里那个标签页还在跑（还在嗅探、还在播视频）。
+     *
+     * 关掉之后**立刻重拉标签栏**，不等插件的 `tabs-changed` 事件：
+     * 那条事件走 native messaging 回来要一个来回，而用户点完 × 就在等界面反应。
+     */
+    const closeTab = useCallback(async (tabId: number) => {
+        setError('');
+        try {
+            await bridge('sniffer-close-tab', { tabId });
+        } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+        } finally {
+            await refreshTabs();
+        }
+    }, [refreshTabs]);
 
     /**
      * 下载。
@@ -321,16 +408,38 @@ export const SniffOrb = () => {
         }
     }, []);
 
-    /* 筛选。两个条件是"与"关系：类型筛 + 范围筛 */
+    /*
+     * 筛选。两个条件是"与"关系：标签页筛 + 类型筛。
+     *
+     * 判据 `isFromTab` 与插件侧的「清空此标签页」是同一份 —— 界面上看得见的
+     * 条目必须都能清掉，两处各写一份的后果实测过（那时判据是 pageUrl）。
+     *
+     * 不属于任何标签页的条目（SW 发起的请求、旧缓存）只在「全部」下出现。
+     */
     const filtered = useMemo(() => {
         let list = items;
-        if (currentOnly && activePage) list = list.filter((item) => isLinkFromPage(item, activePage));
+        if (activeTabId !== null) list = list.filter((item) => isFromTab(item, activeTabId));
         if (filter !== 'all') list = list.filter((item) => item.type === filter);
         return list;
-    }, [items, filter, currentOnly, activePage]);
+    }, [items, filter, activeTabId]);
 
     const groups = useMemo(() => groupByPage(filtered), [filtered]);
-    const pageCount = useMemo(() => new Set(items.map((item) => item.pageUrl || '')).size, [items]);
+
+    /**
+     * 每个标签页名下有多少条。
+     *
+     * 一次算完（而不是每画一个标签页就 filter 一遍）：标签栏有几十项时，
+     * 逐项过滤整个列表是 O(标签页数 × 条目数)。
+     */
+    const countByTab = useMemo(() => {
+        const counts = new Map<number, number>();
+        for (const item of items) {
+            for (const id of item.tabIds || []) counts.set(id, (counts.get(id) ?? 0) + 1);
+        }
+        return counts;
+    }, [items]);
+
+    const activeTab = activeTabId === null ? null : tabs.find((tab) => tab.id === activeTabId) || null;
 
     const toolbar = (
         <>
@@ -338,6 +447,7 @@ export const SniffOrb = () => {
                 type="button"
                 onClick={() => void scan('sniffer-scan')}
                 disabled={!!scanning || busy}
+                title="扫描全部标签页的 DOM / Performance / 播放器全局对象与源码"
                 className="shrink-0 rounded-lg bg-white/[0.06] px-2 py-1 text-[10px] font-medium text-slate-300 transition hover:bg-white/[0.12] hover:text-white disabled:opacity-40"
             >
                 嗅探
@@ -346,7 +456,9 @@ export const SniffOrb = () => {
                 type="button"
                 onClick={() => void scan('sniffer-ai-scan')}
                 disabled={!!scanning || busy}
-                title="把页面源码交给模型，让它挑出结构化资源（比扫描慢，但能找出页面里没写的直链）"
+                title={activeTab
+                    ? `把「${tabLabel(activeTab)}」的源码交给模型挑结构化资源`
+                    : '把当前活动标签页的源码交给模型挑结构化资源（比扫描慢，但能找出页面里没写的直链）'}
                 className="shrink-0 rounded-lg bg-white/[0.06] px-2 py-1 text-[10px] font-medium text-fuchsia-300 transition hover:bg-white/[0.12] disabled:opacity-40"
             >
                 AI
@@ -374,7 +486,7 @@ export const SniffOrb = () => {
                     ? '插件未连接'
                     : scanning
                         ? scanning
-                        : `${items.length} 条 / ${pageCount} 个页面`
+                        : `${items.length} 条 / ${tabs.length} 个标签页`
             }
             accent="from-sky-500 via-blue-500 to-indigo-400"
             icon={<RadarIcon className="h-6 w-6" />}
@@ -399,6 +511,73 @@ export const SniffOrb = () => {
                 </div>
             )}
 
+            {/*
+              标签栏。**这是筛选轴**：点一项就只看那个标签页的资源，
+              点 × 就在浏览器里关掉它。
+
+              横向滚动而不是换行：几十个标签页换行会占掉面板一大半高度，
+              而列表才是主角。滚动条隐藏（`scrollbar-hide` 见 orb.css），
+              靠滚轮与拖拽浏览。
+            */}
+            {connected && tabs.length > 0 && (
+                <div className="scrollbar-hide flex shrink-0 items-center gap-1 overflow-x-auto border-b border-white/[0.07] px-2 py-1.5">
+                    <button
+                        type="button"
+                        onClick={() => setActiveTabId(null)}
+                        title="显示全部标签页嗅到的资源"
+                        className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] transition ${
+                            activeTabId === null
+                                ? 'bg-sky-500/25 text-sky-200'
+                                : 'text-slate-500 hover:bg-white/[0.06] hover:text-slate-300'
+                        }`}
+                    >
+                        全部 {items.length}
+                    </button>
+                    {tabs.map((tab) => {
+                        const selected = tab.id === activeTabId;
+                        const count = countByTab.get(tab.id) ?? 0;
+                        return (
+                            /*
+                             * 一项 = 选中按钮 + 关闭按钮，包在一个容器里。
+                             *
+                             * 不用一个按钮内嵌一个按钮：HTML 不允许按钮嵌套，
+                             * React 会渲染出来但点击行为取决于浏览器，实测是
+                             * 点 × 时两个 onClick 都触发（既切换又关闭）。
+                             */
+                            <span
+                                key={tab.id}
+                                className={`group/tab flex shrink-0 items-center rounded ${
+                                    selected ? 'bg-sky-500/25' : 'hover:bg-white/[0.06]'
+                                }`}
+                            >
+                                <button
+                                    type="button"
+                                    onClick={() => setActiveTabId(tab.id)}
+                                    title={`${tab.url}\n${count} 条资源`}
+                                    className={`max-w-[140px] truncate py-0.5 pl-1.5 text-[10px] transition ${
+                                        selected ? 'text-sky-200' : 'text-slate-500 hover:text-slate-300'
+                                    }`}
+                                >
+                                    {/* 活动标签页点一个圆点标出来：标题可能一样，位置不会 */}
+                                    {tab.active && <span className="mr-1 text-emerald-400">•</span>}
+                                    {tabLabel(tab)}
+                                    {count > 0 && <span className="ml-1 font-mono text-[9px] text-slate-600">{count}</span>}
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => void closeTab(tab.id)}
+                                    title="关闭这个浏览器标签页"
+                                    aria-label={`关闭 ${tabLabel(tab)}`}
+                                    className="shrink-0 py-0.5 pr-1.5 pl-0.5 text-[10px] text-slate-600 transition hover:text-rose-300"
+                                >
+                                    ×
+                                </button>
+                            </span>
+                        );
+                    })}
+                </div>
+            )}
+
             {/* 筛选栏。没有条目时不画：一排点了没反应的按钮比没有更让人困惑 */}
             {items.length > 0 && (
                 <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-white/[0.07] px-2 py-1.5">
@@ -416,26 +595,16 @@ export const SniffOrb = () => {
                             {option.label}
                         </button>
                     ))}
-                    <span className="mx-1 h-3 w-px bg-white/10" />
                     <button
                         type="button"
-                        onClick={() => setCurrentOnly((v) => !v)}
-                        title={activePage || '当前没有可识别的页面'}
-                        className={`rounded px-1.5 py-0.5 text-[10px] transition ${
-                            currentOnly
-                                ? 'bg-sky-500/25 text-sky-200'
-                                : 'text-slate-500 hover:bg-white/[0.06] hover:text-slate-300'
-                        }`}
-                    >
-                        仅当前页
-                    </button>
-                    <button
-                        type="button"
-                        onClick={() => void clearCurrentPage()}
-                        disabled={!activePage}
+                        onClick={() => void clearActiveTab()}
+                        disabled={activeTabId === null}
+                        title={activeTabId === null
+                            ? '先在标签栏里选中一个标签页'
+                            : '清掉这个标签页嗅到的全部条目（不影响其它标签页）'}
                         className="ml-auto rounded px-1.5 py-0.5 text-[10px] text-slate-500 transition hover:text-rose-300 disabled:opacity-30"
                     >
-                        清空当前页
+                        清空此标签页
                     </button>
                     <button
                         type="button"
@@ -473,9 +642,11 @@ export const SniffOrb = () => {
                 <p className="p-4 text-[11px] leading-relaxed text-slate-500">
                     {items.length === 0
                         ? (enabled
-                            ? '正在记录浏览中出现的视频、音频与流媒体地址。点「嗅探」可以立刻扫一遍当前页面。'
-                            : '嗅探默认关闭。点「嗅探」扫一次当前页面，或打开「持续」让它自动记录。')
-                        : '当前筛选条件下没有条目。'}
+                            ? '正在记录所有标签页里出现的视频、音频与流媒体地址。点「嗅探」可以立刻把每个标签页都扫一遍。'
+                            : '嗅探默认关闭。点「嗅探」扫一遍全部标签页，或打开「持续」让它自动记录。')
+                        : activeTabId !== null
+                            ? '这个标签页还没有嗅到资源。'
+                            : '当前筛选条件下没有条目。'}
                 </p>
             ) : (
                 <div className="min-h-0 flex-1 overflow-y-auto">
@@ -484,18 +655,23 @@ export const SniffOrb = () => {
                             {/*
                               页面标题条。吸附在顶部：列表长了之后滚动时
                               始终知道下面这些条目属于哪个页面。
+
+                              选中单个标签页时**不画它**：那个标签页的资源全在
+                              同一个组里，一条和标签栏重复的标题条只是白占一行。
                             */}
-                            <h3
-                                className="sticky top-0 z-10 flex items-center gap-1.5 border-y border-white/[0.07] bg-slate-900/95 px-3 py-1 backdrop-blur-sm"
-                                title={group.pageUrl || '这条结果没有记录来源页面'}
-                            >
-                                <span className="min-w-0 flex-1 truncate text-[10px] font-medium text-slate-400">
-                                    {shortenPage(group.pageUrl)}
-                                </span>
-                                <span className="shrink-0 font-mono text-[9px] text-slate-600">
-                                    {group.items.length}
-                                </span>
-                            </h3>
+                            {activeTabId === null && (
+                                <h3
+                                    className="sticky top-0 z-10 flex items-center gap-1.5 border-y border-white/[0.07] bg-slate-900/95 px-3 py-1 backdrop-blur-sm"
+                                    title={group.pageUrl || '这条结果没有记录来源页面'}
+                                >
+                                    <span className="min-w-0 flex-1 truncate text-[10px] font-medium text-slate-400">
+                                        {shortenPage(group.pageUrl)}
+                                    </span>
+                                    <span className="shrink-0 font-mono text-[9px] text-slate-600">
+                                        {group.items.length}
+                                    </span>
+                                </h3>
+                            )}
                             <ul className="divide-y divide-white/5">
                                 {group.items.map((item) => (
                                     <li key={item.url} className="group px-3 py-2 hover:bg-white/[0.04]">

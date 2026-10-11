@@ -27,11 +27,30 @@ export interface SniffedMedia {
     source: MediaSourceChannel;
     referer?: string;
     pageUrl?: string;
+    /**
+     * 这条资源被哪些浏览器标签页请求过。
+     *
+     * 是数组而不是单个 id：同一个地址可能被两个标签页请求（同一个视频站开
+     * 两个页、或共用的 CDN 资源），只记第一个会让"切到另一个标签页就看不到它"。
+     *
+     * 空数组表示"不属于任何标签页"（Service Worker 发起的请求、或旧版本
+     * 落盘的条目）—— 那种只在「全部」下出现，不冒充某一个标签页。
+     */
+    tabIds?: number[];
     foundAt: number;
 }
 
+/** 浏览器里的一个标签页。与插件的 BrowserTab 同形 */
+export interface BrowserTab {
+    id: number;
+    url: string;
+    title: string;
+    active: boolean;
+    windowId: number;
+}
+
 /** 插件推来的事件名。与 extension/src/background 里 emitBridgeEvent 的取值一一对应 */
-export type BridgeEventName = 'sniffed-media' | 'agent-snapshot' | 'agent-delta';
+export type BridgeEventName = 'sniffed-media' | 'tabs-changed' | 'agent-snapshot' | 'agent-delta';
 
 /** 引擎快照过桥后的形状。`actions` 是函数，JSON 序列化时被丢掉 —— 见下 */
 export type EngineSnapshot = Omit<AgentState, 'actions'> & { revision: number };

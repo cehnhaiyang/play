@@ -540,7 +540,8 @@ const run = () => {
          */
         const mustForward = [
             'sniffer-set-enabled', 'sniffer-get-state', 'sniffer-clear',
-            'sniffer-clear-page', 'sniffer-scan', 'sniffer-active-page',
+            'sniffer-clear-tab', 'sniffer-tabs', 'sniffer-close-tab',
+            'sniffer-scan', 'sniffer-active-page',
             'sniffer-ai-scan', 'downloads-start', 'agent-snapshot', 'agent-action',
             // 面板的「规则 / 请求头 / 存储 / JWT」四个页签走的就是这几条
             'tamper-get', 'tamper-set', 'tamper-inject',
@@ -558,7 +559,7 @@ const run = () => {
         }
 
         // 反向：转发之后不该再碰那些内部函数（碰了说明只转了一半）
-        for (const fn of ['clearItems(', 'scanTab(', 'aiSniffTab(', 'clearPage(', 'getItems(']) {
+        for (const fn of ['clearItems(', 'scanTab(', 'aiSniffTab(', 'clearTab(', 'getItems(']) {
             assert(!body.includes(fn),
                 `dispatchBall 里直接调了 ${fn} —— 与桥重叠的操作必须整条转发，`
                 + '只转一半等于又造了一份实现。');
@@ -646,6 +647,61 @@ const run = () => {
         eq(missing.length, 0,
             `这些 kind 在 BallRequest 里声明了，但 dispatchBall 没有分支：${missing.join('、')}。`
             + '球发出去会落到穷尽检查，抛"未知消息"—— 表现是界面点了没反应。');
+    });
+
+    /* ====================================================================== */
+    /* 8.5 标签页归属：两端共用的唯一判据                                        */
+    /* ====================================================================== */
+
+    /**
+     * 嗅探的作用域是"浏览器里打开的全部标签页"，所以归属判据是标签页 id。
+     *
+     * **必须直接调用判据，不能只 grep 源码。** 变异测试实测过：把一个判据
+     * 换成 `() => false`，全部用例照样绿 —— 因为没有任何一条断言调用过它，
+     * 那些"断言"只是在源码里找那个名字。
+     *
+     * 覆盖三种状态：拥有、不拥有、摘掉之后剩下的。
+     */
+    check('isFromTab：拥有 / 不拥有 / 没有归属三种状态', () => {
+        const { isFromTab, withoutTab } = CONST;
+
+        // 一条被两个标签页请求过的资源：两个标签页下都必须看得见。
+        // 只记第一个会让"切到另一个标签页就看不到它"，而那个标签页确实请求过它
+        const shared = { url: 'u', tabIds: [3, 7] };
+        eq(isFromTab(shared, 3), true, '被 3 号请求过');
+        eq(isFromTab(shared, 7), true, '也被 7 号请求过 —— 单 id 存不下这个事实');
+        eq(isFromTab(shared, 9), false, '没被 9 号请求过');
+
+        // 没有归属的条目（SW 发起的请求、旧版本落盘的记录）：哪个标签页都不算它
+        eq(isFromTab({ url: 'u' }, 3), false, '没有 tabIds 时不属于任何标签页');
+        eq(isFromTab({ url: 'u', tabIds: [] }, 3), false, '空数组同理');
+        eq(isFromTab(null, 3), false, 'null 不该抛');
+    });
+
+    check('withoutTab：别的标签页也有它时只摘归属，不整条删', () => {
+        const { withoutTab } = CONST;
+
+        // 两个标签页共有 → 摘掉一个之后条目还在，且不再属于被摘的那个
+        const shared = { url: 'u', tabIds: [3, 7] };
+        const after = withoutTab(shared, 3);
+        // 比 JSON 而不是 eq()：eq 用 `!==` 比，两个不同的数组永远不等 ——
+        // 那样写出来的断言会无条件报红，而不是在判据坏掉时报红
+        eq(JSON.stringify(after?.tabIds), JSON.stringify([7]), '3 号被摘掉，7 号还在');
+        eq(after.url, 'u', '条目本身留着');
+        assert(shared.tabIds.length === 2, '不能就地改原对象');
+
+        // 只有它一个 → 整条丢掉。返回 null 是"删掉"的唯一信号
+        eq(withoutTab({ url: 'u', tabIds: [3] }, 3), null, '没有别的标签页拥有它就该整条丢');
+
+        // 本来就不拥有 → 原样返回**同一个引用**，调用方据此跳过写盘
+        const other = { url: 'u', tabIds: [7] };
+        assert(withoutTab(other, 3) === other,
+            '不拥有时返回同一个引用 —— 调用方靠这个判据决定要不要写盘，'
+            + '每次返回新对象会让列表每轮都被判成"变了"');
+
+        // 没有归属的条目：摘不掉，也不该被摘
+        const orphan = { url: 'u' };
+        assert(withoutTab(orphan, 3) === orphan, '没有归属的条目不属于任何标签页');
     });
 
     /* ====================================================================== */

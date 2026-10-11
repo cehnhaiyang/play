@@ -84,10 +84,20 @@ export const BRIDGE_ENDPOINTS = {
         route: 'extension',
         reason: '清空的是插件的 storage.session，应用没有这份数据。',
     },
-    'sniffer-clear-page': {
+    'sniffer-clear-tab': {
         route: 'extension',
-        reason: '同 sniffer-clear。判据（isLinkFromPage）也长在插件里，'
+        reason: '同 sniffer-clear。判据是标签页 id —— 球按标签栏筛选，'
             + '应用再写一份会出现"界面看得见、清不掉"的条目。',
+    },
+    'sniffer-tabs': {
+        route: 'extension',
+        reason: '"浏览器里开着哪些标签页"只有 chrome.tabs 知道；'
+            + '球（Electron 窗口）要把它们画成标签栏，并据此筛选嗅探结果。',
+    },
+    'sniffer-close-tab': {
+        route: 'extension',
+        reason: '关闭标签页是 chrome.tabs.remove 的原生动作 —— 应用没有这个能力，'
+            + '而且"在球上关掉就等于在浏览器里关掉"要求动作真的发生在浏览器侧。',
     },
     'sniffer-scan': {
         route: 'extension',
@@ -100,8 +110,9 @@ export const BRIDGE_ENDPOINTS = {
     },
     'sniffer-active-page': {
         route: 'extension',
-        reason: '"当前是哪个标签页"是浏览器的事实，只有 chrome.tabs 知道；'
-            + '球用它判「仅当前页」与「清空当前页」。',
+        reason: '"当前是哪个标签页"是浏览器的事实，只有 chrome.tabs 知道。'
+            + '嗅探已不用它（作用域是全部标签页），Agent 球的规则/请求头/存储/JWT '
+            + '四个页签用它显示"这些操作作用于哪个页面"。',
     },
     'tamper-get': {
         route: 'extension',
@@ -295,6 +306,11 @@ export const BRIDGE_EVENTS = {
     'sniffed-media': {
         route: 'extension',
         reason: '嗅探结果由插件的 webRequest 观察直接产生。',
+    },
+    'tabs-changed': {
+        route: 'extension',
+        reason: '标签页的开关、导航、改名都发生在浏览器里（chrome.tabs.onCreated/'
+            + 'onRemoved/onUpdated）；球据此重拉标签栏，否则它停在打开那一刻的快照上。',
     },
     'browser-download': {
         route: 'extension',

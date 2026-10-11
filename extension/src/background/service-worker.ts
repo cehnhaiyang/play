@@ -36,6 +36,7 @@ import {
     STORAGE_KEYS,
     type BallEvent,
     type BallRequest,
+    type BrowserTab,
     type ExtensionResponse,
     type SniffedMedia,
 } from '../shared/protocol';
@@ -45,7 +46,7 @@ import { emitBridgeEvent, ensureBridge, setDispatcher } from './bridge-port';
 import { pageHost } from '../offscreen/page-host';
 import { applyRules, loadRules, injectRules } from './tamper';
 import type { AgentEngine } from '../agent/engine';
-import { isGenericTitle, isLinkFromPage } from '../../../shared/core/sniff';
+import { isFromTab, isGenericTitle, withoutTab } from '../../../shared/core/sniff';
 import type { CookieItem, HeaderRule, TamperRule } from '../../../shared/meta';
 
 /* ========================================================================== */
@@ -120,7 +121,7 @@ const SNIFF_DEDUP_MS = 5000;
  * `1000 条` 这个量级，而一个空闲的 SW 不该留着定时器。
  *
  * ⚠️ **去重表与列表必须同生共死**：它记的是"这个地址已经在列表里了"，
- * 所以列表被清空时它必须跟着清（见 `clearItems` / `clearPage`）。
+ * 所以列表被清空时它必须跟着清（见 `clearItems` / `clearTab`）。
  * 只清列表不清它的话，"清空之后立刻再扫一次"会一条都扫不到 —— 而用户
  * 刚清完正是最想重新扫一遍的时候。
  */
@@ -213,6 +214,23 @@ const loadItems = async (): Promise<void> => {
 };
 
 /**
+ * 合并两条记录各自的标签页归属。
+ *
+ * 去重且保持首次出现的顺序：顺序本身没有语义，但每次合并都重排会让写盘
+ * 内容无谓地变化，而那正是"这个地址到底变没变"的判据（见 pushItem 末尾）。
+ *
+ * 空值一律归一成空数组：`undefined` 与 `[]` 在"有没有标签页"这件事上等价，
+ * 让两种形状同时存在只会让后面每个读取点都要写 `|| []`。
+ */
+const mergeTabIds = (a?: number[], b?: number[]): number[] => {
+    const out = [...(a || [])];
+    for (const id of b || []) {
+        if (!out.includes(id)) out.push(id);
+    }
+    return out;
+};
+
+/**
  * 收下一条嗅探结果。
  *
  * ## 按 URL 合并，不是无脑追加
@@ -243,14 +261,37 @@ const pushItem = (item: SniffedMedia): void => {
     }
 
     const existing = sniffItems[index];
+    /*
+     * 标签页归属是**并集**，不是覆盖。
+     *
+     * 同一个地址会被两个标签页请求（同一个视频站开两个页、或共用的 CDN 资源），
+     * 也会被三条采集路径先后发现。直接 `{...existing, ...item}` 会让归属变成
+     * "最后一个发现它的那个标签页"，于是切到另一个标签页就看不到它 ——
+     * 而那个标签页确实请求过它。用户看到的是"这个页面的资源怎么少了一条"。
+     */
+    const tabIds = mergeTabIds(existing.tabIds, item.tabIds);
     // 只有"旧标题没用、新标题有用"才替换。两个都没用时保持原样 ——
     // 否则一次网络层推送就能把 `index.m3u8` 换成更差的 `Media_stream`
     if (!isGenericTitle(item.title) || isGenericTitle(existing.title)) {
         // 保留首次发现时间：列表按它排序，"这个地址是什么时候出现的"不该
         // 因为后来又被发现一次而跳到最前面
-        const merged = { ...existing, ...item, foundAt: existing.foundAt };
+        const merged = { ...existing, ...item, tabIds, foundAt: existing.foundAt };
         sniffItems = [...sniffItems];
         sniffItems[index] = merged;
+        flushItems();
+        return;
+    }
+
+    /*
+     * 标题不升级时也要把归属并进去。
+     *
+     * 这段原先直接 return —— 那时没有归属可并。现在不并的话，"第二个标签页
+     * 也请求了这个地址"这条信息会**丢掉**：标题没升级（本来就是好的），
+     * 归属却停在第一个标签页上。
+     */
+    if (tabIds.length !== (existing.tabIds || []).length) {
+        sniffItems = [...sniffItems];
+        sniffItems[index] = { ...existing, tabIds };
         flushItems();
     }
 };
@@ -266,48 +307,118 @@ const clearItems = (): void => {
 };
 
 /**
- * 清掉某个页面来的结果。
+ * 清掉某个标签页来的结果。
  *
- * 判据与界面上的「仅当前页」筛选**必须是同一条**（`isLinkFromPage`）：
- * 列表里看得见的当前页条目，点「清空当前页」必须都能清掉。两处各写一份判据
- * 的后果实测过 —— 没有 pageUrl 的条目在筛选下可见却清不掉，看起来像按钮没生效。
+ * ## 判据是 `tabIds`，不是 `pageUrl`
+ *
+ * 原先按 pageUrl 清，因为那时嗅探只覆盖当前标签页，一个页面就是一个标签页。
+ * 现在嗅探覆盖全部标签页，而**同一个标签页会换地址**（导航、SPA 改路由）——
+ * 按 pageUrl 清就只能清掉它当前那一次导航的结果，用户看到的仍然是"点了 ×
+ * 这个标签页的资源还在列表里"。标签页 id 是稳定的身份，pageUrl 不是。
+ *
+ * ## 别的标签页也有的条目只摘归属，不整条删
+ *
+ * 判据与球上的标签栏筛选共用 `isFromTab`，摘归属用 `withoutTab`。
+ * 直接 `filter(item => !isFromTab(...))` 会把"两个标签页都请求过的地址"
+ * 整条删掉 —— 另一个标签页下它就凭空消失了，而那个标签页并没有被清。
  */
-const clearPage = (pageUrl: string): number => {
-    const before = sniffItems.length;
-    const removed = sniffItems.filter((item) => isLinkFromPage(item, pageUrl));
-    sniffItems = sniffItems.filter((item) => !isLinkFromPage(item, pageUrl));
+const clearTab = (tabId: number): number => {
+    let removed = 0;
+    /** 整条被删掉的地址。只有它们要从去重表里摘 */
+    const dropped: string[] = [];
+    const next: SniffedMedia[] = [];
+
+    for (const item of sniffItems) {
+        const kept = withoutTab(item, tabId);
+        if (kept === item) {
+            // 这个标签页本来就不拥有它：原样留着，且**不动去重表** ——
+            // 摘掉的话它下次被发现时会作为新条目重复入库
+            next.push(item);
+            continue;
+        }
+        removed += 1;
+        if (kept) next.push(kept);
+        else dropped.push(item.url);
+    }
+
+    sniffItems = next;
     // 同 clearItems：读盘在途时被清掉的条目不能从盘上复活
     clearedAt = Date.now();
     /*
-     * 去重表里**只摘掉被清的那些**。
-     *
-     * 整个清空是不行的：清掉 A 页的条目之后，A 页的地址要能重新被发现，
-     * 而 B 页那些还留在列表里的地址不该被重复记一遍 —— 那会让列表里
-     * 出现同一个地址的第二条（`pushItem` 按 URL 合并，所以实际是多一次
-     * 无谓的分类与写盘，且标题升级的判据会被绕过）。
+     * 去重表记的是"这个地址已经在列表里了"。所以只摘**整条被删**的那些：
+     * 摘掉之后 A 标签页的资源能重新被发现；而还留在列表里的地址（别的标签页
+     * 也有它）继续占着去重表，否则它会被重复记一遍，多一次无谓的分类与写盘。
      */
-    for (const item of removed) recentUrls.delete(item.url);
+    for (const url of dropped) recentUrls.delete(url);
     flushItems();
-    return before - sniffItems.length;
+    return removed;
 };
 
 /**
- * 「清空当前页」的目标地址。
+ * 浏览器里当前打开的全部标签页。
  *
- * 球传了自己的 pageUrl 就用它；没传时问当前活动的标签页 —— 判据与
- * `sniffer-active-page` 同一个（`activePageInfo`），两处不能各问一次不同的问题。
+ * 只列 http/https：`chrome://`、扩展页、`about:blank` 这些既扫不了也不该
+ * 出现在嗅探器的标签栏里（用户不会想在那上面嗅探）。
+ *
+ * 按 windowId 再按 index 排：多窗口时同一窗口的标签页要挨在一起，
+ * 否则标签栏的顺序每次刷新都在跳。
  */
-const resolveClearTarget = async (pageUrl?: string): Promise<string> => {
-    if (pageUrl) return pageUrl;
-    return (await activePageInfo()).pageUrl;
+const listTabs = async (): Promise<BrowserTab[]> => {
+    const tabs = await chrome.tabs.query({});
+    return tabs
+        .filter((tab) => typeof tab.id === 'number' && /^https?:/.test(tab.url || ''))
+        .sort((a, b) => (a.windowId - b.windowId) || (a.index - b.index))
+        .map((tab) => ({
+            id: tab.id as number,
+            url: tab.url || '',
+            title: tab.title || '',
+            active: tab.active === true,
+            windowId: tab.windowId,
+        }));
 };
+
+/**
+ * 关掉一个浏览器标签页。
+ *
+ * 球上的 × 走这条：用户在那个小标签栏上点关闭，期望的就是浏览器里那个标签页
+ * 也没了。返回 `closed: false` 表示标签页已经不在（重复点、或浏览器刚关掉它）——
+ * 那不是错误，界面据此刷新一次标签栏即可。
+ */
+const closeTab = async (tabId: number): Promise<{ closed: boolean }> => {
+    try {
+        await chrome.tabs.remove(tabId);
+        return { closed: true };
+    } catch {
+        return { closed: false };
+    }
+};
+
+/**
+ * 标签页集合变了就通知球。
+ *
+ * 球是个独立窗口，它不会自动知道浏览器里开了什么 —— 标签栏停在打开那一刻的
+ * 快照上，用户新开一个页面后球上看不见。这四条事件覆盖了集合的全部变化来源。
+ *
+ * 导航（`onUpdated` 的 url 变化）也要推：标签页身份没变但标题变了，
+ * 而球画的是标题。
+ */
+const notifyTabsChanged = (): void => {
+    emitBridgeEvent('tabs-changed', {});
+};
+
+chrome.tabs.onCreated.addListener(() => notifyTabsChanged());
+chrome.tabs.onRemoved.addListener(() => notifyTabsChanged());
+chrome.tabs.onUpdated.addListener((_tabId, changeInfo) => {
+    // 只认标题与地址的变化。onUpdated 在加载状态、favicon 变化时也会触发，
+    // 那些每次都推一遍等于让球不停重拉标签列表
+    if (changeInfo.title !== undefined || changeInfo.url !== undefined) notifyTabsChanged();
+});
 
 /**
  * 解析要操作哪个标签页。
  *
- * 球跑在 Electron 里，它**不知道** chrome 的 tabId（那是浏览器的概念）。
- * 所以它一律不传，由这里问"当前活动的那个" —— 这也正是用户操作时看着的那个。
- * 传了的话就用传的（自检脚本要指定标签页）。
+ * 球跑在 Electron 里，它**不知道** chrome 的 tabId（那是浏览器的概念），
+ * 除非用户明确选了某一个标签页。传了就用传的（自检脚本与「AI 分析此页」要指定）。
  */
 const resolveTabId = async (tabId?: number): Promise<number | null> => {
     if (typeof tabId === 'number' && tabId >= 0) return tabId;
@@ -325,8 +436,9 @@ const requireTabId = async (tabId?: number): Promise<number> => {
 /**
  * 当前活动标签页的地址与标题。
  *
- * 球的「仅当前页」筛选与「清空当前页」都读它 —— 而"当前是哪个页面"是
- * **浏览器侧的事实**，球（Electron 窗口）无从得知。
+ * **嗅探已经不用它了**（嗅探的作用域是全部标签页，见 scanTargets）。留着是因为
+ * Agent 球的「规则 / 请求头 / 存储 / JWT」四个页签要显示"这些操作作用于哪个页面"
+ * —— 那几条不带 tabId，插件按活动标签页执行，界面就必须显示同一个答案。
  */
 const activePageInfo = async (): Promise<{ pageUrl: string; title: string }> => {
     const tabId = await resolveTabId(undefined);
@@ -338,6 +450,23 @@ const activePageInfo = async (): Promise<{ pageUrl: string; title: string }> => 
         // 标签页刚好被关掉：返回空，让界面退回"全部"而不是拿着过期地址去清错页面
         return { pageUrl: '', title: '' };
     }
+};
+
+/**
+ * 全部可扫描的标签页 id。
+ *
+ * 嗅探的作用域是"浏览器里打开的一切"，不是"用户此刻正在看的那个" —— 用户
+ * 在别的标签页里刷出来的资源，切回来时就该已经在列表里。
+ *
+ * 过滤掉不允许注入的页面（`chrome://`、扩展商店、PDF 阅读器）：对它们
+ * `executeScript` 必然失败，逐个 try 只是把同一个必然结果试几十遍。
+ * 判定交给 URL 前缀，与 listTabs 同一口径。
+ */
+const scanTargets = async (): Promise<number[]> => {
+    const tabs = await chrome.tabs.query({});
+    return tabs
+        .filter((tab) => typeof tab.id === 'number' && /^https?:/.test(tab.url || ''))
+        .map((tab) => tab.id as number);
 };
 
 /**
@@ -454,10 +583,20 @@ chrome.webRequest.onResponseStarted.addListener(
 /**
  * 反查发起请求的那个文档的地址（= Referer 的来源）。
  *
- * 三级回落，每一级都有存在理由：
+ * 两级回落，每一级都有存在理由：
  *   1. `webNavigation.getFrame` —— 唯一能拿到**完整 URL** 的途径；
- *   2. `initiator` —— 只有 origin，比没有强（多数站点的防盗链只校验 origin）；
- *   3. 空串 —— 顶层导航、非标签页请求（tabId 为 -1）时确实没有来源。
+ *   2. `initiator` —— 只有 origin，比没有强（多数站点的防盗链只校验 origin）。
+ *
+ * ## 为什么不再回落到 `chrome.tabs.get`
+ *
+ * 原先是三级，第三级是 `chrome.tabs.get(tabId).url`。那条在"只嗅探当前标签页"
+ * 的旧语义下看不出问题，但现在嗅探**覆盖全部标签页**，它就成了一条会把归属
+ * 写错的路径：后台标签页里发起的请求，`getFrame` 查不到（frame 已销毁或
+ * 在子框架里）时，回落拿到的是那个标签页**此刻**的地址，而不是发起这次请求
+ * 的文档地址 —— 于是这条资源会被记到它根本不属于的页面名下。
+ *
+ * 拿不准归属时宁可留空：空 pageUrl 在界面上显示为"未知来源"，而一个错的
+ * pageUrl 会让用户以为资源来自另一个页面，且按标签页筛选时出现在错误的组里。
  */
 const resolvePageUrl = async (ctx?: { tabId: number; frameId: number; initiator: string }): Promise<string> => {
     if (!ctx) return '';
@@ -467,12 +606,6 @@ const resolvePageUrl = async (ctx?: { tabId: number; frameId: number; initiator:
             if (frame?.url) return frame.url;
         } catch {
             // frame 可能已经销毁（页面刚跳走），继续回落
-        }
-        try {
-            const tab = await chrome.tabs.get(ctx.tabId);
-            if (tab.url) return tab.url;
-        } catch {
-            // 标签页已关闭
         }
     }
     return ctx.initiator;
@@ -521,6 +654,8 @@ const handleResponse = async (details: chrome.webRequest.OnResponseStartedDetail
         // Referer 取发起请求的文档地址：防盗链站点校验的是"从哪个页面来的"
         referer: pageUrl,
         pageUrl,
+        // Chrome 对非标签页发起的请求（SW、预取）给的是 -1，那种不冒充标签页
+        tabIds: ctx && ctx.tabId >= 0 ? [ctx.tabId] : [],
         foundAt: now,
     };
 
@@ -570,6 +705,7 @@ const itemFromCandidate = (
     candidate: ScanCandidate,
     pageUrl: string,
     pageTitle: string,
+    tabId: number,
 ): SniffedMedia | null => {
     const { url, hint } = candidate;
     if (!url) return null;
@@ -600,6 +736,7 @@ const itemFromCandidate = (
         source: 'local',
         referer: pageUrl,
         pageUrl,
+        tabIds: [tabId],
         foundAt: Date.now(),
     };
 };
@@ -675,7 +812,7 @@ const scanTab = async (tabId: number): Promise<{ added: number }> => {
     let added = 0;
 
     for (const candidate of result.items) {
-        const item = itemFromCandidate(candidate, pageUrl, pageTitle);
+        const item = itemFromCandidate(candidate, pageUrl, pageTitle, tabId);
         if (!item) continue;
         // 页内扫描与网络层共用同一张去重表：同一个地址两条路径都发现时只留一条
         if (!markRecent(item.url, Date.now())) continue;
@@ -694,6 +831,9 @@ const scanTab = async (tabId: number): Promise<{ added: number }> => {
  * 这一条补的是网络层的**盲区**：开关是用户手动打开的，而页面早就加载完了，
  * 那时网络层一条都看不到。用户打开开关的意图就是"把当前这页的东西列出来"，
  * 只等新请求等于什么都没做。
+ *
+ * 扫的是**这个标签页**（不是全部）：导航事件天然带 tabId，而"刚加载完的那一页"
+ * 正是用户此刻在看的。全部标签页的补齐由打开开关时那一次全量扫描负责。
  */
 chrome.webNavigation.onCompleted.addListener((details) => {
     // 只扫主框架，理由见 scanTab
@@ -719,6 +859,24 @@ chrome.webNavigation.onCompleted.addListener((details) => {
         await scanTab(details.tabId);
     })();
 });
+
+/**
+ * 扫一遍给定的全部标签页，把新增条数加起来。
+ *
+ * 串行而不是 `Promise.all`：每个标签页的扫描都要把脚本注入页面并在主世界里
+ * 求值，几十个并发注入会让浏览器卡住，而结果是同一份列表里的追加 ——
+ * 顺序无所谓，代价却有所谓。
+ */
+const scanTabs = async (tabIds: number[]): Promise<{ added: number; scanned: number }> => {
+    let added = 0;
+    let scanned = 0;
+    for (const tabId of tabIds) {
+        const result = await scanTab(tabId);
+        added += result.added;
+        scanned += 1;
+    }
+    return { added, scanned };
+};
 
 /**
  * AI 深度嗅探：把页面源码交给模型，让它挑出结构化资源。
@@ -806,6 +964,7 @@ const aiSniffTab = async (tabId: number): Promise<{ added: number }> => {
             source: 'ai',
             referer: pageUrl,
             pageUrl,
+            tabIds: [tabId],
             foundAt: now,
         };
         pushItem(item);
@@ -934,14 +1093,15 @@ const dispatchBridge = async (method: string, params: unknown): Promise<unknown>
             const enabled = Boolean((args as { enabled?: boolean }).enabled);
             await setEnabled(enabled);
             /*
-             * 打开开关时立刻扫一次当前标签页。
+             * 打开开关时立刻扫一遍**全部标签页**。
              *
              * 不这么做的话，用户点开开关看到的是一个空列表 —— 网络层只能看到
              * **之后**发生的请求，而页面早就加载完了。旧实现（useBrowse 的
              * `setSniffEnabled`）就是"打开 = 切页自动扫描 + 网络层持续推送"，
-             * 这里保持一致。
+             * 这里保持一致；只是作用域从"当前页"扩到"全部标签页"，与嗅探
+             * 本身的作用域对齐。
              */
-            if (enabled) await scanTab(await requireTabId());
+            if (enabled) await scanTabs(await scanTargets());
             return { enabled: await getEnabled() };
         }
 
@@ -949,16 +1109,31 @@ const dispatchBridge = async (method: string, params: unknown): Promise<unknown>
             clearItems();
             return { cleared: true };
 
-        case 'sniffer-clear-page': {
-            const pageUrl = await resolveClearTarget((args as { pageUrl?: string }).pageUrl);
-            return { removed: clearPage(pageUrl) };
-        }
+        case 'sniffer-clear-tab':
+            return { removed: clearTab((args as unknown as { tabId: number }).tabId) };
 
-        case 'sniffer-scan':
-            return scanTab(await requireTabId((args as { tabId?: number }).tabId));
+        case 'sniffer-tabs':
+            return { tabs: await listTabs() };
 
+        case 'sniffer-close-tab':
+            return closeTab((args as unknown as { tabId: number }).tabId);
+
+        /*
+         * 当前活动标签页。
+         *
+         * **嗅探不用它**（作用域已是全部标签页），Agent 球那四个数据页签用：
+         * `tamper-*` 与 `page-storage-*` 不带 tabId 时作用于活动标签页，
+         * 界面必须显示同一个答案，否则"改了规则但页面没生效"无从解释。
+         */
         case 'sniffer-active-page':
             return activePageInfo();
+
+        case 'sniffer-scan': {
+            const only = (args as { tabId?: number }).tabId;
+            // 指定了标签页就只扫它（自检脚本要可控）；否则扫全部
+            if (typeof only === 'number' && only >= 0) return scanTab(only);
+            return scanTabs(await scanTargets());
+        }
 
         case 'sniffer-ai-scan':
             return aiSniffTab(await requireTabId((args as { tabId?: number }).tabId));
@@ -1037,7 +1212,20 @@ const dispatchBridge = async (method: string, params: unknown): Promise<unknown>
                 pageHost.readWebStorage(tabId, 'session').catch(() => '{}'),
                 pageHost.getCookies(tabId).catch(() => []),
             ]);
-            return { local, session, cookies, pageUrl: (await activePageInfo()).pageUrl };
+            /*
+             * pageUrl 取自**刚解析出的那个 tabId**，而不是另问一次"当前活动标签页"。
+             *
+             * 面板要拿它显示"这些存储属于哪个页面"。调用方指定了 tabId 时
+             * （Agent 工具、自检脚本）另问一次活动标签页会答成另一个页面 ——
+             * 显示的地址与实际读到的存储对不上，而两处都"成功"。
+             */
+            let pageUrl = '';
+            try {
+                pageUrl = (await chrome.tabs.get(tabId)).url || '';
+            } catch {
+                // 标签页刚被关掉：存储已经读到了，地址留空比报错有用
+            }
+            return { local, session, cookies, pageUrl };
         }
 
         /*
@@ -1181,17 +1369,28 @@ const dispatchBall = async (message: BallRequest): Promise<unknown> => {
         case 'sniffer-clear':
             return dispatchBridge('sniffer-clear', {});
 
-        case 'sniffer-clear-page':
-            return dispatchBridge('sniffer-clear-page', { pageUrl: message.pageUrl });
+        case 'sniffer-clear-tab':
+            return dispatchBridge('sniffer-clear-tab', { tabId: message.tabId });
+
+        case 'sniffer-tabs':
+            return dispatchBridge('sniffer-tabs', {});
+
+        case 'sniffer-close-tab':
+            return dispatchBridge('sniffer-close-tab', { tabId: message.tabId });
 
         case 'sniffer-scan':
             return dispatchBridge('sniffer-scan', { tabId: message.tabId });
 
-        case 'sniffer-active-page':
-            return dispatchBridge('sniffer-active-page', {});
-
         case 'sniffer-ai-scan':
             return dispatchBridge('sniffer-ai-scan', { tabId: message.tabId });
+
+        /*
+         * 嗅探已经不用它了，但 **Agent 球还在用**：规则 / 请求头 / 存储 / JWT
+         * 四个页签要显示"这些操作作用于哪个页面"。删掉这条分支会让那四个页签
+         * 报"未知消息"—— 而嗅探自己一切正常，看起来像 Agent 坏了。
+         */
+        case 'sniffer-active-page':
+            return dispatchBridge('sniffer-active-page', {});
 
         case 'downloads-start':
             return dispatchBridge('downloads-start', { url: message.url, filename: message.filename });

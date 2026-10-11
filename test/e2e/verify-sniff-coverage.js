@@ -197,44 +197,82 @@ const main = async () => {
             items[0]?.pageUrl || '(空)');
 
         /*
-         * 打开开关时立刻扫一次 —— 这是用户最直接感受到的那条路径。
+         * 打开开关时立刻扫一遍 —— 这是用户最直接感受到的那条路径。
          *
          * 页面**早就加载完了**，网络层一条都看不到。如果打开开关只等着新请求，
          * 用户看到的就是一个空列表，然后合理地认为"嗅探没实现"。
          *
-         * ⚠️ 必须先把被测页激活。开关走的是"扫当前活动的标签页"（那正是用户
-         * 点开开关时看着的那一页），而上面那条 offscreen 总线页把它顶掉了 ——
-         * 不激活的话扫的是扩展页自己，测试会红，但红的是**测试环境**不是产品。
+         * ⚠️ 这里**故意不激活被测页**。开关走的是"扫全部标签页"，而上面那条
+         * offscreen 总线页正是活动的那个 —— 如果扫描的作用域退回"当前活动的
+         * 标签页"，这次扫描就只会扫到扩展页自己，下面那条断言会红。
+         * 也就是说这条断言同时钉住了"作用域是全部标签页"。
          */
         await ask({ target: 'sw', kind: 'sniffer-clear' });
-        await sw.evaluate(`chrome.tabs.update(${tabId}, { active: true })`);
-        await sleep(300);
         await ask({ target: 'sw', kind: 'sniffer-set-enabled', enabled: true });
-        await sleep(1500);
+        await sleep(2000);
         const afterEnable = await ask({ target: 'sw', kind: 'sniffer-get-state' });
         const enabledItems = afterEnable?.result?.items || [];
-        check('打开开关时自动扫一次（页面已加载完，网络层看不到任何东西）',
+        check('打开开关时扫了全部标签页（被测页不是活动标签页）',
             enabledItems.some((i) => i.url.endsWith(DOM_ONLY)),
             `开关打开后有 ${enabledItems.length} 条`);
 
         /*
-         * 「清空当前页」只清这个页面，且必须**真的清掉东西**。
+         * 每条结果都要带上标签页归属 —— 球上的标签栏筛选全靠它。
          *
-         * 判据（isLinkFromPage）与界面上的「仅当前页」筛选必须是同一条 ——
-         * 两处各写一份的后果实测过：没有 pageUrl 的条目在筛选下可见却清不掉，
-         * 看起来像按钮没生效。
-         *
-         * 断言里带上 `removed > 0`：只断言"清完之后没有该页的条目"的话，
-         * 在一条都没扫到的情况下会**空过**（0 条里当然没有该页的条目）。
+         * 少了这个字段的表现是"标签栏点了没反应"：筛选条件永远匹配不到任何条目，
+         * 而列表在「全部」下看着是好的。
          */
-        const before = enabledItems.filter((i) => i.pageUrl === `${base}/page`).length;
-        const cleared = await ask({ target: 'sw', kind: 'sniffer-clear-page', pageUrl: `${base}/page` });
+        check('页内扫描的结果带上了标签页归属',
+            enabledItems.length > 0
+            && enabledItems.every((i) => (i.tabIds || []).includes(tabId)),
+            `实际 ${JSON.stringify(enabledItems.map((i) => i.tabIds).slice(0, 5))}`);
+
+        /*
+         * 「清空此标签页」只清这个标签页，且必须**真的清掉东西**。
+         *
+         * 判据是标签页 id 而不是 pageUrl：同一个标签页会导航（换地址），
+         * 按 pageUrl 清就只能清掉它当前那一次导航的结果。
+         *
+         * 断言里带上 `removed > 0`：只断言"清完之后没有该标签页的条目"的话，
+         * 在一条都没扫到的情况下会**空过**（0 条里当然没有该标签页的条目）。
+         */
+        const before = enabledItems.filter((i) => (i.tabIds || []).includes(tabId)).length;
+        const cleared = await ask({ target: 'sw', kind: 'sniffer-clear-tab', tabId });
         const afterClear = await ask({ target: 'sw', kind: 'sniffer-get-state' });
-        check('清空当前页真的清掉了该页的条目（且不误伤别的页）',
+        check('清空此标签页真的清掉了该标签页的条目',
             before > 0
             && cleared?.result?.removed === before
-            && (afterClear?.result?.items || []).every((i) => i.pageUrl !== `${base}/page`),
+            && (afterClear?.result?.items || []).every((i) => !(i.tabIds || []).includes(tabId)),
             `清前 ${before} 条，清了 ${cleared?.result?.removed} 条`);
+
+        /*
+         * 标签页列表与关闭标签页。
+         *
+         * 这两条是球上标签栏的全部数据来源：列表要能拿到，× 要真的关掉浏览器里
+         * 那个标签页（只从球上藏起来会让用户以为关掉了，而它还在后台跑）。
+         */
+        const tabList = await ask({ target: 'sw', kind: 'sniffer-tabs' });
+        const listed = tabList?.result?.tabs || [];
+        check('标签页列表能取到，且不含 chrome-extension 页',
+            listed.some((t) => t.id === tabId)
+            && listed.every((t) => /^https?:/.test(t.url)),
+            `${listed.length} 个标签页`);
+
+        const victim = await browser.newTab(`${base}/page?victim=1`);
+        await sleep(300);
+        const victimId = await sw.evaluate(
+            `chrome.tabs.query({ url: '${base}/page?victim=1' }).then(list => (list[0] || {}).id ?? -1)`,
+        );
+        if (victimId < 0) throw new Error('找不到用于关闭的标签页');
+        const closed = await ask({ target: 'sw', kind: 'sniffer-close-tab', tabId: victimId });
+        await sleep(300);
+        const stillThere = await sw.evaluate(
+            `chrome.tabs.get(${victimId}).then(() => true).catch(() => false)`,
+        );
+        check('从球上关闭标签页会真的关掉浏览器里那个标签页',
+            closed?.result?.closed === true && stillThere === false,
+            `closed=${closed?.result?.closed}，浏览器里还在=${stillThere}`);
+        void victim;
 
         await ask({ target: 'sw', kind: 'sniffer-set-enabled', enabled: false });
 

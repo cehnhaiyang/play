@@ -67,8 +67,39 @@ export interface SniffedMedia {
     referer?: string;
     /** 发起该请求的页面地址 */
     pageUrl?: string;
+    /**
+     * 这条资源被**哪些标签页**请求过。
+     *
+     * 是数组而不是单个 id，因为列表按 URL 合并（见 `pushItem`）：同一个地址
+     * 被两个标签页请求过时，只记第一个会让"切到另一个标签页就看不到它"——
+     * 而那个标签页确实请求过它。一个数字装不下这个事实。
+     *
+     * 与 `pageUrl` 不是同一件事，两个都要留：标签页导航之后 pageUrl 会变，
+     * 而标签页身份不变。界面上的标签栏筛选走 tabIds（"这个标签页下嗅到的
+     * 全部资源"本来就跨它的多次导航），防盗链要的是 pageUrl。
+     *
+     * 非标签页发起的请求（Service Worker、预取）没有标签页，Chrome 给的是 -1，
+     * 那种一律记空数组 —— 记成 -1 会让它冒充一个不存在的标签页。
+     */
+    tabIds?: number[];
     /** 发现时间（毫秒时间戳），列表按它倒序 */
     foundAt: number;
+}
+
+/**
+ * 浏览器里的一个标签页。
+ *
+ * 只有 `id` 是稳定的身份；`url` / `title` 随时会变（导航、SPA 改标题）。
+ * 所以界面按 id 记住"选中了哪个"，显示用 url/title —— 拿 url 当键会在
+ * 页面跳转的那一刻把选中项弄丢。
+ */
+export interface BrowserTab {
+    id: number;
+    url: string;
+    title: string;
+    /** 是不是用户当前正在看的那个 */
+    active: boolean;
+    windowId: number;
 }
 
 /** 嗅探列表上限。超过后丢最旧的：这是工作列表不是归档 */
@@ -114,22 +145,47 @@ export type BallRequest =
     | { target: 'sw'; kind: 'sniffer-get-state' }
     | { target: 'sw'; kind: 'sniffer-set-enabled'; enabled: boolean }
     | { target: 'sw'; kind: 'sniffer-clear' }
-    /** 清掉某个页面来的全部结果（「清空当前页」）。不传 pageUrl 时清当前活动标签页 */
-    | { target: 'sw'; kind: 'sniffer-clear-page'; pageUrl?: string }
+    /** 清掉某个标签页来的全部结果（「清空此标签页」） */
+    | { target: 'sw'; kind: 'sniffer-clear-tab'; tabId: number }
+    /**
+     * 浏览器当前打开的全部标签页。
+     *
+     * 球要把它们画成一条标签栏（切换即筛选、点 × 即关闭），而"打开了哪些
+     * 标签页"是**浏览器侧的事实**，球（Electron 窗口）无从得知。
+     */
+    | { target: 'sw'; kind: 'sniffer-tabs' }
+    /**
+     * 关闭一个浏览器标签页。
+     *
+     * 球上点标签栏的 × 走这条 —— 用户要的是"在这里关掉就等于在浏览器里关掉"，
+     * 而不是只把这一条从球上藏起来。
+     */
+    | { target: 'sw'; kind: 'sniffer-close-tab'; tabId: number }
     /**
      * 手动嗅探一次：页内扫描（DOM / Performance / __playinfo__ / 源码正则）。
      *
      * 与"持续嗅探"开关无关 —— 开关关着时点它也只扫这一次，
      * 网络层不会因此开始推送。旧实现（useBrowse 的 `scan`）就是这个语义。
+     *
+     * **不传 tabId 表示扫全部标签页**：嗅探的作用域是"浏览器里打开的一切"，
+     * 而不是"用户此刻正在看的那个"。
      */
     | { target: 'sw'; kind: 'sniffer-scan'; tabId?: number }
-    /** AI 深度嗅探：把页面源码交给模型挑结构化资源 */
+    /**
+     * AI 深度嗅探：把页面源码交给模型挑结构化资源。
+     *
+     * 与 `sniffer-scan` 不同，这一条**必须有一个目标标签页**（不传则取当前
+     * 活动的那个）：一次调用就是一整份页面源码加一次模型往返，点一下就把
+     * 几十个标签页全发出去不是这个按钮该有的行为。
+     */
     | { target: 'sw'; kind: 'sniffer-ai-scan'; tabId?: number }
     /**
      * 当前活动标签页。
      *
-     * 球需要它来判「仅当前页」与「清空当前页」—— 而"当前是哪个页面"是
-     * **浏览器侧的事实**，球（Electron 窗口）无从得知。
+     * **嗅探不再用它** —— 嗅探的作用域已经是"浏览器里打开的全部标签页"，
+     * 球按 `SniffedMedia.tabId` 筛选，不再需要问"当前是哪个页面"。
+     * 留着是给 Agent 球的「规则 / 请求头 / 存储 / JWT」四个页签显示作用对象：
+     * 那几条端点不带 tabId 时由插件作用于活动标签页，界面必须显示同一个答案。
      */
     | { target: 'sw'; kind: 'sniffer-active-page' }
     | { target: 'sw'; kind: 'downloads-start'; url: string; filename?: string }
@@ -183,6 +239,8 @@ export type BallRequest =
 /** SW 推给悬浮球的事件（广播，不针对某一条请求） */
 export type BallEvent =
     | { target: 'ball'; kind: 'sniffed-media'; item: SniffedMedia }
+    /** 标签页被打开 / 关闭 / 换了地址或标题 —— 球据此刷新标签栏 */
+    | { target: 'ball'; kind: 'tabs-changed' }
     /** 引擎快照（消息、脚本、状态） */
     | { target: 'ball'; kind: 'agent-snapshot'; snapshot: unknown }
     /** 流式增量。整个快照太大，逐字重发不现实 */
@@ -239,4 +297,3 @@ export type HostRequest =
 export type HostEvent =
     | { target: 'ball'; kind: 'ai-delta'; requestId: string; content?: string; reasoning?: string }
     | { target: 'ball'; kind: 'ai-done'; requestId: string; reply?: string; usage?: AiUsage; error?: string };
-
