@@ -82,17 +82,6 @@ import {
 /** 悬浮球里剩下的面板。'sniff' / 'agent' / 'tamper' / 'torrent' 是历史落盘值，见 readStoredPanel */
 type FloatingPanelType = 'settings' | 'logs';
 
-/**
- * 悬浮球只承载**本机应用自己的**东西：设置（代理与 AI 配置）与运行日志。
- * 画廊与磁力下载是另外两个全屏视图，这里只给入口。
- */
-interface FloatingProps {
-    /** 打开画廊（本机工具，与浏览器无关） */
-    onOpenGallery: () => void;
-    /** 打开磁力下载（本机工具，与浏览器无关） */
-    onOpenTorrent: () => void;
-}
-
 const PANEL_MARGIN = 12;
 const BALL_SIZE = 60;
 /** 拖动释放时距左右边缘多近就吸附过去 */
@@ -990,7 +979,14 @@ const LogsFloating: React.FC<{ active: boolean }> = ({ active }) => {
 /*                              悬浮球外壳                                     */
 /* ========================================================================== */
 
-export const Floating: React.FC<FloatingProps> = ({ onOpenGallery, onOpenTorrent }) => {
+/**
+ * 悬浮球只承载**本机应用自己的**东西：设置（代理与 AI 配置）与运行日志。
+ * 画廊、磁力下载、SPG 音频工坊是三个全屏视图，入口在播放器侧边栏。
+ *
+ * 它不吃 props。此前声明过 onOpenGallery / onOpenTorrent 却从未渲染 ——
+ * 空声明会让"入口在球上"看起来像既定设计。
+ */
+export const Floating: React.FC = () => {
     const [isOpen, setIsOpen] = useState(false);
     // 悬浮球位置落盘：退出 App 重进也在上次的位置
     const [position, setPosition] = useState(() => {

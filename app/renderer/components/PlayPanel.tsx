@@ -5,7 +5,7 @@ import {
     Library, Plus, Trash2, ArrowLeft, Link, Music, Image as ImageIcon, Sparkles, HelpCircle,
     Film, Tv, FileText, FileQuestion, X, PanelLeftClose, PanelLeftOpen, FastForward, Rewind,
     Radio, Archive, Search, GripVertical, ListMusic, Inbox, AlertTriangle, Keyboard, Upload,
-    Loader2, Wand2, Images, BookOpen,
+    Loader2, Wand2, Images, BookOpen, Magnet,
 } from 'lucide-react';
 import { PlaybackMode, ObjectFitMode, VideoFile, MediaType, UsePlayReturn, getElectronAPI, type AiStory } from '../../../shared/meta';
 import {
@@ -46,6 +46,16 @@ interface PlayPanelProps {
      * 只挡「用户以为在操作当前界面」的键盘输入。
      */
     isVisible: boolean;
+    /**
+     * 三个全屏视图的入口，画在侧边栏最上方。
+     *
+     * 放这里是因为侧边栏就是播放器这一屏的左上角：它是常驻可见的，
+     * 而播放区顶部那条浮层是**播放控制**（画中画、全屏、绘本），
+     * 把应用级导航混进去会让"这一条管的是当前这个视频"这个语义失效。
+     */
+    onOpenGallery: () => void;
+    onOpenTorrent: () => void;
+    onOpenAudio: () => void;
 }
 
 // 枚举值为英文，此处统一中文化，避免 UI 裸奔英文
@@ -1424,7 +1434,7 @@ const StoryReader: React.FC<StoryReaderProps> = ({ file, pages, onCacheAudio, on
     );
 };
 
-export const PlayPanel: React.FC<PlayPanelProps> = ({ player, isVisible }) => {
+export const PlayPanel: React.FC<PlayPanelProps> = ({ player, isVisible, onOpenGallery, onOpenTorrent, onOpenAudio }) => {
     const { state, playlist, videoRef, currentFile, mediaError, mediaWarning, pageInfo, methods } = player;
 
     // 纯视频全屏容器：隔离左侧播放列表
@@ -2477,6 +2487,28 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, isVisible }) => {
             >
                 {/* 顶部标题与收起/清空操作 */}
                 <div className="p-3.5 border-b border-white/8 flex flex-col gap-2.5">
+                    {/* 应用级导航：画廊 / 磁力 / 音频工坊。放在侧边栏最上方 ——
+                        这一栏是播放器的左上角，也是三个全屏视图之外唯一常驻的导航位。 */}
+                    <div className="grid grid-cols-3 gap-1.5">
+                        {(
+                            [
+                                { key: 'gallery', icon: ImageIcon, label: '画廊', hint: 'ACG 画廊工坊', tone: 'hover:border-rose-500/50 hover:bg-rose-500/10 text-rose-300', onClick: onOpenGallery },
+                                { key: 'torrent', icon: Magnet, label: '磁力', hint: '磁力搜索与下载', tone: 'hover:border-cyan-500/50 hover:bg-cyan-500/10 text-cyan-300', onClick: onOpenTorrent },
+                                { key: 'audio', icon: Music, label: '音频', hint: 'SPG 音频工坊', tone: 'hover:border-indigo-500/50 hover:bg-indigo-500/10 text-indigo-300', onClick: onOpenAudio },
+                            ] as const
+                        ).map(({ key, icon: Icon, label, hint, tone, onClick }) => (
+                            <button
+                                key={key}
+                                onClick={onClick}
+                                title={hint}
+                                className={`flex flex-col items-center gap-1 rounded-xl border border-white/8 bg-white/[0.02] py-2 text-slate-400 transition active:scale-[0.98] ${tone}`}
+                            >
+                                <Icon className="w-4 h-4" />
+                                <span className="text-[11px] font-semibold">{label}</span>
+                            </button>
+                        ))}
+                    </div>
+
                     <div className="flex items-center justify-between gap-2">
                         <div className="flex items-center gap-1.5 min-w-0">
                             <h2 className="text-sm font-bold text-white flex items-center gap-1.5 min-w-0">

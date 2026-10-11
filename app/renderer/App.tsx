@@ -40,6 +40,8 @@ const PlayerLayout: React.FC = () => {
     setView('torrent');
   }, []);
 
+  const openAudioView = useCallback(() => setView('audio'), []);
+
   const handleBrowseGallery = useCallback(
     (gallery: { title: string; gid?: string; pages: { url: string; title: string; page?: number }[] }) => {
       const groupId = gallery.gid ? `acg:${gallery.gid}` : undefined;
@@ -147,8 +149,11 @@ const PlayerLayout: React.FC = () => {
 
   return (
     <div className="h-full w-full bg-slate-950 text-slate-200 font-sans overflow-hidden">
+      {/* 音频工坊仍是条件挂载（切走即卸载），与画廊/磁力不同：
+        它的窗口级快捷键没有 isVisible 闸（见 AudioPanel 的 keydown effect），
+        常驻挂载会让空格/回车在播放器里继续触发工坊的编译与试听。 */}
       <div
-        className={`fixed inset-0 z-50 transition-transform duration-300 ease-out will-change-transform bg-slate-950 ${view === 'audio' ? 'translate-y-0' : 'translate-y-full'
+        className={`fixed inset-0 z-50 transition-transform duration-300 ease-out will-change-transform bg-slate-950 ${view === 'audio' ? 'translate-y-0 pointer-events-auto' : 'translate-y-full pointer-events-none'
           }`}
       >
         {view === 'audio' && <AudioPanel onBack={() => setView('player')} />}
@@ -182,17 +187,20 @@ const PlayerLayout: React.FC = () => {
         className={`fixed inset-0 z-30 flex flex-col transition-transform duration-300 ease-out will-change-transform bg-slate-950 ${view === 'player' ? 'translate-x-0' : 'translate-x-full'
           }`}
       >
-        <PlayPanel player={player} isVisible={view === 'player'} />
+        <PlayPanel
+          player={player}
+          isVisible={view === 'player'}
+          onOpenGallery={openGalleryView}
+          onOpenTorrent={openTorrentView}
+          onOpenAudio={openAudioView}
+        />
       </div>
 
       {/* 悬浮球常驻挂载：切到音频工坊/画廊时只 display:none 藏起来，不卸载。
         之前这里 view !== 'player' 直接不渲染，切一次视图球内全部状态清零。
         Agent 不在这里 —— 它随浏览器外壳迁到插件的悬浮球 */}
       <div className={view === 'player' ? 'fixed inset-0 z-50 pointer-events-none block' : 'hidden'}>
-        <Floating
-          onOpenGallery={openGalleryView}
-          onOpenTorrent={openTorrentView}
-        />
+        <Floating />
       </div>
     </div>
   );
