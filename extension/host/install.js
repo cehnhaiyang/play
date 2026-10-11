@@ -33,7 +33,17 @@ const HOST_NAME = 'com.theplay.host';
 const HOST_SCRIPT = path.join(HERE, 'host.js');
 const TEMPLATE = path.join(HERE, 'com.theplay.host.json');
 
-/** 注册表键路径。Chrome 与 Edge 各有一份，这里只注册 Chrome */
+/**
+ * 注册表键路径。
+ *
+ * 每个 Chromium 浏览器只读**自己厂商**那个键：Chrome 读 Google\Chrome，
+ * Edge 读 Microsoft\Edge。这里只注册 Chrome 的。
+ *
+ * 于是扩展装在 Edge 里时，host 能不能被找到取决于 Edge 是否回落到 Chrome 键。
+ * 命不中时的表现是 `connectNative` 报 "Specified native messaging host not found" ——
+ * 那句话与"注册表写在了另一个浏览器名下"看不出任何关系，排查方向会被带偏。
+ * 届时把同一个 manifest 路径再注册到 Microsoft\Edge\NativeMessagingHosts 即可。
+ */
 const REG_KEY = `HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\${HOST_NAME}`;
 
 /** 生成的 manifest 落在用户目录，不落在仓库里 —— 它含本机绝对路径 */
