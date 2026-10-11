@@ -19,6 +19,18 @@ interface OrbApi {
     setOpen: (open: boolean) => void;
     onLayout: (callback: (payload: { open: boolean; ballSize: number }) => void) => () => void;
 
+    /** 窗口的真实状态。自检用，界面上不用 */
+    windowInfo: () => Promise<{
+        id: string;
+        bounds: { x: number; y: number; width: number; height: number };
+        open: boolean;
+        isAlwaysOnTop: boolean;
+        isResizable: boolean;
+        isMovable: boolean;
+        isVisible: boolean;
+        isDestroyed: boolean;
+    } | null>;
+
     /** 调一个桥端点，返回插件给的结果 */
     bridge: <T = unknown>(method: string, params?: unknown) => Promise<{ ok: boolean; result?: T; error?: string }>;
     bridgeStatus: () => Promise<{ connected: boolean }>;

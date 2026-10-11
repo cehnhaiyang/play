@@ -44,6 +44,13 @@ contextBridge.exposeInMainWorld('orbApi', {
         return () => ipcRenderer.removeListener('orb:layout', handler);
     },
 
+    /**
+     * 窗口的真实状态（置顶、可缩放、位置）。
+     *
+     * 给自检用：这些是窗口管理器的事实，DOM 与渲染层都看不到。
+     */
+    windowInfo: () => ipcRenderer.invoke('orb:window-info'),
+
     /* ---- 过桥 ---- */
     /**
      * 调一个桥端点。

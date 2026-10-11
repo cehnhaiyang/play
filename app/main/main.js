@@ -3337,6 +3337,19 @@ function registerOrbChannels() {
     ipcMain.handle('orb:bridge-status', () => ({ connected: bridge.isConnected() }));
 
     /**
+     * 球窗口的真实状态，供自检用。
+     *
+     * 只读，只暴露窗口管理器的状态（置顶、可缩放、位置），不含任何用户数据。
+     * 存在的理由是让"球是置顶的、不可缩放的"这两条承诺**可验证** ——
+     * 它们是窗口管理器的事实，渲染层看不到；而 `setAlwaysOnTop` 的返回值
+     * 只说明"调用没报错"，不说明系统真的把它置于顶层。
+     */
+    ipcMain.handle('orb:window-info', (event) => {
+        const id = orbs.idOfSender(event);
+        return id ? orbs.windowInfo(id) : null;
+    });
+
+    /**
      * 桥的连接状态**变化**要主动推给球。
      *
      * 只提供 `orb:bridge-status` 这个查询口是不够的：球在窗口打开那一刻问一次，

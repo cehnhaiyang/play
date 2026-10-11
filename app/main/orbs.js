@@ -123,13 +123,21 @@ const clamp = (value, min, max) => Math.min(Math.max(value, min), Math.max(min, 
  *
  * 收敛而不是拒绝：显示器拔掉、分辨率变小、任务栏挪位之后，存下来的球心
  * 可能落在屏幕外。直接用它的话球会"不见了"，而用户没有任何办法找回来。
+ *
+ * ⚠️ **返回的键必须是 `x` / `y`，不能是 `left` / `top`。**
+ *
+ * 这是实测踩过的坑：`BrowserWindow` 的构造参数与 `setBounds` 都只认
+ * `x` / `y`，多写的 `left` / `top` **既不报错也不生效**，窗口直接按默认
+ * 位置（屏幕居中）出现。后果是两个球**精确重叠在屏幕正中**，用户只看得到
+ * 上面那一个 —— 而 orb-positions.json 里明明存着两个不同的坐标，
+ * 看上去一切正常。这类"参数名写错但完全静默"的错误只能靠实测发现。
  */
 const frameFor = (center, size, workArea) => {
     const maxX = workArea.x + workArea.width - size.w - MARGIN;
     const maxY = workArea.y + workArea.height - size.h - MARGIN;
-    const left = clamp(Math.round(center.x - size.w / 2), workArea.x + MARGIN, maxX);
-    const top = clamp(Math.round(center.y - size.h / 2), workArea.y + MARGIN, maxY);
-    return { left, top, width: size.w, height: size.h };
+    const x = clamp(Math.round(center.x - size.w / 2), workArea.x + MARGIN, maxX);
+    const y = clamp(Math.round(center.y - size.h / 2), workArea.y + MARGIN, maxY);
+    return { x, y, width: size.w, height: size.h };
 };
 
 /** 默认球心。两个球错开，否则新用户只看得见上面那一个 */
@@ -138,8 +146,16 @@ const defaultCenter = (id, workArea) => {
     const right = workArea.x + workArea.width - MARGIN - BALL_SIZE / 2;
     const bottom = workArea.y + workArea.height - MARGIN - BALL_SIZE / 2;
     if (def.defaultCorner === 'bottom-right') return { x: right, y: bottom };
-    // 'right'：右侧、纵向约 60% 处。与右下角那颗拉开一个球的距离以上
-    return { x: right, y: workArea.y + workArea.height * 0.6 };
+    /*
+     * 'right'：右侧、纵向约 60% 处。
+     *
+     * 与右下角那颗**至少拉开一个球的距离**：两颗球都是 64px，而
+     * "不重叠"的判据是球心距离 ≥ 64px。0.6 这个比例在 728px 高的工作区上
+     * 给出约 291px 的纵向差，足够；但窗口很矮时（比如 400px）只有 240px，
+     * 仍然够。真正的下限由下面的 max() 保证。
+     */
+    const y = workArea.y + Math.max(workArea.height * 0.6, BALL_SIZE * 1.5);
+    return { x: right, y: Math.min(y, bottom - BALL_SIZE * 1.5) };
 };
 
 /* ========================================================================== */
@@ -357,6 +373,33 @@ const destroyOrbs = () => {
 /** 广播用：所有活着的球窗口 */
 const entriesForBroadcast = () => [...orbs.entries()].filter(([, entry]) => !entry.win.isDestroyed());
 
+/**
+ * 一个球窗口的真实状态。
+ *
+ * 存在的理由是**让"球是置顶的"这条承诺可验证**：`setAlwaysOnTop` 的返回值
+ * 只说明"调用没报错"，不说明系统真的把它置于顶层。要判断只能回头问
+ * `isAlwaysOnTop()` —— 而那个 API 只在主进程里。
+ *
+ * 同理 `isResizable` / `isMovable`：它们是窗口管理器的实际状态，
+ * 渲染层看不到，而"用户把球拉成长方形"这类故障恰恰只能从这里查。
+ */
+const windowInfo = (id) => {
+    const entry = orbs.get(id);
+    if (!entry) return null;
+    const win = entry.win;
+    const bounds = win.getBounds();
+    return {
+        id,
+        bounds,
+        open: entry.open,
+        isAlwaysOnTop: win.isAlwaysOnTop(),
+        isResizable: win.isResizable(),
+        isMovable: win.isMovable(),
+        isVisible: win.isVisible(),
+        isDestroyed: win.isDestroyed(),
+    };
+};
+
 module.exports = {
     createOrbs,
     showOrbs,
@@ -364,6 +407,7 @@ module.exports = {
     setOpen,
     idOfSender,
     entriesForBroadcast,
+    windowInfo,
     BALL_SIZE,
     ORB_DEFS,
     ORB_IDS,
