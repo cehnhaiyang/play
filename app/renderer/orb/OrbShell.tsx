@@ -56,12 +56,23 @@ export const OrbShell = ({ icon, accent, label, hint, toolbar, children }: OrbSh
     }, [isOpen]);
 
     const onPointerDown = useCallback((event: React.PointerEvent) => {
-        if (isOpen) return;
+        /*
+         * 展开态的 header 里有按钮（工具条、收起）。在这些控件上按下是要点击，
+         * 不是要拖窗口 —— 一旦 preventDefault + 抓指针，按钮就点不动了。
+         */
+        if ((event.target as HTMLElement).closest('button, input, textarea, select, a')) return;
         event.preventDefault();
         setIsDragging(true);
         hasMoved.current = false;
-        (event.target as HTMLElement).setPointerCapture(event.pointerId);
-    }, [isOpen]);
+        /*
+         * 抓在 handler 挂着的那个元素上，不是 `event.target`。
+         *
+         * header 里的图标、标题都是子元素，抓到子元素上时指针事件只在
+         * 那个子元素范围内重定向；虽然能冒泡上来，但只要那个子元素在拖动
+         * 过程中被重渲染换掉，捕获就一起没了。
+         */
+        event.currentTarget.setPointerCapture(event.pointerId);
+    }, []);
 
     const onPointerMove = useCallback((event: React.PointerEvent) => {
         if (!isDragging) return;
@@ -89,8 +100,8 @@ export const OrbShell = ({ icon, accent, label, hint, toolbar, children }: OrbSh
     const onPointerUp = useCallback((event: React.PointerEvent) => {
         if (!isDragging) return;
         setIsDragging(false);
-        if ((event.target as HTMLElement).hasPointerCapture(event.pointerId)) {
-            (event.target as HTMLElement).releasePointerCapture(event.pointerId);
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
         }
         if (hasMoved.current) {
             window.orbApi?.dragEnd();
@@ -150,14 +161,11 @@ export const OrbShell = ({ icon, accent, label, hint, toolbar, children }: OrbSh
     }
 
     return (
-        <div
-            className="animate-orb-unfold flex h-full w-full flex-col overflow-hidden rounded-2xl border border-white/12 bg-slate-950/95 font-sans text-slate-200 shadow-[0_24px_80px_rgba(0,0,0,0.7)] select-none backdrop-blur-2xl"
-            /*
-             * 面板整体可拖：面板没有标题栏按钮，用户想挪它只能拖头部。
-             * 但**输入控件必须排除**，否则选不中文字、点不到按钮 ——
-             * 用 no-drag 的思路反过来做：只有 header 是拖动区。
-             */
-        >
+        <div className="animate-orb-unfold flex h-full w-full flex-col overflow-hidden rounded-2xl border border-white/12 bg-slate-950/95 font-sans text-slate-200 shadow-[0_24px_80px_rgba(0,0,0,0.7)] select-none backdrop-blur-2xl">
+            {/*
+             * 只有 header 是拖动区。面板本体挂着滚动列表和输入框，
+             * 整块都可拖的话选不中文字、点不到按钮。
+             */}
             <header
                 className="flex shrink-0 cursor-grab items-center gap-2.5 border-b border-white/10 px-3 py-2.5 active:cursor-grabbing"
                 onPointerDown={onPointerDown}

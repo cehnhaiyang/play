@@ -1,8 +1,8 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { usePlay } from './hooks';
 import { PlayPanel, Floating, AudioPanel, GalleryPanel, TorrentPanel } from './components';
 import { MediaType } from '../../shared/meta';
-import { getMediaType } from '../../shared/core';
+import { getMediaType, isPlayableMedia } from '../../shared/core';
 
 /**
  * 应用主视图。
@@ -20,6 +20,10 @@ const PlayerLayout: React.FC = () => {
   const player = usePlay();
 
   const [view, setView] = useState<ViewMode>('player');
+
+  /* 推送监听器只订阅一次，所以要能读到"此刻的 player"，见下面那个 effect */
+  const playerRef = useRef(player);
+  playerRef.current = player;
 
   // 画廊懒挂载：GalleryPanel 首屏 effect 会预拉 latest 频道，常驻挂载等于每次启动都偷跑流量；
   // 且百张封面图常驻后台会持续占用解码与内存。首次进入时挂载，之后 keep-alive 保状态。
@@ -98,6 +102,48 @@ const PlayerLayout: React.FC = () => {
     }));
     player.methods.mergeOrderedStreams(streamItems, groupId);
   }, [player.methods]);
+
+  /**
+   * 嗅探球推来的资源入列。
+   *
+   * 球是**独立窗口**（app/main/orbs.js），它自己没有播放器 —— 抓到的东西只能
+   * 经主进程转到这里。这就是"嗅探结果进播放器"的唯一入口。
+   *
+   * ## 为什么经 ref 读 player
+   *
+   * 这个监听器必须只订阅一次。把 `player.methods` / `player.playlist` 放进依赖
+   * 数组的话，列表每加一条就退订重订一次 —— 批量导入几百张图时就是几百次
+   * IPC 监听器增删。而监听器真正需要的只有"此刻的列表"和"入列函数"，
+   * 两者都能从 ref 上现读。
+   *
+   * ## 两道过滤都在这里，不在球里
+   *
+   *  · `isPlayableMedia` 挡掉文档、画廊占位、other —— 它们进播放列表只会是
+   *    一条点了没反应的条目（`canPlayback` 对这些一律返回 false）；
+   *  · 已在列表里的 URL 不再重复入列（同一条可能被推两次）。
+   *
+   * 判据取自 `shared/core`，与播放器自己的可用性判断同一份，不另写一套。
+   */
+  useEffect(() => {
+    const off = window.electronAPI?.onPlayMediaPush?.((items) => {
+      const current = playerRef.current;
+      const existing = new Set(current.playlist.files.map((f) => f.url));
+      const accepted = items
+        .filter((item) => item?.url && !existing.has(item.url))
+        .map((item) => ({
+          url: item.url,
+          name: item.title,
+          title: item.title,
+          mediaType: item.mediaType || getMediaType(item.title, undefined, item.url),
+        }))
+        .filter((item) => isPlayableMedia(item.mediaType));
+      if (accepted.length === 0) return;
+      current.methods.addMultipleStreams(accepted, true);
+      // 切到播放器：推送的意义就是"现在就看"，留在别的视图里等于没反应
+      setView('player');
+    });
+    return off;
+  }, []);
 
   return (
     <div className="h-full w-full bg-slate-950 text-slate-200 font-sans overflow-hidden">

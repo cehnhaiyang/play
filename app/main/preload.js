@@ -30,6 +30,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     cancelMediaDownload: (url) => ipcRenderer.invoke('cancel-media-download', url),
     /** 媒体下载实时进度（流媒体走 ffmpeg 的 Duration/out_time，直链走 Content-Length） */
     onMediaDownloadProgress: (callback) => subscribe('media-download-progress', callback),
+    /**
+     * 悬浮球推来的"加入播放列表"。
+     *
+     * 嗅探球是独立窗口，没有播放器 —— 它抓到的东西要入列只能经主进程转到这里。
+     * 主窗口是唯一持有播放列表的地方，所以这条是单向的：球只发，这里只收。
+     */
+    onPlayMediaPush: (callback) => subscribe('play-media-push', callback),
     // --- 单文件 .gallery 打包保存（渲染层组包，主进程弹另存为对话框落盘） ---
     galleryPack: {
         savePack: (options) => ipcRenderer.invoke('gallery-save-pack', options),

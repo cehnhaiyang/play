@@ -1,4 +1,4 @@
-import type { AgentMessage, AgentState, AgentUsage, MediaSourceChannel, MediaType } from '../../../shared/meta';
+import type { AgentMessage, AgentState, AgentUsage, MediaSourceChannel, MediaType, PlayMediaItem } from '../../../shared/meta';
 import { requiresFfmpeg } from '../../../shared/core';
 
 /**
@@ -179,6 +179,33 @@ export const downloadMedia = async (item: SniffedMedia): Promise<void> => {
     }
 
     await bridge('downloads-start', { url: item.url, filename: item.title || undefined });
+};
+
+/* ========================================================================== */
+/* 推送到应用播放器                                                            */
+/* ========================================================================== */
+
+/**
+ * 把嗅探结果推进应用播放器。
+ *
+ * ## 为什么这条不过桥
+ *
+ * 播放器在**应用**里，插件的 `chrome.downloads` 与它无关；而播放列表的唯一权威
+ * 是主窗口的渲染层。球与主窗口同属一个 Electron 进程，走 preload 直达即可 ——
+ * 绕插件一圈再回来只会多两跳，且插件根本没有"播放列表"这个概念。
+ *
+ * ## 为什么不在这里过滤不可播的
+ *
+ * 判据（`isPlayableMedia`）在 `shared/core` 里，主窗口入列时还会再判一次。
+ * 在这里先筛一道等于同一个事实存两处，而两边一旦漂移，症状是"球上点了推送、
+ * 播放列表里没有" —— 比让主窗口自己筛更难查。
+ */
+export const pushToPlayer = async (items: PlayMediaItem[]): Promise<number> => {
+    const api = window.orbApi;
+    if (!api?.pushToPlayer) throw new Error('推送接口不可用（preload 未加载）。');
+    const result = await api.pushToPlayer(items);
+    if (result?.error) throw new Error(result.error);
+    return result?.sent ?? 0;
 };
 
 /* ========================================================================== */

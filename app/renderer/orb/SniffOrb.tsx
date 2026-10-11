@@ -7,11 +7,12 @@ import {
     downloadMedia,
     onBridgeEvent,
     onBridgeStatus,
+    pushToPlayer,
     SOURCE_LABEL,
 } from './bridge-client';
 import type { SniffedMedia } from './bridge-client';
-import { isLinkFromPage, requiresFfmpeg } from '../../../shared/core';
-import type { MediaType } from '../../../shared/meta';
+import { isLinkFromPage, isPlayableMedia, requiresFfmpeg } from '../../../shared/core';
+import type { MediaType, PlayMediaItem } from '../../../shared/meta';
 
 /**
  * 嗅探球。
@@ -278,6 +279,48 @@ export const SniffOrb = () => {
         }
     }, []);
 
+    /**
+     * 推进应用播放器。
+     *
+     * ## 与「下载」的区别
+     *
+     * 下载是**存下来**（浏览器 Ctrl+J 或应用 ffmpeg），推送是**现在就看** ——
+     * 播放器直接播这个地址，不落盘。两条路都要有：想收藏的走下载，
+     * 想立刻看/听的走推送。旧实现（`useBrowse.ts` 的 sniffer 面板）两样都有。
+     *
+     * ## 判据
+     *
+     * `isPlayableMedia` 挡掉文档、画廊占位、other —— 它们进播放列表只会是
+     * 一条点了没反应的条目。判据与主窗口入列时用的是同一份（`shared/core`），
+     * 这里先挡一道只是为了让提示说得出原因，不是第二套真值。
+     */
+    const push = useCallback(async (items: SniffedMedia[]) => {
+        setError('');
+        const playable = items.filter((item) => isPlayableMedia(item.type as MediaType));
+        if (playable.length === 0) {
+            setError('这些条目不是可播放的媒体（文档或未知类型），无法推送到播放器。');
+            return;
+        }
+        const payload: PlayMediaItem[] = playable.map((item) => ({
+            url: item.url,
+            title: item.title,
+            mediaType: item.type as MediaType,
+            pageUrl: item.pageUrl,
+        }));
+        try {
+            const sent = await pushToPlayer(payload);
+            if (sent === 0) {
+                setError('主窗口没有接收（应用主窗口可能还没打开）。');
+                return;
+            }
+            if (sent < playable.length) {
+                setError(`已推送 ${sent} 条，其余 ${playable.length - sent} 条已在播放列表里。`);
+            }
+        } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+        }
+    }, []);
+
     /* 筛选。两个条件是"与"关系：类型筛 + 范围筛 */
     const filtered = useMemo(() => {
         let list = items;
@@ -404,6 +447,28 @@ export const SniffOrb = () => {
                 </div>
             )}
 
+            {/*
+              批量推送。放在筛选栏下方而不是标题栏：标题栏只有 380px，
+              已经塞了「嗅探 / AI / 持续 / 收起」四个按钮。
+              推的是**当前筛选出来的**那批 —— 用户先筛出想要的范围再推，
+              比"推全部"更接近实际用法，且不必先清空列表。
+            */}
+            {filtered.some((item) => isPlayableMedia(item.type as MediaType)) && (
+                <div className="flex shrink-0 items-center gap-2 border-b border-white/[0.07] px-2 py-1.5">
+                    <span className="text-[10px] text-slate-500">
+                        当前 {filtered.length} 条
+                    </span>
+                    <button
+                        type="button"
+                        onClick={() => void push(filtered)}
+                        title="把当前筛选出的可播放条目全部送进应用播放器"
+                        className="ml-auto rounded-lg bg-emerald-500/15 px-2 py-1 text-[10px] font-medium text-emerald-300 transition hover:bg-emerald-500/25"
+                    >
+                        全部推送到播放器
+                    </button>
+                </div>
+            )}
+
             {filtered.length === 0 ? (
                 <p className="p-4 text-[11px] leading-relaxed text-slate-500">
                     {items.length === 0
@@ -456,6 +521,17 @@ export const SniffOrb = () => {
                                             <span className="min-w-0 flex-1 truncate text-[11px] text-slate-200" title={item.title}>
                                                 {item.title}
                                             </span>
+                                            <button
+                                                type="button"
+                                                onClick={() => void push([item])}
+                                                disabled={!isPlayableMedia(item.type as MediaType)}
+                                                title={isPlayableMedia(item.type as MediaType)
+                                                    ? '直接送进应用播放器播放（不落盘）'
+                                                    : '不是可播放的媒体，无法推送'}
+                                                className="shrink-0 rounded px-1.5 py-0.5 text-[9px] text-slate-500 opacity-0 transition group-hover:opacity-100 hover:text-emerald-300 disabled:opacity-0"
+                                            >
+                                                播放
+                                            </button>
                                             <button
                                                 type="button"
                                                 onClick={() => void download(item)}

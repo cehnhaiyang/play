@@ -3404,6 +3404,25 @@ function registerOrbChannels() {
             entry.win.webContents.send('orb:media-download-progress', progress);
         }
     });
+
+    /**
+     * 嗅探结果 → 应用播放器。
+     *
+     * 播放列表长在**主窗口**的渲染层里，而球是独立窗口 —— 它自己播不了任何东西。
+     * 所以这里只做转交，不持有列表：主窗口是"播放列表是什么"的唯一权威，
+     * 主进程再存一份就会有两套真值。
+     *
+     * 返回值带上条数而不是 `{ok:true}`：主窗口可能还没建好（应用刚启动、
+     * 或窗口被关了），那种情况下 `webContents.send` 会静默丢弃，球上却显示
+     * "已推送"。如实报出去，用户才知道该先把主窗口打开。
+     */
+    ipcMain.handle('orb:play-media', (_event, items) => {
+        const list = Array.isArray(items) ? items : [];
+        if (list.length === 0) return { sent: 0 };
+        if (!mainWindow || mainWindow.isDestroyed()) return { sent: 0, error: '主窗口不可用' };
+        mainWindow.webContents.send('play-media-push', list);
+        return { sent: list.length };
+    });
 }
 
 app.whenReady().then(async () => {

@@ -100,4 +100,12 @@ contextBridge.exposeInMainWorld('orbApi', {
         ipcRenderer.on('orb:media-download-progress', handler);
         return () => ipcRenderer.removeListener('orb:media-download-progress', handler);
     },
+
+    /**
+     * 把嗅探结果推进应用播放器。
+     *
+     * 球窗口里**没有播放器** —— 播放列表长在主窗口的渲染层里。所以这条是单向的
+     * 转交：球只发，主进程转给主窗口，球的界面上只需要知道"发了没有"。
+     */
+    pushToPlayer: (items) => ipcRenderer.invoke('orb:play-media', items),
 });

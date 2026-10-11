@@ -93,6 +93,24 @@ export interface FoundLink {
 }
 
 /**
+ * 推送到播放器的一条媒体。
+ *
+ * 由嗅探球（独立的 Electron 窗口）发出、经主进程转给主窗口的渲染层入列。
+ * **不带 `id`**：条目的 id 由 `createStreamFile` 在入列时生成，推送方造一个
+ * 只会与播放列表里真正的那份对不上。
+ */
+export interface PlayMediaItem {
+    /** 媒体直链 */
+    url: string;
+    /** 列表里显示的名字 */
+    title: string;
+    /** 媒体分类。缺省时由 `getMediaType` 按扩展名判 */
+    mediaType?: MediaType;
+    /** 来源页面。用于排查"这条是从哪来的"，不参与播放 */
+    pageUrl?: string;
+}
+
+/**
  * 调用 Electron 媒体下载服务入参
  */
 export interface DownloadMediaParams {
@@ -1448,6 +1466,13 @@ export interface ElectronAPI {
     cancelMediaDownload: (url: string) => Promise<{ success: boolean; message?: string }>;
     /** 媒体下载实时进度，返回取消订阅函数 */
     onMediaDownloadProgress: (callback: (progress: MediaDownloadProgress) => void) => () => void;
+    /**
+     * 悬浮球推来的"加入播放列表"。返回取消订阅函数。
+     *
+     * 球是独立窗口（见 app/main/orbs.js），它自己的播放器不存在 —— 播放要
+     * 发生在主窗口里。所以嗅探结果入列只能经主进程中转到这里。
+     */
+    onPlayMediaPush: (callback: (items: PlayMediaItem[]) => void) => () => void;
     /** 读取指定域名的 Cookie */
     getCookies: (url: string) => Promise<any[]>;
     /** 设置 Cookie 项 */

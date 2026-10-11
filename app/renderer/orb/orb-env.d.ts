@@ -6,6 +6,7 @@ import type {
     DownloadMediaResult,
     ElectronAPI,
     MediaDownloadProgress,
+    PlayMediaItem,
 } from '../../../shared/meta';
 
 /**
@@ -60,6 +61,12 @@ declare global {
         getDownloadCapabilities: () => Promise<DownloadCapabilities>;
         /** 流媒体下载进度。返回取消订阅的函数 */
         onMediaDownloadProgress: (callback: (progress: MediaDownloadProgress) => void) => () => void;
+
+        /*
+         * 推给应用播放器。**单向** —— 球窗口里没有播放器，播放列表长在主窗口。
+         * 返回实际送达的条数：主窗口没开时是 0，球据此提示用户而不是假装成功。
+         */
+        pushToPlayer: (items: PlayMediaItem[]) => Promise<{ sent: number; error?: string }>;
     }
 
     interface Window {
