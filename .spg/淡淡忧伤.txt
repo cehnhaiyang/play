@@ -1,58 +1,42 @@
-// ===========================================================================
-//  Cm | 62 BPM | 一小节 = 3.871s | 全曲 16 小节 = 61.9s
-//  导出长度取最晚结束的事件：末轮铺底的末音起于第 16 小节（58.1s），1n 乘 gate 1.5
-//  得 5.81s，加 release 5.0s 收在 69.0s，再叠全局 7.0s 混响尾 —— 总长约 76s
-//  和声 Cm–Ab–Fm–G，末轮走 Ab–Fm–G–Cm 的终止式
-//  四轮：Ⅰ 铺底+琶音+旋律 → Ⅱ 玻璃钟进入 → Ⅲ 三层换新素材、旋律上移
-//  → Ⅳ 琶音与玻璃钟退场，铺底与旋律收束到 Cm
-// ===========================================================================
-
 config {
   tempo: 62
   master_gain: 0.62
 }
 
 // ---------------------------------------------------------------------------
-// 主钢琴：1:1 FM 只生成整数次谐波列，音准不会跑；加的是厚度，不是金属感
+// 主钢琴：1:1 FM 加厚度，衰减型包络，缓慢磁带漂移
 // ---------------------------------------------------------------------------
 define_instrument(name="warm_piano") {
   preset: "piano"
   wave: "sine"
   fm_wave: "sine"
-  fm_ratio: 1.0
-  fm_index: 75             // 单位是 Hz：C4 上约 0.29 调制指数，暖而不糊
+  fm_ratio: 1.0            // 1:1 只产生谐波列，音准不跑
+  fm_index: 75             // 单位是 Hz，对应 C4 约 0.29 调制指数：暖而不糊
   detune: 3
 
   envelope: adsr(0.005, 2.0, 0.16, 2.8, curve=exp)
   filter: lowpass(1200, 0.5)
   filter_envelope: adsr(0.008, 0.9, 0.25, 0.7)
-  filter_env_amount: 1000  // 包络在基频之上加：起音顶到 2200Hz，之后落在 1450Hz
-                           // （力度偏移先改基频，包络再叠上去）
+  filter_env_amount: 1000  // 显式声明，控制起音的"开盖"幅度
 
-  lfo: sine(freq=0.45, amount=3.5, target=frequency, ramp=2.0)  // ±3.5 音分，周期 2.2s
-  // ramp=2.0 意味着 LFO 深度每秒只涨 1.75 音分：4n 的琶音（0.97s）只拿到约一半深度，
-  // 1n 的长音才走满 —— 漂移主要作用在长音上。
+  lfo: sine(freq=0.45, amount=3.5, target=frequency, ramp=2.0)  // ±3.5 音分慢漂移
   velocity_sensitivity: 0.85
-  velocity_to_filter: 1600 // 以 velocity 0.8 为基准：琶音最弱的 0.40 低 640Hz，旋律顶点 0.90 高 160Hz
+  velocity_to_filter: 1600 // 强奏更亮
   gain: 0.8
   pan: -0.12
 }
 
 // ---------------------------------------------------------------------------
-// 低频铺底：纯正弦地板，滤波固定不扫，全曲只承担和声骨架。
-// gain 0.42：按增益链算到输出端（baseGain × velScale × 音序 gain × master_gain），
-// 它与玻璃钟 ≈0.22、琶音 ≈0.18–0.22 同档，旋律是 0.44–0.55 —— 骨架比旋律
-// 低约 7dB，听得见和声走向，又不去和主旋律争位置。
-// 这里若沿用 0.17，铺底会落到旋律以下约 15dB，和声走向实际上听不出来。
+// 低频铺底：纯正弦地板，滤波不扫
 // ---------------------------------------------------------------------------
 define_instrument(name="subtle_pad") {
   wave: "sine"
-  envelope: adsr(2.2, 1.2, 0.95, 5.0, curve=linear)   // A+D = 3.4s，短于 1n 的 3.87s，不被压缩
+  envelope: adsr(2.2, 1.2, 0.95, 5.0, curve=linear)
   filter: lowpass(320, 0.7)
   voices: 2
   unison_spread: 5
   spread: 0.35
-  gain: 0.42
+  gain: 0.17
   pan: 0.0
 }
 
@@ -65,8 +49,8 @@ define_instrument(name="glass_bells") {
   fm_wave: "sine"
   fm_ratio: 3.5            // 非整数比 = 金属钟声
   fm_index: 260
-  envelope: adsr(0.002, 1.3, 0.0, 1.9, curve=exp)   // A+D 只有 1.3s：8n/4n 音会被压到 0.48s/0.97s 衰减，尾巴交给 release
-  filter: highpass(280, 0.6)                        // 最低音是 G4(392)，基频全在通带内
+  envelope: adsr(0.002, 1.3, 0.0, 1.9, curve=exp)   // 短促、有回响但不拖
+  filter: highpass(280, 0.6)                        // 保住 G4(392) 及以上的基频
   voices: 2
   unison_spread: 6
   gain: 0.45
@@ -81,21 +65,17 @@ define_instrument(name="glass_bells") {
 // 全局效果链
 // ---------------------------------------------------------------------------
 effect_chain {
-  eq(low=-2.5, mid=0.5, high=1.5)                          // 低架在 250Hz：收低频泥浆，留高频光泽
-  delay(time="8n.", feedback=0.26, mix=0.12, damping=2800)  // 62BPM 附点八分 = 0.75 拍 = 0.726s
+  eq(low=-2.5, mid=0.5, high=1.5)                          // 收低频泥浆，留高频光泽
+  delay(time="8n.", feedback=0.26, mix=0.12, damping=2800)  // 62BPM 附点八分 = 0.726s
   reverb(decay=7.0, mix=0.4, pre_delay=0.04, damping=4000)  // 湿润大空间
 }
 
-// 音序：每段固定 4 小节 = 16 拍 = 15.48s，mix 的 time 才能落在小节边界上。
-// 和声骨架 Cm–Ab–Fm–G 由铺底承担并贯穿全曲；上方声部逐轮换新素材，
-// 发展不靠 loop 复述。
+// ===========================================================================
+// 音序：全部 4 小节 = 15.48s，和声 Cm | Ab | Fm | G
+// ===========================================================================
 
-// 琶音 · 第 1-2 轮：一小节一个和弦的四音分解，都是「根–五–三（或七）–五」的
-// 摇摆音型，第 3 个音总是本小节的最高点（Eb3 / C4 / Ab3 / F3），
-// 于是每小节都是一条上行到顶再落下的轮廓。
-// 收尾的第 4 个音落回五音——只有第 1 小节例外，落在根音 C3 上。
-// 每小节首音与铺底长音的关系：第 2-4 小节同度，第 1 小节是 C2 对 C3，低一个八度。
-sequence(name="arps_a", instrument="warm_piano", gain=0.6, humanize=0.16) {
+// 琶音：一小节一个和弦，四音分解（原谱音高与排列不变，时值 2n → 4n）
+sequence(name="mid_range_arps", instrument="warm_piano", gain=0.6, humanize=0.16) {
   note("C2",  "4n", velocity=0.54); note("G2",  "4n", velocity=0.44)
   note("Eb3", "4n", velocity=0.46); note("C3",  "4n", velocity=0.42)
 
@@ -109,26 +89,8 @@ sequence(name="arps_a", instrument="warm_piano", gain=0.6, humanize=0.16) {
   note("F3",  "4n", velocity=0.48); note("D3",  "4n", velocity=0.44)
 }
 
-// 琶音 · 第 3 轮：把逐音手写的分解换成 arp 指令，轮廓从「上行到顶再落下」
-// 变成往返，和声也补满 —— 第 1、3、4 小节写成七和弦（Cm7 / Fm7 / G7，
-// G7 补上了导音 B2），第 2 小节的 Ab 仍是三和弦。
-// upDown 的 4 音池是 0-1-2-3-2-1 共 6 步，1n 里排 8 个八分音符会回绕到池首，
-// 因此 8n 一遍下来是「上行到顶、下行回来、再上行两个音」，不是整齐的往返。
-// 每条 arp 都显式给 velocity：arp 的缺省力度是 0.8，而 arps_a 逐音手写的
-// 均值只有 0.47，不写就会让这一轮比前两轮响出约 55%。四条取 0.50–0.58，
-// 整体比 arps_a 强约 14%，是高点轮该有的推动；代价是一条 arp 只能给一个
-// 力度值，因此没有 arps_a 那种逐音的重音起伏。
-// （arp 的 velocity 走逐音符表现力参数白名单，与 rate/duration 写在同一次调用里。）
-sequence(name="arps_b", instrument="warm_piano", gain=0.6, humanize=0.16) {
-  arp(chord=["C3",  "Eb3", "G3", "Bb3"], pattern="upDown", rate="8n", duration="1n", velocity=0.56)
-  arp(chord=["Ab2", "C3",  "Eb3", "Ab3"], pattern="upDown", rate="8n", duration="1n", velocity=0.50)
-  arp(chord=["F2",  "Ab2", "C3",  "Eb3"], pattern="upDown", rate="8n", duration="1n", velocity=0.56)
-  arp(chord=["G2",  "B2",  "D3",  "F3"],  pattern="upDown", rate="8n", duration="1n", velocity=0.58)
-}
-
-// 主旋律 · 第 1-2 轮：长音用 gate>1 让时值稍稍越过后一个音的起点，
-// 配合 2.8s 的 release 模拟踩住延音踏板，句子之间不出现断缝
-sequence(name="melody_a", instrument="warm_piano", gain=1.0, humanize=0.22) {
+// 主旋律：连奏无缝隙（gate>1 让音符交叠，配合长 release 模拟踩住延音踏板）
+sequence(name="main_legato_melody", instrument="warm_piano", gain=1.0, humanize=0.22) {
   note("G4",  "2n", velocity=0.78, gate=1.08)
   note("Eb4", "2n", velocity=0.68, gate=1.08)
 
@@ -140,30 +102,11 @@ sequence(name="melody_a", instrument="warm_piano", gain=1.0, humanize=0.22) {
   note("Eb4", "2n", velocity=0.82, gate=1.08)   // 乐句高点
 
   note("D4",  "2n", velocity=0.74, gate=1.08)
-  note("B3",  "2n", velocity=0.64, gate=1.10)   // 大调三音，G7 的导音
+  note("B3",  "2n", velocity=0.64, gate=1.10)   // 大调三音，构成 G7 解决回 Cm
 }
 
-// 主旋律 · 第 3 轮（全曲顶点）：音域由 melody_a 的 B3–G4 抬到 G4–D5，
-// 第 4 小节先在 B4 的导音上起句、再落到 D5，整轮停在属和弦上不解决，
-// 把答案留到末轮。
-// 顶点取 0.90 而非 1.0：velocity 上限是 1.0，留出余量才抬得动。
-sequence(name="melody_b", instrument="warm_piano", gain=1.0, humanize=0.26) {
-  note("Bb4", "2n", velocity=0.86, gate=1.05)   // Cm 的七音
-  note("G4",  "2n", velocity=0.72, gate=1.05)
-
-  note("Ab4", "2n.", velocity=0.90, gate=1.05)  // 全曲力度顶点；2n. = 3 拍
-  note("G4",  "4n", velocity=0.74)
-
-  note("C5",  "2n", velocity=0.84, gate=1.05)
-  note("Ab4", "2n", velocity=0.76, gate=1.05)
-
-  note("B4",  "2n", velocity=0.82, gate=1.05)   // 导音起句
-  note("D5",  "2n", velocity=0.78, gate=1.05)   // 落到属和弦的五音，不解决
-}
-
-// 高音对位 · 第 2 轮：旋律（B3–G4）之上一个八度区的对位线，独立声像，
-// 只在旋律长音的中段落点，避开旋律的每一次起音。
-sequence(name="sparkle_a", instrument="glass_bells", gain=0.85, humanize=0.26) {
+// 高音对位：填主旋律留出的空隙，独立声像
+sequence(name="sparkle_counterpoint", instrument="glass_bells", gain=0.85, humanize=0.26) {
   rest("4n")
   note("C5",  "8n", velocity=0.68, pan=0.24)
   note("D5",  "8n", velocity=0.62, pan=0.34)
@@ -184,54 +127,7 @@ sequence(name="sparkle_a", instrument="glass_bells", gain=0.85, humanize=0.26) {
   note("D5",  "4n", velocity=0.70, pan=0.32)
 }
 
-// 高音对位 · 第 3 轮：音符数由 11 减到 4，底线由 G4 抬到 C5，
-// 每小节只在小节中段点一下，其余留白。旋律这轮占 G4–D5，两者不同音；
-// 第 3 小节的 Ab5 是旋律 Ab4 的高八度，第 4 小节的 F5 与旋律 B4 同处 G7 之内
-// （F 是七音、B 是大调三音），两句叠在一起正好补全属和弦。
-sequence(name="sparkle_b", instrument="glass_bells", gain=0.85, humanize=0.26) {
-  rest("4n")
-  note("Eb5", "2n", velocity=0.74, pan=0.28)
-  rest("4n")
-
-  rest("2n")
-  note("C5",  "2n", velocity=0.68, pan=0.34)
-
-  rest("2n")
-  note("Ab5", "2n", velocity=0.72, pan=0.30)
-
-  rest("2n")
-  note("F5",  "2n", velocity=0.70, pan=0.36)   // G7 的七音
-}
-
-// 低频铺底 · 第 4 轮：前三轮那条不动的素材在这里让位，收成 Ab–Fm–G–Cm 的终止，
-// 末音拖过小节线渗进混响尾。没有这一段，全曲会停在铺底的 G 上不解决。
-sequence(name="drone_end", instrument="subtle_pad", gain=0.9) {
-  note("Ab1", "1n", velocity=0.62)
-  note("F2",  "1n", velocity=0.64)
-  note("G2",  "1n", velocity=0.70)
-  note("C2",  "1n", velocity=0.74, gate=1.5)
-}
-
-// 收束 · 第 4 轮：琶音与玻璃钟退场，只留铺底与这条旋律，和声与 drone_end
-// 逐小节对齐（Ab | Fm | G | Cm），末小节回到主音 C5 收住。
-sequence(name="melody_end", instrument="warm_piano", gain=1.0, humanize=0.26) {
-  rest("2n")
-  note("C5",  "2n", velocity=0.66)              // Ab：三音
-
-  note("Ab4", "2n", velocity=0.58)              // Fm：三音
-  note("C5",  "2n", velocity=0.62)              // Fm：五音
-
-  note("B4",  "2n", velocity=0.68)              // G：大调三音，即导音
-  note("D5",  "2n", velocity=0.60)              // G：五音
-
-  rest("2n")
-  note("C5",  "2n", velocity=0.64, gate=1.45)   // Cm：主音。第 3 小节的导音 B4 隔半拍
-                                                // 上行半步落到这里，gate 1.45 再把它
-                                                // 拖过小节线渗进混响尾
-}
-
-// 低频铺底：跟随和声根音，一小节一个长音。前 3 轮作为不动的骨架层（loop=3），
-// 第 4 轮由 drone_end 接走终止。
+// 低频铺底：跟随和声根音
 sequence(name="background_layer", instrument="subtle_pad", gain=0.9) {
   note("C3",  "1n", velocity=0.70)
   note("Ab2", "1n", velocity=0.64)
@@ -240,30 +136,11 @@ sequence(name="background_layer", instrument="subtle_pad", gain=0.9) {
 }
 
 // ===========================================================================
-// 编排（时间轴单位：小节，1m = 4 拍 = 3.871s）
-//   0–4m    第 1 轮：铺底 + 琶音 + 旋律
-//   4–8m    第 2 轮：玻璃钟进入，上方声部仍是 *_a
-//   8–12m   第 3 轮：琶音/旋律/玻璃钟三层同时换 *_b 新素材，旋律上移，玻璃钟变稀疏
-//   12–16m  第 4 轮：琶音与玻璃钟退场，铺底与旋律走 Ab–Fm–G–Cm 收束
-// 旋律从第 1 轮就在，玻璃钟要等到第 2 轮才进 —— 先让钢琴与铺底立住。
-// 第 3 轮三层同时换素材，第 4 轮只留旋律收束，因此全曲不是同一段四小节连演四遍。
+// 编排：对位层第 2 轮才进入，前面先让钢琴与铺底立住
 // ===========================================================================
 mix {
-  // 铺底是刻意不动的一层：前 12 小节同一份素材连演三轮，只承担和声骨架，
-  // 上方声部的发展才有可对照的地面；第 4 轮换成 drone_end 走终止。
-  track(source="background_layer", time=0, loop=3)
-
-  track(source="arps_a",           time=0)          // 第 1 轮
-  track(source="melody_a",         time=0)
-
-  track(source="arps_a",           time="4m")       // 第 2 轮：琶音与旋律不动，变化由玻璃钟带来
-  track(source="melody_a",         time="4m")
-  track(source="sparkle_a",        time="4m")
-
-  track(source="arps_b",           time="8m")       // 第 3 轮：三层同时换新素材
-  track(source="melody_b",         time="8m")
-  track(source="sparkle_b",        time="8m")
-
-  track(source="drone_end",        time="12m")      // 第 4 轮：琶音与玻璃钟在此退场
-  track(source="melody_end",       time="12m")
+  track(source="background_layer",     time=0,    loop=4)
+  track(source="mid_range_arps",       time=0,    loop=4)
+  track(source="main_legato_melody",   time=0,    loop=4)
+  track(source="sparkle_counterpoint", time="4m", loop=3)
 }
