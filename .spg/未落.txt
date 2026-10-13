@@ -17,9 +17,12 @@
 // 1m = 4 拍 = 1 小节，2n = 半小节，4n = 一拍 —— 下文的 4m/8m/12m 都是小节数
 //   第 1–4 小节   引子：钢琴柱式和弦 + 低频铺底 + 钟声先响两次（都是 G5），
 //                       只留骨架，不加旋律
-//   第 5–8 小节   A1  ：左手琶音 + 主旋律第一句，末句停在导音 B3 不解决
+//   第 5–8 小节   A1  ：左手琶音 + 主旋律第一句；第 7 小节左手放宽成四分音，
+//                       短语在那里换气，第 8 小节又回到八分音推进，
+//                       末句停在导音 B3 不解决
 //   第 9–12 小节  A2  ：换一条高音区旋律，节奏加密一倍，第 11 小节冲到
-//                       主旋律最高音 Eb5；琶音改七和弦并抬到 F3–Bb4 的中音区；
+//                       主旋律最高音 Eb5；琶音改七和弦并抬到 F3–Bb4 的中音区，
+//                       并在第 11 小节同样放宽成四分音 —— 与 A1 第 7 小节同一处换气；
 //                       弦乐垫层进入；钟声在这里接上开篇的同音 G5，响到 A2 结束
 //   第 13–16 小节 尾段：织体抽薄成柱式和弦 + 旋律，弦乐撤掉，
 //                       旋律音区逐句下落；第 15 小节后半和声由 Fm 转到属和弦 G7，
@@ -137,11 +140,15 @@ effect_chain {
 // G7 则必须把七音 F3 与三音 B3 都写出来 —— 只写 G2 D3 的话没有三音，
 // 听不出属功能，后面旋律停在导音 B3 时的张力也就无从建立。
 // strum 让各声部依次进入，模拟踏板抬起时琴槌逐个落下的手感。
+// 四个和弦的最高音连成 Eb4 → C4 → Ab3 → B3：前三个一路下行（叹息的形状），
+// 最后一个反而立起来 —— 那就是第 8 小节结束 A1 的那个导音，在引子里先露一次头。
+// 力度逐小节递增（0.40 → 0.52）、strum 也逐小节放宽，四小节本身有方向，
+// 不至于停在原地等旋律进来。
 sequence(name="intro_chords", instrument="felt_piano", gain=0.85, humanize=0.18) {
-  chord(["C3", "G3", "Eb4"], "1n", strum=0.08, velocity=0.42, gate=1.18)
-  chord(["Ab2", "Eb3", "C4"], "1n", strum=0.08, velocity=0.40, gate=1.18)
-  chord(["F2", "C3", "Ab3"], "1n", strum=0.08, velocity=0.44, gate=1.18)
-  chord(["G2", "D3", "F3", "B3"], "1n", strum=0.10, velocity=0.48, gate=1.30)
+  chord(["C3", "G3", "Eb4"], "1n", strum=0.06, velocity=0.40, gate=1.18)
+  chord(["Ab2", "Eb3", "C4"], "1n", strum=0.08, velocity=0.43, gate=1.18)
+  chord(["F2", "C3", "Ab3"], "1n", strum=0.10, velocity=0.46, gate=1.18)
+  chord(["G2", "D3", "F3", "B3"], "1n", strum=0.12, velocity=0.52, gate=1.30)
 }
 
 // 铺底主循环：Cm | Ab | Fm | G7，4 小节，重复 3 次覆盖前 12 小节
@@ -167,10 +174,13 @@ sequence(name="pad_final", instrument="deep_pad", gain=0.9) {
 // 音区刻意压在 C4 以下、并避开同小节旋律音：第 7 小节旋律落在 Ab3/C4、
 // 第 8 小节落在 B3，这两小节的排列就整体下沉（F2–F3、G2–F3），
 // 否则琶音会和旋律在同一个音高上叠成一片，听不出是两条线。
+// 第 7 小节后半放宽成四分音、并落回低八度：短语在那里拐弯（旋律落到 C4），
+// 左手跟着换气，不再一路八分音推到底 —— 呼吸由音符密度给，不靠力度。
 sequence(name="main_arps", instrument="felt_piano", gain=0.62, humanize=0.20) {
   arp(["C3", "Eb3", "G3", "C4"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.50)
   arp(["Ab2", "C3", "Eb3", "Ab3"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.46)
-  arp(["F2", "Ab2", "C3", "F3"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.52)
+  arp(["F2", "Ab2", "C3", "F3"], pattern="upDown", rate="8n", duration="2n", gate=0.86, velocity=0.50)
+  arp(["F2", "Ab2"], pattern="upDown", rate="4n", duration="2n", gate=0.92, velocity=0.48)
   arp(["G2", "B2", "D3", "F3"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.56)
 }
 
@@ -182,10 +192,13 @@ sequence(name="main_arps", instrument="felt_piano", gain=0.62, humanize=0.20) {
 // 力度整体比 A1 那一份高一档、音序增益也抬到 0.66：A2 是全曲的最高点，
 // 左手要把织体顶起来托住 Eb5，而不是继续当背景。
 // 4 音池 upDown 得 6 步（上到七音再折回），一小节 8 个八分音，索引回绕继续。
+// 第 11 小节后半同样放宽成四分音、落回低八度（与 A1 第 7 小节同一处换气）：
+// 顶点 Eb5 正拖在那里，左手让开，那个音才是全曲的最高点，而不是被琶音埋掉。
 sequence(name="main_arps_b", instrument="felt_piano", gain=0.66, humanize=0.20) {
   arp(["C4", "Eb4", "G4", "Bb4"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.52)
   arp(["Ab3", "C4", "Eb4", "G4"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.50)
-  arp(["F3", "Ab3", "C4", "Eb4"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.54)
+  arp(["F3", "Ab3", "C4", "Eb4"], pattern="upDown", rate="8n", duration="2n", gate=0.86, velocity=0.54)
+  arp(["F3", "Ab3"], pattern="upDown", rate="4n", duration="2n", gate=0.92, velocity=0.52)
   arp(["G3", "B3", "D4", "F4"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.58)
 }
 
