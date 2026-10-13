@@ -3,9 +3,11 @@
 //
 // 曲名取自终止式，不是情绪标签：A1 末句停在导音 B3、A2 末句停在导音 B4，
 // 两次陈述都没落下来；尾段终于落到主音 C4，但钟声最后响的是五度 G5，
-// 悬在主音上方 —— 所以是"落"了，却没有合上。
+// 悬在主音上方 —— 所以是"落"了，却没有合上。钟声全曲只有三段（m1、m9、m13），
+// 首尾两句是同一个音高 G5，把"没合上"框在两头。
 //
-// 两次没落下来是同一个手势：都落在小节第 3 拍、都持两拍、都越过小节线一点。
+// 两次没落下来在音区上不同，手势相同：都是把导音拖长、都压过小节线，
+// 让句子停在半空里，等下一次陈述来接。
 //
 // 62 BPM / C 小调 / 16 小节 ≈ 61.9s（不含混响尾音）
 //
@@ -13,14 +15,15 @@
 //
 // 曲式与时间轴（1 小节 = 4 拍 = 3.871s）：
 // 1m = 4 拍 = 1 小节，2n = 半小节，4n = 一拍 —— 下文的 4m/8m/12m 都是小节数
-//   第 1–4 小节   引子：钢琴柱式和弦 + 低频铺底，只留骨架，不加旋律
+//   第 1–4 小节   引子：钢琴柱式和弦 + 低频铺底 + 钟声先响一次（G5），
+//                       只留骨架，不加旋律
 //   第 5–8 小节   A1  ：左手琶音 + 主旋律第一句，末句停在导音 B3 不解决
 //   第 9–12 小节  A2  ：换一条高音区旋律，节奏加密一倍，第 11 小节冲到
 //                       主旋律最高音 Eb5；琶音改七和弦并抬到 F3–Bb4 的中音区；
-//                       弦乐垫层进入；钟声也在这里进入，并一直响到曲终
+//                       弦乐垫层进入；钟声在这里接上开篇的同音 G5，响到 A2 结束
 //   第 13–16 小节 尾段：琶音与弦乐撤掉，织体抽薄成柱式和弦 + 旋律，
 //                       旋律音区逐句下落，最后落回主音 C4 —— 全曲唯一一次解决；
-//                       但钟声收在五度 G5 上，结尾仍然是敞开的
+//                       钟声换成分句下落的另一句，末音仍是五度 G5，结尾敞开着
 //
 // 声部进出全部由 mix 的 time / loop 控制：同一个音序重复播放即"再现"，
 // 换音序即"发展"，不需要为每一段单独写一份伴奏。
@@ -134,10 +137,10 @@ effect_chain {
 // 听不出属功能，后面旋律停在导音 B3 时的张力也就无从建立。
 // strum 让各声部依次进入，模拟踏板抬起时琴槌逐个落下的手感。
 sequence(name="intro_chords", instrument="felt_piano", gain=0.85, humanize=0.18) {
-  chord(["C3", "G3", "Eb4"], "1n", strum=0.08, velocity=0.42)
-  chord(["Ab2", "Eb3", "C4"], "1n", strum=0.08, velocity=0.40)
-  chord(["F2", "C3", "Ab3"], "1n", strum=0.08, velocity=0.44)
-  chord(["G2", "D3", "F3", "B3"], "1n", strum=0.10, velocity=0.48)
+  chord(["C3", "G3", "Eb4"], "1n", strum=0.08, velocity=0.42, gate=1.18)
+  chord(["Ab2", "Eb3", "C4"], "1n", strum=0.08, velocity=0.40, gate=1.18)
+  chord(["F2", "C3", "Ab3"], "1n", strum=0.08, velocity=0.44, gate=1.18)
+  chord(["G2", "D3", "F3", "B3"], "1n", strum=0.10, velocity=0.48, gate=1.30)
 }
 
 // 铺底主循环：Cm | Ab | Fm | G7，4 小节，重复 3 次覆盖前 12 小节
@@ -154,7 +157,7 @@ sequence(name="pad_final", instrument="deep_pad", gain=0.9) {
   note("C2", "1n", velocity=0.66)
   note("Ab1", "1n", velocity=0.60)
   note("F1", "1n", velocity=0.58)
-  note("C2", "1n", velocity=0.62)
+  note("C2", "1n", velocity=0.62, gate=1.6)
 }
 
 // 左手琶音：upDown 按音高排序展开，4 音池 + 8 个八分 = 每小节 8 个音
@@ -173,12 +176,16 @@ sequence(name="main_arps", instrument="felt_piano", gain=0.62, humanize=0.20) {
 // A2 琶音：四个和弦各加一个自然七音，变成 Cm7 | Abmaj7 | Fm7 | G7，
 // 音区比 A1 整体上移（A1 在 F2–C4，这里在 F3–Bb4），把中音区填满。
 // 七音全部取自 C 自然小调（G7 的 B 是导音），不是随手加的色彩音。
+// 保持 upDown 而不用 downUp：左手每小节都从根音起步，与右手同时起音的音
+// 拉开三度以上；downUp 会把七音顶到小节第一拍，正撞右手的起音，互相盖住。
+// 力度整体比 A1 那一份高一档、音序增益也抬到 0.66：A2 是全曲的最高点，
+// 左手要把织体顶起来托住 Eb5，而不是继续当背景。
 // 4 音池 upDown 得 6 步（上到七音再折回），一小节 8 个八分音，索引回绕继续。
-sequence(name="main_arps_b", instrument="felt_piano", gain=0.58, humanize=0.20) {
-  arp(["C4", "Eb4", "G4", "Bb4"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.46)
-  arp(["Ab3", "C4", "Eb4", "G4"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.44)
-  arp(["F3", "Ab3", "C4", "Eb4"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.48)
-  arp(["G3", "B3", "D4", "F4"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.50)
+sequence(name="main_arps_b", instrument="felt_piano", gain=0.66, humanize=0.20) {
+  arp(["C4", "Eb4", "G4", "Bb4"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.52)
+  arp(["Ab3", "C4", "Eb4", "G4"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.50)
+  arp(["F3", "Ab3", "C4", "Eb4"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.54)
+  arp(["G3", "B3", "D4", "F4"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.58)
 }
 
 // 主旋律 A1：从五度 G4 落到三度 Eb4，第二小节叹息式下行。
@@ -218,12 +225,11 @@ sequence(name="melody_b", instrument="felt_piano", gain=1.0, humanize=0.22) {
 
   note("Ab4", "4n", velocity=0.72)
   note("C5", "4n", velocity=0.76)
-  note("Eb5", "2n", velocity=0.86, gate=1.08)
+  note("Eb5", "2n", velocity=0.86, gate=1.15)   // 顶点撑满并压过小节线，全曲力度最高的一次陈述
 
   note("D5", "4n", velocity=0.80)
-  note("B4", "4n", velocity=0.70)
   note("G4", "4n", velocity=0.62)
-  note("B4", "4n", velocity=0.64)
+  note("B4", "2n", velocity=0.72, gate=1.06)   // 导音拖长压过小节线：与 A1 同一种悬停
 }
 
 // 弦乐垫层：比 deep_pad 高一个八度（deep_pad 走 C2/Ab1/F1/G1），落在 C3 一带。
@@ -233,19 +239,29 @@ sequence(name="string_swell", instrument="low_strings", gain=0.85) {
   note("C3", "1n", velocity=0.62)
   note("Ab2", "1n", velocity=0.58)
   note("F2", "1n", velocity=0.60)
-  note("G2", "1n", velocity=0.66)
+  note("G2", "1n", velocity=0.66, gate=1.15)   // 尾音越过小节线：弦乐是衰减退场，不是被切掉
+}
+
+// 开篇的钟声：全曲第一个音和最后一个音是同一个音高 —— 五度的 G5。
+// 两次都悬在主音之上：m1 悬在 Cm 上，m4 落在属和弦 G7 的根音上并响过小节线，
+// 一直拖进 A1 的 Cm 落地里。钟声因此从第一秒起就是"没合上"的那个音，
+// 而不是到第 9 小节才作为新音色登场；尾段的收尾也就成了它的回归。
+sequence(name="bell_intro", instrument="glass_bells", gain=0.65) {
+  note("G5", "2n", velocity=0.34, pan=0.34)
+  rest("2n")
+
+  rest("2m")
+
+  rest("2n")
+  note("G5", "2n", velocity=0.40, pan=0.28, gate=1.8)
 }
 
 // 钟声点缀：每小节都用 rest("2n") 让出前两拍，只在第 3、4 拍落音，
 // 避开主旋律的起音点；落点音高也都避开旋律的实音
-// （第 10 小节旋律第 3、4 拍是 Eb5/C5，钟声取 Ab5/C6 的八度上方；
-// 第 12 小节旋律是 G4/B4，钟声取 G5）。钟声的 FM 泛音很亮，
-// 和钢琴落在同一个音高上只会被钢琴的起音盖掉，听不出是两件乐器。
+// （第 10 小节旋律第 3、4 拍是 Eb5/C5，钟声取 Ab5/C6 —— 高八度；
+// 第 12 小节旋律第 3、4 拍是拖长的导音 B4，钟声取 G5 叠在上方）。
 // 第 11 小节整小节休止 —— 那里是主旋律的最高音 Eb5，钟声进去只会盖住它。
-// 这段 4 小节 loop=2，落在第 9–12 与第 13–16 小节。两轮和声分别是
-// Cm|Ab|Fm|G7 与 Cm|Ab|Fm|Cm：前三个位置两轮相同，可以自由写和弦音；
-// 只有第 4 个位置一轮是 G7、一轮是 Cm，所以那里用公共音 G5
-// （G7 的根音、Cm 的五度），不必为尾段另写一份钟声，一段 loop 到底。
+// 落点全取和弦音（Cm|Ab|Fm|G7）。
 sequence(name="bell_accents", instrument="glass_bells", gain=0.8, humanize=0.24) {
   rest("2n")
   note("G5", "2n", velocity=0.50, pan=0.30)
@@ -260,35 +276,57 @@ sequence(name="bell_accents", instrument="glass_bells", gain=0.8, humanize=0.24)
   note("G5", "2n", velocity=0.46, pan=0.28)
 }
 
+// 尾段钟声：不与 A2 复用同一句。原样 loop=2 只会把同一句装饰音说两遍，
+// 而尾段是全曲唯一一次落地，装饰音得跟着收 —— 于是另写一份：
+// 音高只降不升 C6 → Ab5 → G5，落点一句比一句靠后（第 3 拍 → 第 4 拍），
+// 中间第 15 小节整小节留白，把终止式前的四拍彻底抽空 —— 装饰音越走越晚、越走越稀，
+// 最后落回开篇那个 G5，首尾同一个音。
+// 末音 G5 是全曲最后一个音、也是开篇第一个音，落在主音 C4 与低音 C2 之上 ——
+// 这就是曲名所指的那一下：落是落了，没有合上。
+sequence(name="bell_tail", instrument="glass_bells", gain=0.8, humanize=0.26) {
+  rest("2n")
+  note("C6", "2n", velocity=0.44, pan=0.26)
+
+  rest("2n.")
+  note("Ab5", "4n", velocity=0.40, pan=0.20)
+
+  rest("1n")
+
+  rest("2n")
+  note("G5", "2n", velocity=0.52, pan=0.30, gate=1.6)
+}
+
 // 尾段和弦：力度逐小节递减（末小节回升一点，因为那是终止式）。
 // 最后一小节放宽成 C3 G3 Eb4 G4（根音 — 五度 — 三度 — 高八度五度）：
 // 不写 C2，让低音区留给 pad_final 的 C2 一条线，避免低频糊在一起；
 // 不写 C4，因为 outro_melody 正落在 C4 上拖满整小节 —— 同一乐器在同一时刻
 // 发同一个音高，两个振荡器完全同相，只是白白多出 6dB，听不出"更厚"。
 sequence(name="outro_chords", instrument="felt_piano", gain=0.85, humanize=0.16) {
-  chord(["C3", "G3", "Eb4"], "1n", strum=0.06, velocity=0.40)
-  chord(["Ab2", "Eb3", "C4"], "1n", strum=0.06, velocity=0.36)
-  chord(["F2", "C3", "Ab3"], "1n", strum=0.06, velocity=0.34)
-  chord(["C3", "G3", "Eb4", "G4"], "1n", strum=0.14, velocity=0.38)
+  chord(["C3", "G3", "Eb4"], "1n", strum=0.06, velocity=0.40, gate=1.15)
+  chord(["Ab2", "Eb3", "C4"], "1n", strum=0.06, velocity=0.36, gate=1.15)
+  chord(["F2", "C3", "Ab3"], "1n", strum=0.06, velocity=0.34, gate=1.20)
+  chord(["C3", "G3", "Eb4", "G4"], "1n", strum=0.14, velocity=0.38, gate=1.1)
 }
 
 // 尾段旋律：音区逐句下落（C5 → Ab4 → F4 → C4），最后停在低八度的主音 C4 上
-// 拖满整小节 —— 这是全曲第三次终止，也是唯一一次真正解决（前两次停在导音）。
-// 但钟声随后落在 G5 上，五度悬在主音上方，所以"落"是落了，并没有合上。
+// 拖满整小节 —— 全曲唯一一次真正解决（前两次都停在导音上不落）。
+// 但钟声随后落在 G5，五度悬在主音上方，所以"落"是落了，并没有合上。
 // 第 15 小节的 F4–Eb4 是刻意引用 A1 第 6 小节的叹息音型（原样是 F4–Eb4–C4），
 // 移到这里低八度再现：Eb4 在 Fm 上是七音，下行小三度解决到主音 C4。
 // 不用 Ab3 是因为它和 outro_chords 同一小节的 Ab3 是同一个音高，
 // 同乐器同时刻同音高只是把振幅叠上去，不如换成和弦音外的下行线条。
 sequence(name="outro_melody", instrument="felt_piano", gain=0.95, humanize=0.24) {
   note("C5", "2n", velocity=0.68)
-  note("G4", "2n", velocity=0.56)
+  note("G4", "2n", velocity=0.54)
 
-  note("Ab4", "1n", velocity=0.60)
+  note("Ab4", "1n", velocity=0.58)
 
-  note("F4", "2n", velocity=0.54)
-  note("Eb4", "2n", velocity=0.50)
+  note("F4", "2n", velocity=0.50)
+  note("Eb4", "2n", velocity=0.46)
 
-  note("C4", "1n", velocity=0.44)
+  // 末音是全曲唯一一次解决，力度回抬一点：一路递减到底会把终止式弹成消散，
+  // 主音要听得见，钟声的 G5 才悬得住
+  note("C4", "1n", velocity=0.58)
 }
 
 // ===========================================================================
@@ -297,6 +335,7 @@ sequence(name="outro_melody", instrument="felt_piano", gain=0.95, humanize=0.24)
 mix {
   track(source="intro_chords",  time=0,     loop=1, gain=0.85, pan=-0.05)
   track(source="pad_cycle",     time=0,     loop=3, gain=0.90, pan=0.0)
+  track(source="bell_intro",    time=0,     loop=1, gain=0.70, pan=0.16)
 
   track(source="main_arps",     time="4m",  loop=1, gain=0.68, pan=-0.08)
   track(source="melody_a",      time="4m",  loop=1, gain=1.0)
@@ -304,7 +343,8 @@ mix {
   track(source="main_arps_b",   time="8m",  loop=1, gain=0.72, pan=-0.04)
   track(source="melody_b",      time="8m",  loop=1, gain=1.0)
   track(source="string_swell",  time="8m",  loop=1, gain=0.80, pan=0.10)
-  track(source="bell_accents",  time="8m",  loop=2, gain=0.80, pan=0.12)
+  track(source="bell_accents",  time="8m",  loop=1, gain=0.80, pan=0.12)
+  track(source="bell_tail",     time="12m", loop=1, gain=0.78, pan=0.14)
 
   track(source="pad_final",     time="12m", loop=1, gain=0.90, pan=0.0)
   track(source="outro_chords",  time="12m", loop=1, gain=0.85, pan=-0.05)
