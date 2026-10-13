@@ -196,12 +196,16 @@ sequence(name="pad_final", instrument="deep_pad", gain=0.9) {
 // 左手跟着换气，不再一路八分音推到底 —— 呼吸由音符密度给，不靠力度。
 // 这里不能直接延长前一条 8n 琶音：它的池子是 F2–F3，八分音跑起来会顶到旋律的 C4；
 // 换成 2 音池 + 4n，抬高的是密度而不是音区。
+// 最后两小节之前的收束句（第 8、12 小节）换成 pattern="up"：upDown 的拱形
+// 在乐句要交接时是把重量往下带，最后落成一根中性音；改成一遍遍往上推，
+// 小节最后一拍停在七音 F 上 —— 属七的七音，正好往下一段的主音上倾。
+// 4 音池的 up 在 8 个八分里跑两遍同一组音，是刻意的固定音型，不是没写开。
 sequence(name="main_arps", instrument="felt_piano", gain=0.62, humanize=0.20) {
   arp(["C3", "Eb3", "G3", "C4"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.50)
   arp(["Ab2", "C3", "Eb3", "Ab3"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.46)
   arp(["F2", "Ab2", "C3", "F3"], pattern="upDown", rate="8n", duration="2n", gate=0.86, velocity=0.50)
   arp(["F2", "Ab2"], pattern="upDown", rate="4n", duration="2n", gate=0.92, velocity=0.48)
-  arp(["G2", "B2", "D3", "F3"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.56)
+  arp(["G2", "B2", "D3", "F3"], pattern="up", rate="8n", duration="1m", gate=0.86, velocity=0.58)
 }
 
 // A2 琶音：四个和弦各加一个自然七音，变成 Cm7 | Abmaj7 | Fm7 | G7，
@@ -216,12 +220,16 @@ sequence(name="main_arps", instrument="felt_piano", gain=0.62, humanize=0.20) {
 // 顶点 Eb5 正拖在那里，左手让开，那个音才是全曲的最高点，而不是被琶音埋掉。
 // 这里同样换成 2 音池（F3–Ab3）：直接延长上面那条 8n 琶音的话，
 // 池子里的 C4、Eb4 会一路跑到小节末，撞上还拖着的 Eb5。
+// 第 12 小节同 A1 第 8 小节：换 pattern="up"，八个八分音推着走，
+// 最后一拍停在 F4 —— 那是 G7 的七音，也是主旋律导音 B4 下面的减五度。
+// 这一小节是全曲最响的一小节（琶音 0.58、弦乐 0.66、旋律 0.80），
+// 紧跟着尾段整段撤下来，落差留给段落交界。
 sequence(name="main_arps_b", instrument="felt_piano", gain=0.66, humanize=0.20) {
   arp(["C4", "Eb4", "G4", "Bb4"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.52)
   arp(["Ab3", "C4", "Eb4", "G4"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.50)
   arp(["F3", "Ab3", "C4", "Eb4"], pattern="upDown", rate="8n", duration="2n", gate=0.86, velocity=0.54)
   arp(["F3", "Ab3"], pattern="upDown", rate="4n", duration="2n", gate=0.92, velocity=0.52)
-  arp(["G3", "B3", "D4", "F4"], pattern="upDown", rate="8n", duration="1m", gate=0.86, velocity=0.58)
+  arp(["G3", "B3", "D4", "F4"], pattern="up", rate="8n", duration="1m", gate=0.86, velocity=0.58)
 }
 
 // 主旋律 A1：从五度 G4 落到三度 Eb4，第二小节叹息式下行。
