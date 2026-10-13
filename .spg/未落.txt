@@ -209,8 +209,9 @@ sequence(name="melody_a", instrument="felt_piano", gain=1.0, humanize=0.22) {
 
 // 主旋律 A2：换一条旋律，不再是 A1 的复述 —— 节奏由二分音加密成四分音，
 // 音区整体抬八度，走向也从"叹息下行"改成"绕行上冲"。
-// 第 11 小节在 Fm 上把 Eb5（七音）拖成二分音，是主旋律的最高音与情绪顶点
-// （钟声的 Ab5 更高，但那是装饰音色，不承担旋律线）。
+// 第 11 小节在 Fm 上把 Eb5（七音）拖成二分音，是主旋律的最高音与情绪顶点；
+// 这个 Eb5 故意拖过小节线，落到 m12 的 G7 上就成了 b13 挂留，随后下行解决到 D5。
+// （钟声的 Ab5 更高，但那是装饰音色，不承担旋律线。）
 // 末小节停在导音 B4 不解决 —— 第二次"没落下来"，把落地推给尾段。
 sequence(name="melody_b", instrument="felt_piano", gain=1.0, humanize=0.22) {
   note("C5", "4n", velocity=0.70)
@@ -225,7 +226,8 @@ sequence(name="melody_b", instrument="felt_piano", gain=1.0, humanize=0.22) {
 
   note("Ab4", "4n", velocity=0.72)
   note("C5", "4n", velocity=0.76)
-  note("Eb5", "2n", velocity=0.86, gate=1.15)   // 顶点撑满并压过小节线，全曲力度最高的一次陈述
+  note("Eb5", "2n", velocity=0.86, gate=1.15)   // 顶点：Fm 的七音拖过小节线，
+                                                // 到 m12 的 G7 上变成 b13 挂留，再落回 D5(五音)
 
   note("D5", "4n", velocity=0.80)
   note("G4", "4n", velocity=0.62)
@@ -296,7 +298,8 @@ sequence(name="bell_tail", instrument="glass_bells", gain=0.8, humanize=0.26) {
   note("G5", "2n", velocity=0.52, pan=0.30, gate=1.6)
 }
 
-// 尾段和弦：力度逐小节递减（末小节回升一点，因为那是终止式）。
+// 尾段和弦：力度逐小节递减，但末小节回升一点，因为那是终止式。
+// 第 15 小节只按两拍：和声提前撤走，把终止式前的空间让出来。
 // 最后一小节放宽成 C3 G3 Eb4 G4（根音 — 五度 — 三度 — 高八度五度）：
 // 不写 C2，让低音区留给 pad_final 的 C2 一条线，避免低频糊在一起；
 // 不写 C4，因为 outro_melody 正落在 C4 上拖满整小节 —— 同一乐器在同一时刻
@@ -304,8 +307,11 @@ sequence(name="bell_tail", instrument="glass_bells", gain=0.8, humanize=0.26) {
 sequence(name="outro_chords", instrument="felt_piano", gain=0.85, humanize=0.16) {
   chord(["C3", "G3", "Eb4"], "1n", strum=0.06, velocity=0.40, gate=1.15)
   chord(["Ab2", "Eb3", "C4"], "1n", strum=0.06, velocity=0.36, gate=1.15)
-  chord(["F2", "C3", "Ab3"], "1n", strum=0.06, velocity=0.34, gate=1.20)
-  chord(["C3", "G3", "Eb4", "G4"], "1n", strum=0.14, velocity=0.38, gate=1.1)
+  // 第 15 小节只按两拍就撒手（gate=1.5 的 2n 响三拍，盖住后半小节的空）：
+  // 和声先退场，只留上面那条 F4–Eb4 的叹息悬在半空，最后一小节的全奏才落得下来
+  chord(["F2", "Ab3"], "2n", strum=0.06, velocity=0.34, gate=1.5)
+  rest("2n")
+  chord(["C3", "G3", "Eb4", "G4"], "1n", strum=0.14, velocity=0.38, gate=1.25)
 }
 
 // 尾段旋律：音区逐句下落（C5 → Ab4 → F4 → C4），最后停在低八度的主音 C4 上
@@ -333,22 +339,25 @@ sequence(name="outro_melody", instrument="felt_piano", gain=0.95, humanize=0.24)
 // 编排：time 是进入时刻，loop 从上一遍结束处继续排（不是每次都回到 time）
 // ===========================================================================
 mix {
-  track(source="intro_chords",  time=0,     loop=1, gain=0.85, pan=-0.05)
+  // 力度弧线靠轨道增益搭：引子最轻 → A1 拾起 → A2 顶到最大 → 尾段撤回。
+  // 逐音符 velocity 在 0.4~0.86 之间只有约 1.3 倍响度差，撑不起段落之间的对比，
+  // 段落级的强弱只能在这里给。
+  track(source="intro_chords",  time=0,     loop=1, gain=0.78, pan=-0.05)
   track(source="pad_cycle",     time=0,     loop=3, gain=0.90, pan=0.0)
   track(source="bell_intro",    time=0,     loop=1, gain=0.70, pan=0.16)
 
-  track(source="main_arps",     time="4m",  loop=1, gain=0.68, pan=-0.08)
-  track(source="melody_a",      time="4m",  loop=1, gain=1.0)
+  track(source="main_arps",     time="4m",  loop=1, gain=0.60, pan=-0.08)
+  track(source="melody_a",      time="4m",  loop=1, gain=0.88)
 
-  track(source="main_arps_b",   time="8m",  loop=1, gain=0.72, pan=-0.04)
-  track(source="melody_b",      time="8m",  loop=1, gain=1.0)
+  track(source="main_arps_b",   time="8m",  loop=1, gain=0.82, pan=-0.04)
+  track(source="melody_b",      time="8m",  loop=1, gain=1.05)
   track(source="string_swell",  time="8m",  loop=1, gain=0.80, pan=0.10)
   track(source="bell_accents",  time="8m",  loop=1, gain=0.80, pan=0.12)
-  track(source="bell_tail",     time="12m", loop=1, gain=0.78, pan=0.14)
+  track(source="bell_tail",     time="12m", loop=1, gain=0.72, pan=0.14)
 
-  track(source="pad_final",     time="12m", loop=1, gain=0.90, pan=0.0)
-  track(source="outro_chords",  time="12m", loop=1, gain=0.85, pan=-0.05)
-  track(source="outro_melody",  time="12m", loop=1, gain=0.95)
+  track(source="pad_final",     time="12m", loop=1, gain=0.88, pan=0.0)
+  track(source="outro_chords",  time="12m", loop=1, gain=0.76, pan=-0.05)
+  track(source="outro_melody",  time="12m", loop=1, gain=0.90)
 }
 
 // ===========================================================================
@@ -362,6 +371,10 @@ mix {
 // 2. loop 的语义：第 n 遍从"上一遍结束处 + stagger"开始，不是每遍都从 time 重来。
 //    所以 pad_cycle（4 小节）loop=3 正好铺满第 1–12 小节，不会重叠也不会留缝。
 //    写了 mix 之后，没被 track 引用的音序一律不发声（解析器只会给一句警告）。
+//
+// 2b. 段落强弱全在轨道 gain 上：0.78（引子）→ 0.60/0.88（A1）→ 0.82/1.05（A2）
+//     → 0.76/0.90（尾段）。逐音符 velocity 的可用范围只有约 1.3 倍响度差，
+//     段落之间的起伏写不出效果；要再拉开就动这几个数，不必碰音序。
 //
 // 3. 力度换算：velocity_sensitivity=0.85 时，velocity=0.8 恰好是 1.0 倍增益，
 //    0.4 只有 0.58 倍。所以本谱的力度都写在 0.34–0.86 之间，最大值留有余量。
