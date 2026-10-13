@@ -234,14 +234,16 @@ sequence(name="melody_b", instrument="felt_piano", gain=1.0, humanize=0.22) {
   note("B4", "2n", velocity=0.72, gate=1.06)   // 导音拖长压过小节线：与 A1 同一种悬停
 }
 
-// 弦乐垫层：比 deep_pad 高一个八度（deep_pad 走 C2/Ab1/F1/G1），落在 C3 一带。
+// 弦乐垫层：不再只描低音线条，每个和弦补上五度（Cm 补 G3、Ab 补 Eb3、
+// Fm 补 C3、G7 补 D3），让它成为真正的和声层而不是低音的重影。
+// 两个音都落在同期右手琶音最低音之下（八度或五度），不会撞成一片。
 // 只走 A2 段（第 9–12 小节）：这时钢琴左手已经从 F2–C4 抬到 F3–Bb4，
-// 低音区只剩 deep_pad 一条正弦，织体上下断开，靠它补上 C3 这一层把两端连起来。
+// 低音区只剩 deep_pad 一条正弦，织体上下断开，靠它把中间这一层连起来。
 sequence(name="string_swell", instrument="low_strings", gain=0.85) {
-  note("C3", "1n", velocity=0.62)
-  note("Ab2", "1n", velocity=0.58)
-  note("F2", "1n", velocity=0.60)
-  note("G2", "1n", velocity=0.66, gate=1.15)   // 尾音越过小节线：弦乐是衰减退场，不是被切掉
+  chord(["C3", "G3"], "1n", velocity=0.62, gate=1.06)
+  chord(["Ab2", "Eb3"], "1n", velocity=0.58, gate=1.06)
+  chord(["F2", "C3"], "1n", velocity=0.60, gate=1.06)
+  chord(["G2", "D3"], "1n", velocity=0.66, gate=1.15)
 }
 
 // 开篇的钟声：全曲第一个音和最后一个音是同一个音高 —— 五度的 G5。
