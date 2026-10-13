@@ -1,31 +1,41 @@
 # ============================================================================
-#  《三圈半》
+#  《五圈半》
 #
-#  全曲和声只有 Cm–Ab–Eb–Bb 四个和弦，
-#  每 4 小节转一圈。第 1–12 小节转满三圈；第 13 小节起第四圈只走了半圈
-#  （Cm–Ab）就拐回 Cm 停住 —— 三圈半。
+#  全曲和声只有 Cm–Ab–Eb–Bb 四个和弦，每 4 小节转一圈。
+#  第 1–20 小节转满五圈；第 21 小节起第六圈只走了半圈（Cm–Ab）就拐回
+#  Cm 停住 —— 五圈半。上一版 16 小节是三圈半，延长到 24 小节后，
+#  圈数如实改名。
 #
-#  64 BPM / C 小调 / 16 小节 = 60.0s（1 小节 = 4 拍 = 3.75s）
-#  导出 70.6s = 64.1 + 6.5。最后一个事件是铺底在第 16 小节（56.25s）起的 1n，
-#  它的尾音 = 时值 3.75 + 包络 release 4.0 + 0.1 = 7.85s，到 64.1s；
+#  64 BPM / C 小调 / 24 小节 = 90.0s = 1:30（1 小节 = 4 拍 = 3.75s）
+#  导出 100.6s = 94.1 + 6.5。最后一个事件是铺底在第 24 小节（86.25s）起的 1n，
+#  它的尾音 = 时值 3.75 + 包络 release 4.0 + 0.1 = 7.85s，到 94.1s；
 #  再按 tailRoom = min(max(3.0, 混响 decay 6.5), 12) = 6.5s 留混响。
-#  （和弦与旋律都在 56.25s 之前收尾，混响尾音比它们都长，导出长度由铺底决定。）
+#  （末小节和弦的尾音到 92.9s，仍短于铺底的 94.1s，导出长度由铺底决定。）
 #
 #  和声（每小节一个和弦）：
-#    第 1–12 小节    Cm | Ab | Eb | Bb   ×3 圈
-#    第 13–16 小节   Cm | Ab | Cm | Cm   —— 第四圈只走到 Ab 就回头
+#    第 1–20 小节   Cm | Ab | Eb | Bb   ×5 圈
+#    第 21–24 小节   Cm | Ab | Cm | Cm   —— 第六圈只走到 Ab 就回头
 #
 #  曲式：
 #    第 1–4 小节   引子：低频铺底 + 钢琴柱式和弦，先把这一圈交代清楚
 #    第 5–8 小节   A1  ：钢琴改琶音 + 旋律第一句；定音鼓进入
-#    第 9–12 小节  A2  ：琶音收窄音区、密度加倍；换一条旋律，整条上移一个音区，
-#                       第 10 小节冲到旋律最高音 C5；弦乐垫层与玻璃音色进入
-#    第 13–16 小节 尾段：琶音、弦乐、定音鼓全部撤掉，只剩柱式和弦 + 旋律；
-#                       旋律在第 16 小节整小节留白，铺底在第 15、16 小节停在 C2
+#    第 9–12 小节  A2 浪起：30.0s 织体骤厚（琶音 4n→8n、旋律上移一个音区、
+#                       弦乐进入），各声部力度逐小节爬坡，第 12 小节冲上 D5
+#    第 13–16 小节 A3 浪碎：45.0s 第 13 小节正拍浪头砸下，随后逐小节退潮
+#    第 17–20 小节 A4 余涌：A1 琶音骨架降力度回收，弦乐轻轻再起 —— 浪的回声
+#    第 21–24 小节 尾段：和声走半圈回头，声部一件件撤掉，旋律末小节留白
 #
-#  声部进出由 mix 的 time 与 loop 控制。A2 不复用 A1 的琶音与旋律 —— 换素材
-#  才是发展，把同一段 loop 两遍只是重复。全曲只有定音鼓用了 loop=2，
-#  因为它是贯穿 A1、A2 的固定脉搏，两圈本来就是同一个东西。
+#  浪的设计（本版核心）：A2 是浪的逼近。30.0s 浪前拍到的瞬间，琶音步长
+#  4n→8n、旋律上移一个音区、弦乐进入 —— 密度翻倍是"袭来"的本体；随后
+#  琶音 0.78→0.90、弦乐 0.55→0.90、定音鼓 0.84→0.94 且末小节加密到 4n、
+#  旋律第 11 小节回抽后第 12 小节冲上 D5（0.95）。45.0s 浪头砸下：定音鼓
+#  0.95 + 弦乐 0.95 + 钢琴 C5 长音同拍落地，琶音在这一拍消失；A3 弦乐按
+#  0.95→0.25 阶梯退潮、旋律 C5 级进下行到 D4；A4 把 A1 的琶音轻轻再推
+#  一次 —— 余涌。
+#
+#  声部进出由 mix 的 time 与 loop 控制。A2、A3 不复用前段素材 —— 换素材
+#  才是发展；A4 对 A1 琶音骨架的回收是设计本身（余涌就是浪的回声）。
+#  循环只有铺底 loop=5：低音是地面，五个整圈本来是同一个东西。
 # ============================================================================
 
 config {
@@ -38,7 +48,7 @@ config {
 # fm_index 95，只留谐波列的厚度，去掉琴槌的高频"咔"声。
 #
 # filter 定在 1500Hz。钢琴这条织体最低的音是 A1 段琶音里的 Ab2 = 103.8Hz、
-# 它自己最高的旋律音是 C5 = 523.3Hz，全在截止点之下 —— 截止点压到基频
+# 它自己最高的旋律音是 D5 = 587.3Hz，全在截止点之下 —— 截止点压到基频
 # 附近会把音本身一起滤掉。
 # filter_env_amount 1800 加在这条基线上：起音冲到 1500 + 1800 = 3300Hz，
 # 衰减到 1500 + 1800 × 0.2 = 1860Hz。
@@ -104,16 +114,21 @@ define_instrument(name="deep_pad") {
   pan: 0.0
 }
 
-# --- 弦乐垫层：只在 A2 段出现，把第二次陈述托起来；尾段撤掉，留出亲密感 ------
+# --- 弦乐垫层：浪的水体，只在 A2/A3/A4 出现；尾段撤掉，留出亲密感 -----------
 # 预设 strings_section 自带 filter_envelope(0.9, 1.2, 0.85, 1.0)、
 # filter_env_amount 700 与 sine(5Hz, ±5 音分) 的颤音，都不覆盖：
 # 滤波峰值 = 1400 + 700 = 2100Hz，持续电平 = 1400 + 700 × 0.85 = 1995Hz。
+# velocity_sensitivity 0.7 + velocity_to_filter 900：浪的力度阶梯同时改音量与
+# 明暗 —— 0.55 的和弦比基准暗 225Hz（水体还远），0.95 的比基准亮 135Hz
+# （推到眼前）。零点在 velocity = 0.8，同 felt_piano。
 define_instrument(name="string_bed") {
   preset: "strings_section"
   filter: lowpass(1400, 0.5)
   envelope: adsr(0.9, 1.2, 1.0, 1.8, curve=linear)
   gain: 0.3
   pan: -0.32               # 弦乐在左，钢琴在右
+  velocity_sensitivity: 0.7
+  velocity_to_filter: 900
 }
 
 # --- 定音鼓：庄严的脉搏 -----------------------------------------------------
@@ -134,7 +149,7 @@ define_instrument(name="timpani_drum") {
 # ===========================================================================
 
 # --- 低频铺底 ---------------------------------------------------------------
-# 前三圈每小节换一个根音，四个音全不同。第四圈被砍成 C2 | Ab1 | C2 | C2，
+# 五个整圈每小节换一个根音，四个音全不同。第六圈被砍成 C2 | Ab1 | C2 | C2，
 # 最后两小节停在同一个音上 —— 全曲唯一一次低音连着两小节不动，
 # 也是"这一圈没转完"在低音上的落点。
 sequence(name="drone_cycle", instrument="deep_pad", gain=0.9) {
@@ -193,62 +208,67 @@ sequence(name="melody_a", instrument="felt_piano", gain=1.0, humanize=0.26) {
 # --- A2 琶音：收窄音区、密度加倍、换 pattern ---------------------------------
 # A1 的琶音跨 Ab2–D4（103.8–293.7Hz）；A2 把它压进 Bb2–C4（116.5–261.6Hz）
 # 这条窄带 —— 去掉最低的 Ab2 与最高的 D4，伴奏变成一条更紧、更不肯走的音型。
-# 同时旋律整体上移（D4–C5），两条线在音区上彻底分开，不再抢同一片地方。
-# 步长从四分（0.9375s）加密到八分（0.4688s）；pattern 从 up 改成 upDown，
-# 四个音池的 upDown 是 6 步（0-1-2-3-2-1），配 8 个八分音符会回绕到池首两个音。
+# 同时旋律整体上移（D4–D5），两条线在音区上彻底分开，不再抢同一片地方。
+# 30.0s 浪前拍到：步长从四分（0.9375s）加密到八分（0.4688s），密度直接翻倍
+# 是"袭来"的本体；四个和弦再以 0.78→0.90 逐小节爬坡，浪在长高。
+# pattern 从 up 改成 upDown，四个音池的 upDown 是 6 步（0-1-2-3-2-1），
+# 配 8 个八分音符会回绕到池首两个音。
 # 末小节保持 Bb 三和弦：自然小调的 VII 级本来就是三和弦，加 Ab 会变成 Eb 的属七。
 sequence(name="arps_b", instrument="felt_piano", gain=0.62, humanize=0.20) {
-  arp(chord=["C3",  "Eb3", "G3",  "C4"],  pattern="upDown", rate="8n", duration="1n")
-  arp(chord=["C3",  "Eb3", "Ab3", "C4"],  pattern="upDown", rate="8n", duration="1n")
-  arp(chord=["Bb2", "Eb3", "G3",  "Bb3"], pattern="upDown", rate="8n", duration="1n")
-  arp(chord=["Bb2", "D3",  "F3",  "Bb3"], pattern="upDown", rate="8n", duration="1n")
+  arp(chord=["C3",  "Eb3", "G3",  "C4"],  pattern="upDown", rate="8n", duration="1n", velocity=0.78)
+  arp(chord=["C3",  "Eb3", "Ab3", "C4"],  pattern="upDown", rate="8n", duration="1n", velocity=0.82)
+  arp(chord=["Bb2", "Eb3", "G3",  "Bb3"], pattern="upDown", rate="8n", duration="1n", velocity=0.86)
+  arp(chord=["Bb2", "D3",  "F3",  "Bb3"], pattern="upDown", rate="8n", duration="1n", velocity=0.90)
 }
 
-# --- A2 旋律：整条上移一个音区，节奏也加密 --------------------------------
-# A1 的旋律在 D4–G4（293.7–392.0Hz），A2 抬到 D4–C5（293.7–523.3Hz），
-# 第 10 小节停在 C5 —— 全曲旋律的最高音，也是唯一一次停在 Ab 和弦的三音上。
-# A1 用了两个整小节长音（1n），A2 一个都不用：全部是 4n 与 2n，句子更碎。
+# --- A2 旋律：浪前的爬坡 ----------------------------------------------------
+# A1 的旋律在 D4–G4（293.7–392.0Hz），A2 抬到 D4–D5（293.7–587.3Hz）。
+# 第 10 小节停在 C5 —— 第一次高点，也是唯一一次停在 Ab 和弦的三音上；
+# 第 11 小节 Bb4–G4–Bb4 是浪的回抽（音高落回、力度不落）；
+# 第 12 小节整小节的 D5（0.95）是全曲旋律最高音 —— 1n 不触发包络压缩，
+# 一直响到 45.0s 浪头砸下的那一拍。
 sequence(name="melody_b", instrument="felt_piano", gain=1.0, humanize=0.24) {
   note("Eb4", "4n", velocity=0.70)
   note("G4",  "4n", velocity=0.76)
   note("Bb4", "2n", velocity=0.84, gate=1.06)
 
   note("C5",  "2n", velocity=0.92, gate=1.08)
-  note("Bb4", "2n", velocity=0.78)
+  note("Bb4", "2n", velocity=0.80)
 
-  note("Bb4", "4n", velocity=0.74)
-  note("G4",  "4n", velocity=0.68)
-  note("Eb4", "2n", velocity=0.72, gate=1.06)
+  note("Bb4", "4n", velocity=0.82)
+  note("G4",  "4n", velocity=0.78)
+  note("Bb4", "2n", velocity=0.88, gate=1.06)
 
-  note("F4",  "2n", velocity=0.66)
-  note("D4",  "2n", velocity=0.60)
+  note("D5",  "1n", velocity=0.95)
 }
 
-# --- 弦乐垫层：只托 A2 这一圈，整小节长音 -----------------------------------
+# --- 弦乐垫层：浪的水体在四个小节里长起来 ------------------------------------
+# 逐和弦 0.55→0.90：30.0s 浪前拍到的瞬间水体还很远，到浪头砸下前一刻最满。
 sequence(name="string_swell", instrument="string_bed", gain=0.7) {
-  chord(["C3",  "Eb3", "G3",  "C4"],  "1n", strum=0.15)
-  chord(["C3",  "Eb3", "Ab3", "C4"],  "1n", strum=0.15)
-  chord(["Bb2", "Eb3", "G3",  "Bb3"], "1n", strum=0.15)
-  chord(["Bb2", "D3",  "F3",  "Bb3"], "1n", strum=0.15)
+  chord(["C3",  "Eb3", "G3",  "C4"],  "1n", velocity=0.55, strum=0.15)
+  chord(["C3",  "Eb3", "Ab3", "C4"],  "1n", velocity=0.68, strum=0.15)
+  chord(["Bb2", "Eb3", "G3",  "Bb3"], "1n", velocity=0.80, strum=0.15)
+  chord(["Bb2", "D3",  "F3",  "Bb3"], "1n", velocity=0.90, strum=0.15)
 }
 
-# --- 玻璃音色：整曲只有两个音，相隔 6 拍（5.625s） ---------------------------
-# Eb5 = 622.3Hz、D5 = 587.3Hz，是全曲最高的两个音（钢琴旋律最高到 C5 = 523.3Hz）。
-# 声像一左一右，与钢琴的 pan 0.2 分开。这两个音属于 A2 那一圈，
-# 尾段撤掉 —— 全曲只响两次。
+# --- 玻璃音色：浪尖的飞沫 ----------------------------------------------------
+# A2 两个：Eb5（622.3Hz）在第 10 小节第 3 拍 —— 浪在长；G5（784.0Hz）在
+# 第 12 小节第 3 拍（43.125s，浪头砸下前 1.875s）—— 飞沫最高，也是全曲最高音。
+# 声像一左一右，与钢琴的 pan 0.2 分开。
 sequence(name="glass_glimmer", instrument="glass_glimmer", gain=0.8) {
   rest("1n")
   rest("2n")
-  note("Eb5", "2n", velocity=0.7,  pan=-0.4)
+  note("Eb5", "2n", velocity=0.70, pan=-0.4)
   rest("1n")
-  note("D5",  "2n", velocity=0.62, pan=0.45)
   rest("2n")
+  note("G5",  "2n", velocity=0.78, pan=0.45)
 }
 
 # --- 定音鼓：每小节一击，2n 时值 + 2n 留白 ----------------------------------
 # 与铺底同音高、同时刻，是刻意的低音加厚：定音鼓自带 6 半音的 pitch_env
 # 下坠与 1.5:1 的 FM，不是同相正弦叠加，听感上是"鼓在垫着长音"。
-# 只响 A1 与 A2 两圈，尾段撤掉。
+# 只响 A1 一圈；A2 的脉搏交给 timp_wave 爬坡，浪碎（timp_break）之后
+# 鼓直到曲终都不再回来。
 sequence(name="timpani_pulse", instrument="timpani_drum", gain=0.85) {
   note("C2",  "2n", velocity=0.9)
   rest("2n")
@@ -260,8 +280,98 @@ sequence(name="timpani_pulse", instrument="timpani_drum", gain=0.85) {
   rest("2n")
 }
 
+# --- A2 定音鼓：浪的脉搏 -----------------------------------------------------
+# 前三小节仍是一拍一击，力度 0.84→0.90 爬坡；第 12 小节加密成四个 4n
+# （0.88→0.94）—— 浪在竖起来，四记连击把浪头送到 45.0s。
+sequence(name="timp_wave", instrument="timpani_drum", gain=0.85) {
+  note("C2",  "2n", velocity=0.84)
+  rest("2n")
+  note("Ab1", "2n", velocity=0.87)
+  rest("2n")
+  note("Eb2", "2n", velocity=0.90)
+  rest("2n")
+  note("Bb1", "4n", velocity=0.88)
+  note("Bb1", "4n", velocity=0.90)
+  note("Bb1", "4n", velocity=0.92)
+  note("Bb1", "4n", velocity=0.94)
+}
+
+# --- A3 浪碎：45.0s 第 13 小节正拍，全曲最响的一瞬 ---------------------------
+# 定音鼓 C2（0.95）+ 弦乐 Cm（0.95）+ 钢琴 C5（0.90）同拍落地；琶音在
+# 这一拍消失 —— 浪翻过来，翻腾停止。这一瞬交给总线压限器（-18dB 阈值）
+# 去收，不另降增益：它就该是全曲的最大值。
+sequence(name="timp_break", instrument="timpani_drum", gain=0.85) {
+  note("C2", "1n", velocity=0.95)
+  rest("3m")
+}
+
+# 退潮：弦乐从浪头的 0.95 按小节阶梯退到 0.25，水从滩上退走。
+# 0.25 同时把滤波拉暗 495Hz —— 远去的不仅是音量。
+sequence(name="string_ebb", instrument="string_bed", gain=0.7) {
+  chord(["C3",  "Eb3", "G3",  "C4"],  "1n", velocity=0.95, strum=0.15)
+  chord(["C3",  "Eb3", "Ab3", "C4"],  "1n", velocity=0.60, strum=0.15)
+  chord(["Bb2", "Eb3", "G3",  "Bb3"], "1n", velocity=0.40, strum=0.15)
+  chord(["Bb2", "D3",  "F3",  "Bb3"], "1n", velocity=0.25, strum=0.15)
+}
+
+# 浪碎之后的飞沫落地：G5→Eb5 从浪头的高度掉下来，比 A2 的两个都轻。
+sequence(name="glass_fall", instrument="glass_glimmer", gain=0.8) {
+  rest("1n")
+  note("G5",  "2n", velocity=0.55, pan=0.4)
+  rest("2n")
+  note("Eb5", "2n", velocity=0.45, pan=-0.35)
+  rest("2n")
+  rest("1n")
+}
+
+# 退潮的旋律：从浪头上的 C5 沿音阶落到 D4 —— 与 A1 旋律同一个落点音，
+# 力度只剩 0.36（A1 落点是 0.62）：水退之后再看一遍同一块石头。
+# C5 的 1n 不压缩；2n 的包络压到 ×0.779（衰减 1.87s）。
+sequence(name="melody_c", instrument="felt_piano", gain=1.0, humanize=0.24) {
+  note("C5",  "1n", velocity=0.90)
+
+  note("Bb4", "2n", velocity=0.62)
+  note("Ab4", "2n", velocity=0.56)
+
+  note("G4",  "2n", velocity=0.48)
+  note("Eb4", "2n", velocity=0.42)
+
+  note("D4",  "2n", velocity=0.36)
+  rest("2n")
+}
+
+# --- A4 余涌：浪过之后的第二次小浪 -------------------------------------------
+# 琶音回收 A1 的骨架 —— 同样的音池、同样的 up/4n，力度压到 0.42→0.58：
+# 同一道浪又推了一次，但轻得多。这是全曲唯一一次刻意的素材回收。
+sequence(name="arps_c", instrument="felt_piano", gain=0.55, humanize=0.20) {
+  arp(chord=["C3",  "Eb3", "G3",  "Bb3"], pattern="up", rate="4n", duration="1n", velocity=0.42)
+  arp(chord=["Ab2", "C3",  "Eb3", "Ab3"], pattern="up", rate="4n", duration="1n", velocity=0.47)
+  arp(chord=["Eb3", "G3",  "Bb3", "D4"],  pattern="up", rate="4n", duration="1n", velocity=0.52)
+  arp(chord=["Bb2", "D3",  "F3",  "Bb3"], pattern="up", rate="4n", duration="1n", velocity=0.58)
+}
+
+# 弦乐在余涌的后半轻轻再起（0.32→0.42），把尾段接住 —— 余涌也在涨，
+# 只是再也回不到浪头的高度。
+sequence(name="string_after", instrument="string_bed", gain=0.7) {
+  rest("1n")
+  rest("1n")
+  chord(["Bb2", "Eb3", "G3",  "Bb3"], "1n", velocity=0.32, strum=0.15)
+  chord(["Bb2", "D3",  "F3",  "Bb3"], "1n", velocity=0.42, strum=0.15)
+}
+
+# 余涌的飞沫：与 A2 相同的两个音、相同的位置（第 18/20 小节第 3 拍），
+# 力度只剩一半 —— 回声。
+sequence(name="glass_after", instrument="glass_glimmer", gain=0.8) {
+  rest("1n")
+  rest("2n")
+  note("Eb5", "2n", velocity=0.35, pan=-0.4)
+  rest("1n")
+  rest("2n")
+  note("G5",  "2n", velocity=0.45, pan=0.45)
+}
+
 # --- 尾段：柱式和弦 + 一条下行的旋律，最后整小节留白 ------------------------
-# 和声不再转圈：Cm | Ab | Cm | Cm —— 第四圈走到 Ab 就回头，最后两小节是同一个 Cm。
+# 和声不再转圈：Cm | Ab | Cm | Cm —— 第六圈走到 Ab 就回头，最后两小节是同一个 Cm。
 # 末小节的和弦抽掉一个声部（只剩 C3–Eb3–G3 三个音），比前三个小节更薄。
 sequence(name="outro_chords", instrument="felt_piano", gain=0.85, humanize=0.14) {
   chord(["C3",  "Eb3", "G3",  "C4"],  "1n", strum=0.15)
@@ -271,7 +381,7 @@ sequence(name="outro_chords", instrument="felt_piano", gain=0.85, humanize=0.14)
 }
 
 # 整条旋律逐句下落，起句 G4，收在 G3（392.0 → 196.0Hz，正好一个八度），
-# 第 16 小节整小节 rest —— 旋律先退场，最后响的只剩柱式和弦与停在 C2 的铺底。
+# 第 24 小节整小节 rest —— 旋律先退场，最后响的只剩柱式和弦与停在 C2 的铺底。
 sequence(name="outro_melody", instrument="felt_piano", gain=0.95, humanize=0.22) {
   note("G4",  "4n", velocity=0.72)
   note("Eb4", "4n", velocity=0.66)
@@ -297,27 +407,39 @@ effect_chain {
 }
 
 # ===========================================================================
-# 编排：每小节 3.75s，全部 16 小节 = 60.0s
-#   第 1–4 小节   引子    drone_cycle + intro_chords
-#   第 5–8 小节   A1      arps_a + melody_a + timpani_pulse
-#   第 9–12 小节  A2      arps_b + melody_b + string_swell + glass_glimmer + timpani_pulse
-#   第 13–16 小节 尾段    drone_final + outro_chords + outro_melody
+# 编排：每小节 3.75s，全部 24 小节 = 90.0s = 1:30
+#   第 1–4 小节   引子     drone_cycle + intro_chords
+#   第 5–8 小节   A1       arps_a + melody_a + timpani_pulse
+#   第 9–12 小节  A2 浪起  arps_b + melody_b + string_swell + glass_glimmer + timp_wave
+#   第 13–16 小节 A3 浪碎  melody_c + string_ebb + glass_fall + timp_break
+#   第 17–20 小节 A4 余涌  arps_c + string_after + glass_after
+#   第 21–24 小节 尾段     drone_final + outro_chords + outro_melody
 # ===========================================================================
 mix {
-  track(source="drone_cycle",    time=0,     loop=3)   # 铺底前三圈，第 13 小节交给 drone_final
-  track(source="drone_final",    time="12m", loop=1)
+  track(source="drone_cycle",    time=0,     loop=5)   # 铺底五个整圈，第 21 小节交给 drone_final
+  track(source="drone_final",    time="20m", loop=1)
 
   track(source="intro_chords",   time=0,     loop=1)
 
   track(source="arps_a",         time="4m",  loop=1)
   track(source="melody_a",       time="4m",  loop=1)
-  track(source="timpani_pulse",  time="4m",  loop=2)   # 连响 A1 与 A2 两圈
+  track(source="timpani_pulse",  time="4m",  loop=1)   # 只响 A1；A2 的脉搏是 timp_wave
 
   track(source="arps_b",         time="8m",  loop=1)
   track(source="melody_b",       time="8m",  loop=1)
   track(source="string_swell",   time="8m",  loop=1)
   track(source="glass_glimmer",  time="8m",  loop=1)
+  track(source="timp_wave",      time="8m",  loop=1)
 
-  track(source="outro_chords",   time="12m", loop=1)
-  track(source="outro_melody",   time="12m", loop=1)
+  track(source="melody_c",       time="12m", loop=1)
+  track(source="string_ebb",     time="12m", loop=1)
+  track(source="glass_fall",     time="12m", loop=1)
+  track(source="timp_break",     time="12m", loop=1)
+
+  track(source="arps_c",         time="16m", loop=1)
+  track(source="string_after",   time="16m", loop=1)
+  track(source="glass_after",    time="16m", loop=1)
+
+  track(source="outro_chords",   time="20m", loop=1)
+  track(source="outro_melody",   time="20m", loop=1)
 }
