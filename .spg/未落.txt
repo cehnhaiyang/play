@@ -135,12 +135,15 @@ effect_chain {
 // 引子：一小节一个柱式和弦。前三个和弦只给根音、五度、三度三根骨架音，
 // G7 则必须把七音 F3 与三音 B3 都写出来 —— 只写 G2 D3 的话没有三音，
 // 听不出属功能，后面旋律停在导音 B3 时的张力也就无从建立。
-// strum 让各声部依次进入，模拟踏板抬起时琴槌逐个落下的手感。
+// strum 的单位是"每声部错开 0.055s"：写 0.1 只有 5ms，等于齐奏；
+// 写 0.55~0.80 才听得出琴槌逐个落下的轮奏感。
+// 四个和弦的最高音连成一条下行线 Eb4→C4→Ab3→B3，末音正是导音 ——
+// 引子自己先把"没落下来"说了一遍，A2 的首音 C5 才在两个八度外接住它。
 sequence(name="intro_chords", instrument="felt_piano", gain=0.85, humanize=0.18) {
-  chord(["C3", "G3", "Eb4"], "1n", strum=0.08, velocity=0.42, gate=1.18)
-  chord(["Ab2", "Eb3", "C4"], "1n", strum=0.08, velocity=0.40, gate=1.18)
-  chord(["F2", "C3", "Ab3"], "1n", strum=0.08, velocity=0.44, gate=1.18)
-  chord(["G2", "D3", "F3", "B3"], "1n", strum=0.10, velocity=0.48, gate=1.30)
+  chord(["C3", "G3", "Eb4"], "1n", strum=0.55, velocity=0.42, gate=1.18)
+  chord(["Ab2", "Eb3", "C4"], "1n", strum=0.55, velocity=0.40, gate=1.18)
+  chord(["F2", "C3", "Ab3"], "1n", strum=0.55, velocity=0.44, gate=1.18)
+  chord(["G2", "D3", "F3", "B3"], "1n", strum=0.80, velocity=0.48, gate=1.30)
 }
 
 // 铺底主循环：Cm | Ab | Fm | G7，4 小节，重复 3 次覆盖前 12 小节
@@ -231,7 +234,8 @@ sequence(name="melody_b", instrument="felt_piano", gain=1.0, humanize=0.22) {
 
   note("D5", "4n", velocity=0.80)
   note("G4", "4n", velocity=0.62)
-  note("B4", "2n", velocity=0.72, gate=1.06)   // 导音拖长压过小节线：与 A1 同一种悬停
+  note("B4", "2n", velocity=0.72, gate=1.06)   // 导音拖长压过小节线：与 A1 同一种悬停，
+                                               // 由尾段首音 C5 接住（A1 的 B3 则等 A2 的 C5）
 }
 
 // 弦乐垫层：不再只描低音线条，每个和弦补上五度（Cm 补 G3、Ab 补 Eb3、
@@ -307,27 +311,30 @@ sequence(name="bell_tail", instrument="glass_bells", gain=0.8, humanize=0.26) {
 // 不写 C4，因为 outro_melody 正落在 C4 上拖满整小节 —— 同一乐器在同一时刻
 // 发同一个音高，两个振荡器完全同相，只是白白多出 6dB，听不出"更厚"。
 sequence(name="outro_chords", instrument="felt_piano", gain=0.85, humanize=0.16) {
-  chord(["C3", "G3", "Eb4"], "1n", strum=0.06, velocity=0.40, gate=1.15)
-  chord(["Ab2", "Eb3", "C4"], "1n", strum=0.06, velocity=0.36, gate=1.15)
+  chord(["C3", "G3", "Eb4"], "1n", strum=0.45, velocity=0.40, gate=1.15)
+  chord(["Ab2", "Eb3", "C4"], "1n", strum=0.45, velocity=0.36, gate=1.15)
   // 第 15 小节只按两拍就撒手（gate=1.5 的 2n 响三拍，盖住后半小节的空）：
   // 和声先退场，只留上面那条 F4–Eb4 的叹息悬在半空，最后一小节的全奏才落得下来
-  chord(["F2", "Ab3"], "2n", strum=0.06, velocity=0.34, gate=1.5)
+  chord(["F2", "Ab3"], "2n", strum=0.35, velocity=0.34, gate=1.5)
   rest("2n")
-  chord(["C3", "G3", "Eb4", "G4"], "1n", strum=0.14, velocity=0.38, gate=1.25)
+  chord(["C3", "G3", "Eb4", "G4"], "1n", strum=1.10, velocity=0.38, gate=1.25)  // 终止和弦"放开手"：每声部错开约 60ms
 }
 
-// 尾段旋律：音区逐句下落（C5 → Ab4 → F4 → C4），最后停在低八度的主音 C4 上
-// 拖满整小节 —— 全曲唯一一次真正解决（前两次都停在导音上不落）。
-// 但钟声随后落在 G5，五度悬在主音上方，所以"落"是落了，并没有合上。
-// 第 15 小节的 F4–Eb4 是刻意引用 A1 第 6 小节的叹息音型（原样是 F4–Eb4–C4），
-// 移到这里低八度再现：Eb4 在 Fm 上是七音，下行小三度解决到主音 C4。
-// 不用 Ab3 是因为它和 outro_chords 同一小节的 Ab3 是同一个音高，
-// 同乐器同时刻同音高只是把振幅叠上去，不如换成和弦音外的下行线条。
+// 尾段旋律：首音 C5 接住 A2 末句悬在 m12 的导音 B4 —— 跨小节线的解决，
+// 但到达的同时就开始离开：C5–G4 下落，Ab4 回望，从 Ab4 起一路音阶下行
+// Ab–G–F–Eb–C，停在低八度的主音 C4 上拖满整小节 —— 全曲唯一一次真正解决。
+// G4 在这条线里出现两次（m13、m14 后半，都在第 3、4 拍）：一次是 Cm 的五度、
+// 一次是 Ab 的大七度倚音（向下倚进 m15 的 F4）；两次路过都不停，
+// 全曲最后一声也还是那个 G —— 钟声的 G5 悬在主音上方，"落"是落了，没合上。
+// m15 的 F4–Eb4 引用 A1 第 6 小节的叹息音型（原样 F4–Eb4–C4）：
+// Eb4 在 Fm 上是七音，下行小三度解决到主音 C4；不用 Ab3 是因为它与
+// outro_chords 同小节的 Ab3 同音高，同乐器同时刻同音只是叠振幅。
 sequence(name="outro_melody", instrument="felt_piano", gain=0.95, humanize=0.24) {
   note("C5", "2n", velocity=0.68)
   note("G4", "2n", velocity=0.54)
 
-  note("Ab4", "1n", velocity=0.58)
+  note("Ab4", "2n", velocity=0.58)
+  note("G4", "2n", velocity=0.52)
 
   note("F4", "2n", velocity=0.50)
   note("Eb4", "2n", velocity=0.46)
@@ -409,3 +416,5 @@ mix {
 //    - config 的 key / scale 只做格式校验，不参与发声，别指望它自动转调或套音阶。
 //    - arp 的 up/down 按音高排序而不是书写顺序，asPlayed 才保留书写顺序；
 //      4 音池的 upDown 是 6 步，一小节 8 个八分音会回绕到池首，不是 8 步。
+//    - strum 的单位是"每声部错开 0.055s"，不是 0~1 的比例：写 0.1 只有 5ms，
+//      等于齐奏；轮奏感要 0.4 以上，终止和弦的"放开手"可以到 1.0。
