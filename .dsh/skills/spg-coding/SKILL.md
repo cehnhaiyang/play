@@ -1,7 +1,6 @@
 ---
 name: spg-coding
 description: Applies to this project only (the-play). Use whenever writing, editing, rewriting, porting or reviewing an SPG audio script (`.txt` / `.spg` under `.spg/`), or when asked what an SPG construct does or sounds like. Contains the full SPG language reference (config / define_instrument / sequence / effect_chain / mix blocks, durations, pitches and chord symbols, envelopes, filters, LFOs, effects, drums, loudness, loop semantics, export length), the list of constructs that parse but do not sound the way they read, how to check a construct against the sole authority `app/renderer/services/AudioService.ts`, structural discipline for time-based pieces, comment discipline and naming. Use it even for small SPG edits: a misspelled parameter fails loudly, but a construct with the wrong meaning does not.
-whenToUse: When generating, modifying, rewriting or reviewing a the-play SPG script (`.txt` / `.spg` under `.spg/`); when determining what a given SPG construct actually sounds like; when checking a script's timeline arithmetic or its comments; or when naming such a work.
 ---
 
 # SPG coding
