@@ -71,11 +71,16 @@ effect_chain {
 }
 
 // ===========================================================================
-// 音序：全部 4 小节 = 15.48s，和声 Cm | Ab | Fm | G
+// 结构：4 轮 × 4 小节，每轮和声 Cm | Ab | Fm | G（一小节一个和弦）
+//   Ⅰ m1-4   铺底 + 琶音 + 主旋律陈述
+//   Ⅱ m5-8   玻璃钟对位进入
+//   Ⅲ m9-12  琶音改八分双击，密度翻倍 → 全曲高点
+//   Ⅳ m13-16 密度回落；末小节停在未解决的 G 上，尾音越线进混响
+// 总长 16 小节 = 64 拍 × 0.968s ≈ 61.9s，加 reverb decay 7s 的尾约 69s
 // ===========================================================================
 
-// 琶音：一小节一个和弦，四音分解（原谱音高与排列不变，时值 2n → 4n）
-sequence(name="mid_range_arps", instrument="warm_piano", gain=0.6, humanize=0.16) {
+// 琶音（Ⅰ-Ⅱ 轮）：四音分解，低音区滚动
+sequence(name="arps_a", instrument="warm_piano", gain=0.6, humanize=0.16) {
   note("C2",  "4n", velocity=0.54); note("G2",  "4n", velocity=0.44)
   note("Eb3", "4n", velocity=0.46); note("C3",  "4n", velocity=0.42)
 
@@ -89,8 +94,47 @@ sequence(name="mid_range_arps", instrument="warm_piano", gain=0.6, humanize=0.16
   note("F3",  "4n", velocity=0.48); note("D3",  "4n", velocity=0.44)
 }
 
-// 主旋律：连奏无缝隙（gate>1 让音符交叠，配合长 release 模拟踩住延音踏板）
-sequence(name="main_legato_melody", instrument="warm_piano", gain=1.0, humanize=0.22) {
+// 琶音（Ⅲ 轮）：同音同序改八分双击；0.48s 的短音符把包络压成拨弦式
+// 衰减，滚动感推起全曲高点；音区不升，避免与主旋律同带互相掩盖
+sequence(name="arps_b", instrument="warm_piano", gain=0.6, humanize=0.16) {
+  note("C2",  "8n", velocity=0.50); note("G2",  "8n", velocity=0.42)
+  note("Eb3", "8n", velocity=0.44); note("C3",  "8n", velocity=0.40)
+  note("C2",  "8n", velocity=0.48); note("G2",  "8n", velocity=0.42)
+  note("Eb3", "8n", velocity=0.44); note("C3",  "8n", velocity=0.40)
+
+  note("Ab2", "8n", velocity=0.48); note("Eb3", "8n", velocity=0.42)
+  note("C4",  "8n", velocity=0.44); note("Eb3", "8n", velocity=0.40)
+  note("Ab2", "8n", velocity=0.46); note("Eb3", "8n", velocity=0.42)
+  note("C4",  "8n", velocity=0.44); note("Eb3", "8n", velocity=0.40)
+
+  note("F2",  "8n", velocity=0.50); note("C3",  "8n", velocity=0.42)
+  note("Ab3", "8n", velocity=0.44); note("C3",  "8n", velocity=0.40)
+  note("F2",  "8n", velocity=0.48); note("C3",  "8n", velocity=0.42)
+  note("Ab3", "8n", velocity=0.44); note("C3",  "8n", velocity=0.40)
+
+  note("G2",  "8n", velocity=0.52); note("D3",  "8n", velocity=0.44)
+  note("F3",  "8n", velocity=0.46); note("D3",  "8n", velocity=0.42)
+  note("G2",  "8n", velocity=0.50); note("D3",  "8n", velocity=0.44)
+  note("F3",  "8n", velocity=0.46); note("D3",  "8n", velocity=0.42)
+}
+
+// 琶音（Ⅳ 轮）：回到 Ⅰ 的密度；末小节只剩一个延长的低音 G，
+// 与铺底的 G2 同音叠厚，作未解决终止的地面
+sequence(name="arps_end", instrument="warm_piano", gain=0.6, humanize=0.16) {
+  note("C2",  "4n", velocity=0.50); note("G2",  "4n", velocity=0.42)
+  note("Eb3", "4n", velocity=0.44); note("C3",  "4n", velocity=0.40)
+
+  note("Ab2", "4n", velocity=0.48); note("Eb3", "4n", velocity=0.42)
+  note("C4",  "4n", velocity=0.44); note("Eb3", "4n", velocity=0.38)
+
+  note("F2",  "4n", velocity=0.50); note("C3",  "4n", velocity=0.42)
+  note("Ab3", "4n", velocity=0.44); note("C3",  "4n", velocity=0.40)
+
+  note("G2",  "1n", velocity=0.46, gate=1.35)
+}
+
+// 主旋律（Ⅰ-Ⅲ 轮）：连奏无缝隙（gate>1 让音符交叠，配合长 release 模拟踩住延音踏板）
+sequence(name="melody_a", instrument="warm_piano", gain=1.0, humanize=0.22) {
   note("G4",  "2n", velocity=0.78, gate=1.08)
   note("Eb4", "2n", velocity=0.68, gate=1.08)
 
@@ -102,11 +146,28 @@ sequence(name="main_legato_melody", instrument="warm_piano", gain=1.0, humanize=
   note("Eb4", "2n", velocity=0.82, gate=1.08)   // 乐句高点
 
   note("D4",  "2n", velocity=0.74, gate=1.08)
-  note("B3",  "2n", velocity=0.64, gate=1.10)   // 大调三音，构成 G7 解决回 Cm
+  note("B3",  "2n", velocity=0.64, gate=1.10)   // 大调三音，构成 G7，下一轮解决回 Cm
 }
 
-// 高音对位：填主旋律留出的空隙，独立声像
-sequence(name="sparkle_counterpoint", instrument="glass_bells", gain=0.85, humanize=0.26) {
+// 主旋律（Ⅳ 轮）：音高节奏不动，力度整体回落一层；
+// 末音 B3 不再等下一轮解决——gate 拉长越过小节线，停在未解决的属和弦上渐弱
+sequence(name="melody_end", instrument="warm_piano", gain=1.0, humanize=0.22) {
+  note("G4",  "2n", velocity=0.72, gate=1.08)
+  note("Eb4", "2n", velocity=0.64, gate=1.08)
+
+  note("F4",  "4n", velocity=0.58)
+  note("Eb4", "4n", velocity=0.66)
+  note("D4",  "2n", velocity=0.70, gate=1.08)
+
+  note("C4",  "2n", velocity=0.66, gate=1.08)
+  note("Eb4", "2n", velocity=0.78, gate=1.08)   // 末段高点仍留住一口气
+
+  note("D4",  "2n", velocity=0.68, gate=1.08)
+  note("B3",  "2n", velocity=0.54, gate=1.45)   // 尾音越线，解决被省略
+}
+
+// 高音对位（Ⅱ-Ⅲ 轮）：填主旋律留出的空隙，独立声像
+sequence(name="sparkle_a", instrument="glass_bells", gain=0.85, humanize=0.26) {
   rest("4n")
   note("C5",  "8n", velocity=0.68, pan=0.24)
   note("D5",  "8n", velocity=0.62, pan=0.34)
@@ -127,7 +188,20 @@ sequence(name="sparkle_counterpoint", instrument="glass_bells", gain=0.85, human
   note("D5",  "4n", velocity=0.70, pan=0.32)
 }
 
-// 低频铺底：跟随和声根音
+// 高音对位（Ⅳ 轮）：只在 Ab 小节留一声轻响作告别，末两小节彻底退场
+sequence(name="sparkle_end", instrument="glass_bells", gain=0.85, humanize=0.26) {
+  rest("1n")
+
+  rest("2n")
+  note("C5", "4n", velocity=0.46, pan=0.32)   // C 是 Ab 大三和弦的三音
+  rest("4n")
+
+  rest("1n")
+  rest("1n")
+}
+
+// 低频铺底：跟随和声根音。唯一不变层，四轮原地循环——
+// 它是和声的地面，其余声部的轮次发展都以它为参照
 sequence(name="background_layer", instrument="subtle_pad", gain=0.9) {
   note("C3",  "1n", velocity=0.70)
   note("Ab2", "1n", velocity=0.64)
@@ -136,11 +210,16 @@ sequence(name="background_layer", instrument="subtle_pad", gain=0.9) {
 }
 
 // ===========================================================================
-// 编排：对位层第 2 轮才进入，前面先让钢琴与铺底立住
+// 编排：时间轴不变——总 16 小节，玻璃钟仍在第 5 小节进入；
+// 发展靠逐轮换素材（Ⅲ 加密、Ⅳ 各自收束），不靠同一素材反复循环
 // ===========================================================================
 mix {
-  track(source="background_layer",     time=0,    loop=4)
-  track(source="mid_range_arps",       time=0,    loop=4)
-  track(source="main_legato_melody",   time=0,    loop=4)
-  track(source="sparkle_counterpoint", time="4m", loop=3)
+  track(source="background_layer", time=0,    loop=4)   // m1-16 不变层
+  track(source="arps_a",           time=0,    loop=2)   // Ⅰ-Ⅱ
+  track(source="arps_b",           time="8m")           // Ⅲ
+  track(source="arps_end",         time="12m")          // Ⅳ
+  track(source="melody_a",         time=0,    loop=3)   // Ⅰ-Ⅲ
+  track(source="melody_end",       time="12m")          // Ⅳ
+  track(source="sparkle_a",        time="4m", loop=2)   // Ⅱ-Ⅲ
+  track(source="sparkle_end",      time="12m")          // Ⅳ
 }
