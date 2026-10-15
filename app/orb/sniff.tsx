@@ -494,11 +494,10 @@ const SniffOrb = () => {
                 type="button"
                 onClick={() => void toggle()}
                 disabled={busy || !!scanning}
-                className={`shrink-0 rounded-lg px-2 py-1 text-[10px] font-bold transition ${
-                    enabled
-                        ? 'bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30'
-                        : 'bg-white/[0.06] text-slate-400 hover:bg-white/[0.12] hover:text-slate-200'
-                } disabled:opacity-40`}
+                className={`shrink-0 rounded-lg px-2 py-1 text-[10px] font-bold transition ${enabled
+                    ? 'bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30'
+                    : 'bg-white/[0.06] text-slate-400 hover:bg-white/[0.12] hover:text-slate-200'
+                    } disabled:opacity-40`}
             >
                 {enabled ? '● 持续' : '○ 已停止'}
             </button>
@@ -556,11 +555,10 @@ const SniffOrb = () => {
                         type="button"
                         onClick={() => setActiveTabId(null)}
                         title="显示全部标签页嗅到的资源"
-                        className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] transition ${
-                            activeTabId === null
-                                ? 'bg-sky-500/25 text-sky-200'
-                                : 'text-slate-500 hover:bg-white/[0.06] hover:text-slate-300'
-                        }`}
+                        className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] transition ${activeTabId === null
+                            ? 'bg-sky-500/25 text-sky-200'
+                            : 'text-slate-500 hover:bg-white/[0.06] hover:text-slate-300'
+                            }`}
                     >
                         全部 {items.length}
                     </button>
@@ -593,17 +591,15 @@ const SniffOrb = () => {
                              */
                             <span
                                 key={tab.id}
-                                className={`group/tab flex shrink-0 items-center rounded ${
-                                    selected ? 'bg-sky-500/25' : 'hover:bg-white/[0.06]'
-                                }`}
+                                className={`group/tab flex shrink-0 items-center rounded ${selected ? 'bg-sky-500/25' : 'hover:bg-white/[0.06]'
+                                    }`}
                             >
                                 <button
                                     type="button"
                                     onClick={() => setActiveTabId(tab.id)}
                                     title={`${tab.url}\n${count} 条资源`}
-                                    className={`max-w-[140px] truncate py-0.5 pl-1.5 text-[10px] transition ${
-                                        selected ? 'text-sky-200' : 'text-slate-500 hover:text-slate-300'
-                                    }`}
+                                    className={`max-w-[140px] truncate py-0.5 pl-1.5 text-[10px] transition ${selected ? 'text-sky-200' : 'text-slate-500 hover:text-slate-300'
+                                        }`}
                                 >
                                     {/* 活动标签页点一个圆点标出来：标题可能一样，位置不会 */}
                                     {tab.active && <span className="mr-1 text-emerald-400">•</span>}
@@ -633,11 +629,10 @@ const SniffOrb = () => {
                             key={option.value}
                             type="button"
                             onClick={() => setFilter(option.value)}
-                            className={`rounded px-1.5 py-0.5 text-[10px] transition ${
-                                filter === option.value
-                                    ? 'bg-sky-500/25 text-sky-200'
-                                    : 'text-slate-500 hover:bg-white/[0.06] hover:text-slate-300'
-                            }`}
+                            className={`rounded px-1.5 py-0.5 text-[10px] transition ${filter === option.value
+                                ? 'bg-sky-500/25 text-sky-200'
+                                : 'text-slate-500 hover:bg-white/[0.06] hover:text-slate-300'
+                                }`}
                         >
                             {option.label}
                         </button>
@@ -731,13 +726,12 @@ const SniffOrb = () => {
                                               AI 挑出来的地址可能是编的，用户据此决定要不要点下载。
                                             */}
                                             <span
-                                                className={`shrink-0 rounded px-1 py-0.5 text-[9px] ${
-                                                    item.source === 'network'
-                                                        ? 'bg-emerald-500/15 text-emerald-300/80'
-                                                        : item.source === 'ai'
-                                                            ? 'bg-fuchsia-500/15 text-fuchsia-300/80'
-                                                            : 'bg-white/[0.06] text-slate-500'
-                                                }`}
+                                                className={`shrink-0 rounded px-1 py-0.5 text-[9px] ${item.source === 'network'
+                                                    ? 'bg-emerald-500/15 text-emerald-300/80'
+                                                    : item.source === 'ai'
+                                                        ? 'bg-fuchsia-500/15 text-fuchsia-300/80'
+                                                        : 'bg-white/[0.06] text-slate-500'
+                                                    }`}
                                             >
                                                 {SOURCE_LABEL[item.source] || item.source}
                                             </span>
