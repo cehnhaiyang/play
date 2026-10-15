@@ -16,7 +16,7 @@ const path = require('path');
  * 语义（用户约定）：
  * - 代理端口留空 = 一律直连，不做任何系统代理探测；
  *   有值 = 用这个端口（host:port，或只写端口号则默认 127.0.0.1）。
- * - AI 走 OpenAI 兼容协议（/chat/completions），默认指向tc2api。
+ * - AI 走 OpenAI 兼容协议（/chat/completions），默认指向本机 AI 网关（127.0.0.1:7863）。
  */
 
 /**
@@ -25,7 +25,7 @@ const path = require('path');
  */
 const REASONING_EFFORTS = ['low', 'high', 'max'];
 
-/** AI 服务默认值：本地 tc2api */
+/** AI 服务默认值：本机 AI 网关（7863）。与 AiService 的 DEFAULT_AI_CONFIG 刻意不同端口 */
 const DEFAULT_AI = {
     baseUrl: 'http://127.0.0.1:7863/v1',
     apiKey: '1',
