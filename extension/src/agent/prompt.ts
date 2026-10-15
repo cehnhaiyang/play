@@ -23,10 +23,10 @@ import { buildTranscript } from './transcript';
  * 模型会按过期的上限安排 timeout 与截断策略。
  */
 import {
-    SANDBOX_ACTIONS,
-    SANDBOX_EXEC_TIMEOUT_DEFAULT_MS,
-    SANDBOX_EXEC_TIMEOUT_MAX_MS,
-    SANDBOX_TEXT_LIMIT_BYTES,
+   SANDBOX_ACTIONS,
+   SANDBOX_EXEC_TIMEOUT_DEFAULT_MS,
+   SANDBOX_EXEC_TIMEOUT_MAX_MS,
+   SANDBOX_TEXT_LIMIT_BYTES,
 } from '../../../shared/meta';
 
 /**
@@ -112,7 +112,7 @@ export const COMPACT_RATIO_STORE_KEY = 'agent-compact-ratio';
  * null / false。两处必须调同一个函数。
  */
 export const compactCoverCount = (messageCount: number, ratio: number): number =>
-    Math.floor(messageCount * ratio);
+   Math.floor(messageCount * ratio);
 
 /**
  * 送进摘要器的原文预算（字节）。
@@ -158,7 +158,7 @@ export const SYSTEM_PROMPT = `
   落地的产物（还原出的算法、跑出来的数据、分析报告）都写在这里，比只写在回复里可靠。
 
 ## 对话历史
-你**能看到之前几轮的对话与工具结果**，它们按前缀区分来源：[工具 X 的执行结果] 是你自己调用工具拿到的观察，[系统提示] 是界面补的、不是你说过的话，[协议错误] 是你上一条回复没按协议输出时系统的回执。别把后两者当成自己的结论。
+你**能看到之前的对话与工具结果**，它们按前缀区分来源：[工具 X 的执行结果] 是你自己调用工具拿到的观察，[系统提示] 是界面补的、不是你说过的话，[协议错误] 是你上一条回复没按协议输出时系统的回执。别把后两者当成自己的结论。
 
 ## 输出协议（严格执行）
 只输出单个合法的 JSON 对象，禁止输出 Markdown 围栏代码块（禁止使用 \`\`\`json）：
@@ -214,11 +214,11 @@ export const SYSTEM_PROMPT = `
 
 6. sandbox —— 本机沙箱：读写文件与执行指令
    args（action 全小写，可用 ${SANDBOX_ACTIONS.join(' / ')}）:
-   - 列目录: {"action": "list", "path": "out"}
-   - 读文件: {"action": "read", "path": "out/notes.md"}
-   - 写文件: {"action": "write", "path": "out/notes.md", "content": "文本内容"}
-   - 删文件: {"action": "delete", "path": "out/notes.md"}
-   - 执行指令: {"action": "exec", "command": "node out/crack.js", "timeout": 30000}
+   - 列目录: {"action": "list", "path": "..."}
+   - 读文件: {"action": "read", "path": "..."}
+   - 写文件: {"action": "write", "path": "...", "content": "文本内容"}
+   - 删文件: {"action": "delete", "path": "..."}
+   - 执行指令: {"action": "exec", "command": "node .js", "timeout": 30000}
    - **只能在沙箱目录里操作**：path 一律相对沙箱根，写 \`..\`、绝对路径或盘符会被拒绝。
      沙箱外的文件这里读不到 —— 要取页面上的东西用 js，不要指望这条工具。
    - 目录不存在时自动创建；write 会连带建父目录，不用先 mkdir。
@@ -226,17 +226,7 @@ export const SYSTEM_PROMPT = `
      write 本身不会执行任何东西。
    - timeout 缺省 ${SANDBOX_EXEC_TIMEOUT_DEFAULT_MS / 1000} 秒，上限 ${SANDBOX_EXEC_TIMEOUT_MAX_MS / 1000} 秒；超时的进程会被杀掉。
    - 单次回传上限 ${SANDBOX_TEXT_LIMIT_BYTES / 1024}KB：大文件不要整份 read，
-     用 exec 配管道（findstr / Select-String / head）只取需要的那部分。
-
-## 执行准则与硬约束
-1. 广度优先单步拉取：一次脚本内查清相关字段，禁止拆成多次调用只为获取少量数据；DOM 提取必须做截断（如 slice(0, 50)）。
-2. 试错熔断：相同思路/错误连续失败 2 次必须更换策略（检查选择器 -> 换用网络拦截 -> 换用 storage 直读底层数据）。
-3. 失败只是这一步的结果，不是任务的终点：工具返回以「[工具 X 执行失败]」开头时读错误信息修正参数或换路继续，不要原样重试，更不要把它当成结论收尾；除非已穷尽可行路径，否则继续调用工具。
-4. 结论必须由证据支撑：提出任何鉴权机制、加密方式、字段逻辑的推断，必须伴随工具返回的具体物理证据（字段值/响应码/堆栈）。
-5. 交付标准：
-   - 提取数据：必须给出实际采样值与总量，而非“可以读取”。
-   - 验证绕过/逻辑：必须给出篡改前后系统行为的对比判定。
-   - 遇到阻碍：清晰说明已尝试的路径、卡点证据与所需的前置条件。`;
+     用 exec 配管道（findstr / Select-String / head）只取需要的那部分。`;
 
 /**
  * 一次请求的输入 token：**系统提示词 + 待发消息**。
@@ -247,11 +237,11 @@ export const SYSTEM_PROMPT = `
  * 对不上时他只会以为统计坏了。
  */
 export const requestTokensOf = (messages: AiChatMessage[]): number =>
-    estimatePromptTokens([{ role: 'system', content: SYSTEM_PROMPT }, ...messages]);
+   estimatePromptTokens([{ role: 'system', content: SYSTEM_PROMPT }, ...messages]);
 
 /** 上下文占用：按现存对话重建后的**下一次请求**输入量（硬门槛与界面显示共用） */
 export const contextTokensOf = (messages: AgentMessage[]): number =>
-    requestTokensOf(buildTranscript(messages));
+   requestTokensOf(buildTranscript(messages));
 
 /**
  * 上下文越线时给用户看的那句话。
@@ -260,7 +250,7 @@ export const contextTokensOf = (messages: AgentMessage[]): number =>
  * 两件不同的事，而实际都只有一条出路（压缩或清空）。
  */
 export const contextFullMessage = (): string =>
-    `上下文已达 ${CONTEXT_LIMIT_TOKENS.toLocaleString()} token 上限，必须先压缩或清空对话才能继续。`;
+   `上下文已达 ${CONTEXT_LIMIT_TOKENS.toLocaleString()} token 上限，必须先压缩或清空对话才能继续。`;
 
 /**
  * 摘要器的系统提示词。

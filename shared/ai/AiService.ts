@@ -22,7 +22,7 @@ import { fileToDataUrl, splitDataUrl } from '../core';
 /*                                服务商预设                                   */
 /* -------------------------------------------------------------------------- */
 
-/** 默认配置：指向下面预设表里的 agent2api（3065）。预设表引用它，所以声明在表前面 */
+/** 默认配置：本地 tc2api。预设表引用它，所以声明在表前面 */
 export const DEFAULT_AI_CONFIG: AiConfig = {
     baseUrl: 'http://127.0.0.1:3065/v1',
     apiKey: 'sk-a2a-f345da9360a116c54801e02675eb0c37',
