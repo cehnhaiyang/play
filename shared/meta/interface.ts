@@ -19,7 +19,6 @@ import type {
     AgentCompaction,
     AgentMessage,
     AgentRunStatus,
-    AgentScript,
     AgentUsage,
 } from './type';
 
@@ -1952,7 +1951,6 @@ export interface TamperState {
 
 export interface AgentState {
     messages: AgentMessage[];
-    scripts: AgentScript[];
     status: AgentRunStatus;
     error: string;
     /**
@@ -2015,21 +2013,6 @@ export interface AgentState {
          * 界面只会从 COMPACT_RATIOS 里选，这里是防手写调用传错。
          */
         setCompactRatio: (ratio: number) => void;
-        /**
-         * 手动执行一条已保存脚本（脚本页的"运行"按钮）。
-         *
-         * 与自动执行同一套记账：lastRunAt/lastResult 更新 + 一条 tool 消息进对话。
-         * 消息的 origin 标成 manual —— 它不属于任何一次模型调用，重建上下文时按
-         * "环境事件"写回，且要如实说出是用户按的而不是页面自动跑的。
-         *
-         * 运行中拒绝：主循环正拿着 webview 跑模型的步骤，此刻手动执行会与它的下一步
-         * 交错读页面，两边看到的状态互相污染。规则与改历史一致。
-         *
-         * 返回给界面显示的观察结果（失败时是错误文案）。
-         */
-        runScriptNow: (id: string) => Promise<string>;
-        removeScript: (id: string) => void;
-        toggleScript: (id: string) => void;
     };
 }
 

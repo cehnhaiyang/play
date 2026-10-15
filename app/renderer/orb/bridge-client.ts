@@ -71,10 +71,7 @@ export type AgentAction =
     | { type: 'compact' }
     | { type: 'set-compact-ratio'; ratio: number }
     | { type: 'remove-message'; id: string }
-    | { type: 'rewind'; id: string }
-    | { type: 'run-script'; id: string }
-    | { type: 'remove-script'; id: string }
-    | { type: 'toggle-script'; id: string };
+    | { type: 'rewind'; id: string };
 
 const api = () => {
     const orb = window.orbApi;

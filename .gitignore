@@ -11,6 +11,8 @@ test/build
 test/.mutant.ts
 # ui-check.js 的截图输出（每次跑 UI 回归都会重新生成，属于产物不是源码）
 scripts/shots
+# 本地沙箱：Agent 在项目根目录下读写文件与执行指令的工作目录（运行时产物）
+sandbox
 
 # 备份文件
 *.bak

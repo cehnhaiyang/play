@@ -535,7 +535,7 @@ const run = () => {
 
         /*
          * 与桥重叠的 kind —— 它们必须转发。
-         * 不在这张表里的（cookies-*、host-ensure、page-eval、page-navigate）
+         * 不在这张表里的（cookies-*、host-ensure）
          * 是球独有、面板没有上下文的，允许直接实现。
          */
         const mustForward = [

@@ -1080,8 +1080,8 @@ const downloadsStart = async (url: string, filename?: string) => {
  * 一个在扩展进程内，一个跨进程。
  *
  * **重叠的部分只有这一份实现** —— `dispatchBall` 把嗅探、下载、Agent 那几条
- * 原样转发到这里，只有球独有、面板没有上下文的（`cookies-*`、`host-ensure`、
- * `page-eval`）留在那边。两份实现必然漂移，实测过一次：给
+ * 原样转发到这里，只有球独有、面板没有上下文的（`cookies-*`、`host-ensure`）
+ * 留在那边。两份实现必然漂移，实测过一次：给
  * `sniffer-set-enabled` 加了"打开时自动扫一次"，只加在这里，而球走的是
  * `dispatchBall` 那一份 —— 用户点开开关看到的仍是空列表，插件自检却全绿。
  *
@@ -1350,8 +1350,8 @@ const errorText = (e: unknown): string => (e instanceof Error ? e.message : Stri
  * messaging 转发过来），一个跨进程（页面里那个球走 `chrome.runtime`）。
  *
  * 原先这里是一份**独立的 switch**，理由写的是"球能做的事严格多于面板，
- * 合并会让'面板能不能调 page-eval'没有答案"。那个理由对 `cookies-*` /
- * `host-ensure` / `page-eval` 成立，但**对嗅探那一批不成立** —— 它们两边
+ * 合并会让'面板能不能调 cookies-get'没有答案"。那个理由对 `cookies-*` /
+ * `host-ensure` 成立，但**对嗅探那一批不成立** —— 它们两边
  * 一模一样，而两份实现必然漂移。
  *
  * 漂移实测过：给 `sniffer-set-enabled` 加了"打开时自动扫一次当前页"，
@@ -1453,23 +1453,6 @@ const dispatchBall = async (message: BallRequest): Promise<unknown> => {
             await agentBridge.ensureOffscreen();
             return { ready: true };
 
-        case 'page-eval': {
-            /*
-             * 直接执行，不走引擎的主循环。
-             *
-             * 这条给"脚本页的手动运行"用：它不属于任何一次模型调用，
-             * 走 dispatchTool 反而会被 busy 闸门挡住。串行化仍由引擎的队列
-             * 保证 —— 换一条路径执行就等于绕开了"模型步骤与手动执行不交错"。
-             */
-            const engine = await agentBridge.getEngine();
-            return { result: await engine.execForScript(message.tabId, message.code) };
-        }
-
-        case 'page-navigate': {
-            const engine = await agentBridge.getEngine();
-            return { result: await engine.navigateForScript(message.tabId, message.url) };
-        }
-
         default: {
             // 穷尽检查：新增 BallRequest 分支却忘了在这里处理时，
             // 这一行会变成类型错误，而不是运行时的静默 undefined。
@@ -1505,14 +1488,6 @@ const runAgentAction = async (
             return { done: true };
         case 'rewind':
             return { prompt: engine.snapshot().actions.rewindTo(action.id) };
-        case 'run-script':
-            return { result: await engine.snapshot().actions.runScriptNow(action.id) };
-        case 'remove-script':
-            engine.snapshot().actions.removeScript(action.id);
-            return { done: true };
-        case 'toggle-script':
-            engine.snapshot().actions.toggleScript(action.id);
-            return { done: true };
         default: {
             const never: never = action;
             throw new Error(`未知 Agent 动作：${JSON.stringify(never)}`);

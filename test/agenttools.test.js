@@ -79,12 +79,9 @@ const {
     COMPACT_PREFIX,
     PROTOCOL_ERROR_LABEL,
     protocolErrorObservation,
-    AUTO_RUN_PREFIX,
-    MANUAL_RUN_PREFIX,
-    environmentEventObservation,
     toolObservation,
 } = TRANSCRIPT;
-const { CONTEXT_LIMIT_TOKENS, SCRIPTS_STORE_MAX } = PROMPT;
+const { CONTEXT_LIMIT_TOKENS } = PROMPT;
 
 /** buildDispatch 的默认页面地址。传 false 才表示没有可用页面 */
 const DEFAULT_TAB_URL = 'https://example.com/';
@@ -101,16 +98,13 @@ const DEFAULT_TAB_URL = 'https://example.com/';
  *
  * ## 为什么是 async
  *
- * 引擎构造后必须 await `hydrate()`（它要从存储读回历史与脚本，那是异步的）。
+ * 引擎构造后必须 await `hydrate()`（它要从存储读回历史，那是异步的）。
  * 不 await 的话第一次 `state()` 看到的是空列表，而所有"恢复历史"的用例都会
  * 悄悄退化成在测空状态 —— 那比直接报错难查得多。
  */
 const buildAgentHarness = async (options = {}) => {
     const chats = [];
     const store = {};
-    // 播种已保存脚本：走真实的落盘 key（agent-scripts），让 normalizeScript /
-    // 上限截断这些加载路径也参与验证，而不是手搓一份"已经合法"的 state。
-    if (options.seedScripts) store['agent-scripts'] = options.seedScripts;
 
     /**
      * AiService 的**编译产物**。
@@ -233,7 +227,6 @@ const buildAgentHarness = async (options = {}) => {
             return { value: typeof value === 'string' ? value : JSON.stringify(value), failed: false };
         },
         navigate: async (_tabId, url) => { navigated.push(url); return { url, loaded: true }; },
-        onPageReady: () => () => {},
         readWebStorage: async () => {
             // throwOnBridge：让宿主抛异常，用来测"工具内部异常"这条与
             // "返回 error 字段"完全不同的失败路径。readWebStorage 是 storage get
@@ -318,7 +311,7 @@ const buildAgentHarness = async (options = {}) => {
  * tamper 是个可观测的假引擎：applyRules 记账，
  * 这样"有没有越界落盘"是可断言的（引擎侧没有 saveRules 这个口）。
  */
-const buildDispatch = (tamperState, scripts = [], webviewUrl = DEFAULT_TAB_URL, sandboxImpl = null) => {
+const buildDispatch = (tamperState, webviewUrl = DEFAULT_TAB_URL, sandboxImpl = null) => {
     const calls = {
         apply: 0, save: 0, setCookie: [], setLocal: [], setSession: [], removed: [],
         ranCode: [], navigated: [], sandbox: [],
@@ -346,22 +339,6 @@ const buildDispatch = (tamperState, scripts = [], webviewUrl = DEFAULT_TAB_URL, 
         },
     };
 
-    /**
-     * 脚本清单。
-     *
-     * 换引用而不是原地改：与引擎里 scriptStore() 的实现同一形状，
-     * 于是 scriptsRef.current 永远是最新那份，断言直接看它即可。
-     */
-    const scriptsRef = { current: scripts.slice() };
-    const scriptStore = {
-        list: () => scriptsRef.current,
-        add: (s) => { scriptsRef.current = [...scriptsRef.current, s]; },
-        update: (id, patch) => {
-            scriptsRef.current = scriptsRef.current.map((x) => (x.id === id ? { ...x, ...patch } : x));
-        },
-        remove: (id) => { scriptsRef.current = scriptsRef.current.filter((x) => x.id !== id); },
-    };
-
     /*
      * 默认**有页面**，传 false 才表示"没有可用页面"。
      *
@@ -378,7 +355,6 @@ const buildDispatch = (tamperState, scripts = [], webviewUrl = DEFAULT_TAB_URL, 
             return { value: '{"ok":true}', failed: false };
         },
         navigate: async (_tabId, url) => { calls.navigated.push(url); return { url, loaded: true }; },
-        onPageReady: () => () => {},
         /*
          * 签名必须与 AgentHost 逐字对齐（tabId 在第一个参数）。
          *
@@ -401,7 +377,6 @@ const buildDispatch = (tamperState, scripts = [], webviewUrl = DEFAULT_TAB_URL, 
 
     const ctx = {
         host,
-        scripts: scriptStore,
         exec: async (code) => { calls.ranCode.push(code); return '{"ok":true}'; },
         sandbox: async (request) => {
             calls.sandbox.push(request);
@@ -411,9 +386,9 @@ const buildDispatch = (tamperState, scripts = [], webviewUrl = DEFAULT_TAB_URL, 
         tabId: hasPage ? 1 : null,
     };
 
-    // 两个参数：调用点不必改签名，宿主与脚本清单由闭包提供
+    // 两个参数：调用点不必改签名，宿主由闭包提供
     const dispatchTool = (tool, args) => TOOLS.dispatchTool(tool, args, ctx);
-    return { dispatchTool, calls, tamperRef, scriptsRef };
+    return { dispatchTool, calls, tamperRef };
 };
 
 /* -------------------------------------------------------------------------- */
@@ -438,7 +413,7 @@ const run = async () => {
     /* ------------------------------ S: 运行 ------------------------------ */
 
     await check('js 把 code 交给页面执行并回传结果', async () => {
-        const { dispatchTool, calls } = buildDispatch(EMPTY, []);
+        const { dispatchTool, calls } = buildDispatch(EMPTY);
         const out = await dispatchTool('js', { code: 'return 1+1;' });
         assert(calls.ranCode.length === 1, `应执行一次，实际 ${calls.ranCode.length}`);
         assert(calls.ranCode[0] === 'return 1+1;', '应原样把 code 交给执行器');
@@ -448,204 +423,17 @@ const run = async () => {
     await check('js 缺 code 时直接报错，不执行空脚本', async () => {
         // 空跑一步的代价不是零：这一步的结果（哪怕是 null）会被后续每一步重发。
         // 旧行为是照常执行空脚本，这里钉住新行为，防止回退。
-        const { dispatchTool, calls } = buildDispatch(EMPTY, []);
+        const { dispatchTool, calls } = buildDispatch(EMPTY);
         const out = j(await dispatchTool('js', {}));
         assert(out.error && out.error.includes('code'), `应报缺 code，实际 ${JSON.stringify(out)}`);
         assert(calls.ranCode.length === 0, '空 code 不得进执行器');
     });
 
     await check('js 空白 code 同样拦截', async () => {
-        const { dispatchTool, calls } = buildDispatch(EMPTY, []);
+        const { dispatchTool, calls } = buildDispatch(EMPTY);
         const out = j(await dispatchTool('js', { code: '  \n ' }));
         assert(out.error, '纯空白 code 应报错');
         assert(calls.ranCode.length === 0, '不得执行');
-    });
-
-    /* ------------------------ script_store: 列出 ------------------------ */
-
-    await check('script_store·list 列出脚本清单', async () => {
-        const { dispatchTool } = buildDispatch(EMPTY, [
-            { id: 'a', name: '甲', description: 'd', code: 'return 1;', urlPattern: '*x*', enabled: true },
-        ]);
-        const out = j(await dispatchTool('script_store', { action: 'list' }));
-        assert(Array.isArray(out) && out.length === 1, `应列出 1 条，实际 ${out.length}`);
-        assert(out[0].id === 'a' && out[0].name === '甲', 'id 与 name 应正确');
-    });
-
-    await check('script_store·list 空清单返回空数组', async () => {
-        const { dispatchTool } = buildDispatch(EMPTY, []);
-        const out = j(await dispatchTool('script_store', { action: 'list' }));
-        assert(Array.isArray(out) && out.length === 0, '应为空数组');
-    });
-
-    /* ------------------------------ S: 保存 ------------------------------ */
-
-    await check('script_store·save 保存脚本并回传 id', async () => {
-        const { dispatchTool, scriptsRef } = buildDispatch(EMPTY, []);
-        const out = j(await dispatchTool('script_store', {
-            action: 'save', name: '抓取', description: '抓列表', code: 'return 1;', url_pattern: '/list',
-        }));
-        assert(out.saved === true, '应回 saved:true');
-        assert(typeof out.id === 'string' && out.id, '应回 id');
-        assert(scriptsRef.current.length === 1, '脚本清单应多一条');
-        assert(scriptsRef.current[0].urlPattern === '/list', 'urlPattern 应写入');
-    });
-
-    await check('script_store·save 缺 code 报错且不写入', async () => {
-        const { dispatchTool, scriptsRef } = buildDispatch(EMPTY, []);
-        const out = j(await dispatchTool('script_store', { action: 'save', name: 'x' }));
-        assert(typeof out.error === 'string', '应回错误');
-        assert(scriptsRef.current.length === 0, '出错时不得写入');
-    });
-
-    await check('script_store·save 只有空白的 code 也算缺', async () => {
-        const { dispatchTool, scriptsRef } = buildDispatch(EMPTY, []);
-        const out = j(await dispatchTool('script_store', { action: 'save', code: '   \n  ' }));
-        assert(typeof out.error === 'string', '应回错误');
-        assert(scriptsRef.current.length === 0, '不得写入');
-    });
-
-    await check('script_store·save 缺 name 回落默认名', async () => {
-        const { dispatchTool, scriptsRef } = buildDispatch(EMPTY, []);
-        const out = j(await dispatchTool('script_store', { action: 'save', code: 'return 1;' }));
-        assert(out.saved === true, '应成功');
-        assert(scriptsRef.current[0].name === '未命名脚本', `默认名应为「未命名脚本」，实际 ${scriptsRef.current[0].name}`);
-    });
-
-    // 满了必须明说，不能静默丢弃（旧实现在数组末尾 slice，砍掉的正是刚加的那条）
-    await check('script_store·save 达上限时报错并提示用 delete 删', async () => {
-        /*
-         * 用产品的真实上限，不手写一个 3。
-         *
-         * 旧 harness 里 SCRIPTS_STORE_MAX 被脚手架硬编成 3（切源码时手抄的），
-         * 于是这条断言测的是"3 这个数字"而不是产品行为 —— 产品改成 200
-         * 它照样绿。现在从编译产物里读真值。
-         */
-        const full = Array.from({ length: SCRIPTS_STORE_MAX }, (_, i) => ({
-            id: 's' + i, name: 'n' + i, description: '', code: 'return 1;', urlPattern: '', enabled: true,
-        }));
-        const { dispatchTool, scriptsRef } = buildDispatch(EMPTY, full);
-        const out = j(await dispatchTool('script_store', { action: 'save', code: 'return 2;' }));
-        assert(typeof out.error === 'string', '应回错误');
-        assert(/delete/.test(out.error), `错误里应提示用 delete 删除，实际：${out.error}`);
-        assert(scriptsRef.current.length === SCRIPTS_STORE_MAX, '不得写入');
-    });
-
-    /* ------------------------ script_store: 删除 ------------------------ */
-
-    await check('script_store·delete 删除指定脚本', async () => {
-        const { dispatchTool, scriptsRef } = buildDispatch(EMPTY, [
-            { id: 'a', name: '甲', description: '', code: 'return 1;', urlPattern: '', enabled: true },
-            { id: 'b', name: '乙', description: '', code: 'return 2;', urlPattern: '', enabled: true },
-        ]);
-        const out = j(await dispatchTool('script_store', { action: 'delete', id: 'a' }));
-        assert(out.deleted === true, '应回 deleted:true');
-        assert(scriptsRef.current.length === 1, `应剩 1 条，实际 ${scriptsRef.current.length}`);
-        assert(scriptsRef.current[0].id === 'b', '删掉的应是 a');
-    });
-
-    /**
-     * 删**第二条**，不是第一条。
-     *
-     * 只删第一条的话，"按 id 过滤"与"删掉数组首项"结果相同 ——
-     * 实测那个错误实现（slice(1)）能骗过上面那条用例。
-     * 目标不在首位，才真正区分两者。
-     */
-    await check('script_store·delete 删的是指定那条，不是第一条', async () => {
-        const { dispatchTool, scriptsRef } = buildDispatch(EMPTY, [
-            { id: 'a', name: '甲', description: '', code: 'return 1;', urlPattern: '', enabled: true },
-            { id: 'b', name: '乙', description: '', code: 'return 2;', urlPattern: '', enabled: true },
-            { id: 'c', name: '丙', description: '', code: 'return 3;', urlPattern: '', enabled: true },
-        ]);
-        const out = j(await dispatchTool('script_store', { action: 'delete', id: 'b' }));
-        assert(out.deleted === true, '应回 deleted:true');
-        const ids = scriptsRef.current.map((s) => s.id).join(',');
-        assert(ids === 'a,c', `应剩 a,c，实际 ${ids}`);
-    });
-
-    await check('script_store·delete 删最后一条', async () => {
-        const { dispatchTool, scriptsRef } = buildDispatch(EMPTY, [
-            { id: 'a', name: '甲', description: '', code: 'return 1;', urlPattern: '', enabled: true },
-            { id: 'b', name: '乙', description: '', code: 'return 2;', urlPattern: '', enabled: true },
-        ]);
-        await dispatchTool('script_store', { action: 'delete', id: 'b' });
-        const ids = scriptsRef.current.map((s) => s.id).join(',');
-        assert(ids === 'a', `应剩 a，实际 ${ids}`);
-    });
-
-    await check('script_store·delete 找不到 id 时报错且不动清单', async () => {
-        const { dispatchTool, scriptsRef } = buildDispatch(EMPTY, [
-            { id: 'a', name: '甲', description: '', code: 'return 1;', urlPattern: '', enabled: true },
-        ]);
-        const out = j(await dispatchTool('script_store', { action: 'delete', id: 'nope' }));
-        assert(typeof out.error === 'string', '应回错误');
-        assert(scriptsRef.current.length === 1, '不得改动清单');
-    });
-
-    /* ----------------- script_store: 大小写与未知 action ----------------- */
-
-    // action 全小写严格匹配：大写 LIST 必须报错（并点名正确写法），不能静默执行
-    await check('script_store 的 action 区分大小写', async () => {
-        const { dispatchTool, calls } = buildDispatch(EMPTY, []);
-        const bad = j(await dispatchTool('script_store', { action: 'LIST' }));
-        assert(bad.error && bad.error.includes('list'), `大写 LIST 应报错并提示 list，实际 ${JSON.stringify(bad)}`);
-        const out = j(await dispatchTool('script_store', { action: 'list' }));
-        assert(Array.isArray(out), '小写 list 应列出清单');
-    });
-
-    await check('script_store 未知 action 报错并列出可用取值', async () => {
-        const { dispatchTool } = buildDispatch(EMPTY, []);
-        const out = j(await dispatchTool('script_store', { action: 'X' }));
-        assert(typeof out.error === 'string', '应回错误');
-        for (const k of ['list', 'save', 'update', 'delete']) {
-            assert(out.error.includes(k), `错误里应列出 ${k}，实际：${out.error}`);
-        }
-    });
-
-    await check('script_store 缺 action 报错', async () => {
-        const { dispatchTool } = buildDispatch(EMPTY, []);
-        const out = j(await dispatchTool('script_store', {}));
-        assert(typeof out.error === 'string', '应回错误');
-    });
-
-    /* ------------------------------ S: 更新 ------------------------------ */
-
-    await check('script_store·update 按 id 部分更新，只改传了的字段', async () => {
-        const { dispatchTool, scriptsRef } = buildDispatch(EMPTY, [
-            { id: 'a', name: '甲', description: 'd', code: 'return 1;', urlPattern: '/x', enabled: true },
-        ]);
-        const out = j(await dispatchTool('script_store', { action: 'update', id: 'a', code: 'return 2;', name: '乙' }));
-        assert(out.updated === true && out.id === 'a', '应回 updated');
-        const s = scriptsRef.current[0];
-        assert(s.code === 'return 2;' && s.name === '乙', '传了的字段应更新');
-        assert(s.description === 'd' && s.urlPattern === '/x', '没传的字段应原样保留');
-        assert(scriptsRef.current.length === 1, '不得增删条目');
-    });
-
-    await check('script_store·update 可开关自动执行', async () => {
-        const { dispatchTool, scriptsRef } = buildDispatch(EMPTY, [
-            { id: 'a', name: '甲', description: '', code: 'return 1;', urlPattern: '', enabled: true },
-        ]);
-        await dispatchTool('script_store', { action: 'update', id: 'a', enabled: false });
-        assert(scriptsRef.current[0].enabled === false, 'enabled 应更新');
-    });
-
-    await check('script_store·update 找不到 id 时报错且不动清单', async () => {
-        const { dispatchTool, scriptsRef } = buildDispatch(EMPTY, [
-            { id: 'a', name: '甲', description: '', code: 'return 1;', urlPattern: '', enabled: true },
-        ]);
-        const out = j(await dispatchTool('script_store', { action: 'update', id: 'nope', code: 'return 2;' }));
-        assert(typeof out.error === 'string', '应回错误');
-        assert(scriptsRef.current[0].code === 'return 1;', '原脚本不得被改动');
-    });
-
-    await check('script_store·update 传了空 code 时报错（不想改就别传）', async () => {
-        const { dispatchTool, scriptsRef } = buildDispatch(EMPTY, [
-            { id: 'a', name: '甲', description: '', code: 'return 1;', urlPattern: '', enabled: true },
-        ]);
-        const out = j(await dispatchTool('script_store', { action: 'update', id: 'a', code: '  ' }));
-        assert(typeof out.error === 'string', '空 code 应报错');
-        assert(scriptsRef.current[0].code === 'return 1;', '原 code 不得被清空');
     });
 
     /* --------------------- 全工具：action 严格区分大小写 --------------------- */
@@ -654,17 +442,17 @@ const run = async () => {
     // 不能猜着执行 —— 猜对是运气，猜错是烧一步。
     await check('tamper / storage / tokens 的 action 写错大小写就报错', async () => {
         const state = { intercept: [], request: [], headers: [], cookies: [], local: {}, session: {} };
-        const t = buildDispatch(state, []);
+        const t = buildDispatch(state);
         const badGet = j(await t.dispatchTool('tamper', { action: 'GET' }));
         assert(badGet.error && badGet.error.includes('get'), `大写 GET 应报错并提示 get，实际 ${JSON.stringify(badGet)}`);
         const badSet = j(await t.dispatchTool('tamper', { action: 'SET', intercept: [] }));
         assert(badSet.error && badSet.error.includes('set'), '大写 SET 应报错');
 
-        const s = buildDispatch(state, []);
+        const s = buildDispatch(state);
         const sBad = j(await s.dispatchTool('storage', { action: 'GET', area: 'LOCAL' }));
         assert(sBad.error, `大写 GET/LOCAL 应报错，实际 ${JSON.stringify(sBad)}`);
 
-        const k = buildDispatch(state, []);
+        const k = buildDispatch(state);
         const kBad = j(await k.dispatchTool('tokens', { action: 'FIND' }));
         assert(kBad.error && kBad.error.includes('find'), '大写 FIND 应报错');
     });
@@ -672,28 +460,28 @@ const run = async () => {
     /* ------------------------------ navigate ------------------------------ */
 
     await check('navigate：裸域名自动补 https', async () => {
-        const { dispatchTool, calls } = buildDispatch(EMPTY, [], 'https://example.com/a');
+        const { dispatchTool, calls } = buildDispatch(EMPTY, 'https://example.com/a');
         const out = j(await dispatchTool('navigate', { url: 'example.org/x' }));
         assert(out.url === 'https://example.org/x', `应补协议，实际 ${out.url}`);
         assert(calls.navigated[0] === 'https://example.org/x', '应按归一后的地址导航');
     });
 
     await check('navigate：相对路径相对当前页解析', async () => {
-        const { dispatchTool, calls } = buildDispatch(EMPTY, [], 'https://example.com/a/b?x=1');
+        const { dispatchTool, calls } = buildDispatch(EMPTY, 'https://example.com/a/b?x=1');
         const out = j(await dispatchTool('navigate', { url: '/api/login' }));
         assert(out.url === 'https://example.com/api/login', `应相对当前页解析，实际 ${out.url}`);
         assert(calls.navigated[0] === out.url, '导航地址与回显必须一致（下一步 js 基于它判断）');
     });
 
     await check('navigate：完整 URL 原样通过', async () => {
-        const { dispatchTool, calls } = buildDispatch(EMPTY, [], 'https://example.com/');
+        const { dispatchTool, calls } = buildDispatch(EMPTY, 'https://example.com/');
         const out = j(await dispatchTool('navigate', { url: 'http://other.com/p' }));
         assert(out.url === 'http://other.com/p', '有协议的地址不得改动');
         assert(calls.navigated[0] === 'http://other.com/p', '导航地址应原样');
     });
 
     await check('navigate：无页面时报错', async () => {
-        const { dispatchTool } = buildDispatch(EMPTY, [], false);
+        const { dispatchTool } = buildDispatch(EMPTY, false);
         const out = j(await dispatchTool('navigate', { url: 'https://example.com/' }));
         assert(out.error && out.error.includes('没有可用'), `应报无页面，实际 ${JSON.stringify(out)}`);
     });
@@ -1422,7 +1210,7 @@ const run = async () => {
      * 路径越界的判据在应用侧（下面 SBX 那一段直接调它），这里不重复实现一份。
      */
     await check('sandbox write 把 action/path/content 原样转给应用', async () => {
-        const { dispatchTool, calls } = buildDispatch(EMPTY, []);
+        const { dispatchTool, calls } = buildDispatch(EMPTY);
         const out = j(await dispatchTool('sandbox', {
             action: 'write', path: 'out/notes.md', content: '# 结论',
         }));
@@ -1435,7 +1223,7 @@ const run = async () => {
     });
 
     await check('sandbox exec 不带 path，只带 command 与 timeout', async () => {
-        const { dispatchTool, calls } = buildDispatch(EMPTY, []);
+        const { dispatchTool, calls } = buildDispatch(EMPTY);
         await dispatchTool('sandbox', { action: 'exec', command: 'node out/a.js', timeout: 30000 });
         const sent = calls.sandbox[0];
         eq(sent.command, 'node out/a.js');
@@ -1444,7 +1232,7 @@ const run = async () => {
     });
 
     await check('sandbox 未知 action 列出全部可用值', async () => {
-        const { dispatchTool, calls } = buildDispatch(EMPTY, []);
+        const { dispatchTool, calls } = buildDispatch(EMPTY);
         const out = j(await dispatchTool('sandbox', { action: 'WRITE', path: 'a' }));
         assert(typeof out.error === 'string', '大写 WRITE 必须失败（全小写严格匹配）');
         assert(out.error.includes('list / read / write / delete / exec'),
@@ -1459,14 +1247,14 @@ const run = async () => {
      * 而回执是 {bytes:0} —— 看起来像是"写了个空文件"，不像出了事。
      */
     await check('sandbox write 缺 content 报错而不是清空文件', async () => {
-        const { dispatchTool, calls } = buildDispatch(EMPTY, []);
+        const { dispatchTool, calls } = buildDispatch(EMPTY);
         const out = j(await dispatchTool('sandbox', { action: 'write', path: 'out/keep.md' }));
         assert(typeof out.error === 'string', '应报错');
         assert(calls.sandbox.length === 0, '绝不能把清空文件的请求发出去');
     });
 
     await check('sandbox 文件动作缺 path 报错，exec 缺 command 报错', async () => {
-        const { dispatchTool } = buildDispatch(EMPTY, []);
+        const { dispatchTool } = buildDispatch(EMPTY);
         assert(typeof j(await dispatchTool('sandbox', { action: 'read' })).error === 'string',
             'read 缺 path 应报错');
         assert(typeof j(await dispatchTool('sandbox', { action: 'exec', command: '  ' })).error === 'string',
@@ -1480,7 +1268,7 @@ const run = async () => {
      * 模型读不出"是应用没开"，于是反复改参数 —— 而改参数永远好不了。
      */
     await check('sandbox 应用未连接时回可行动的错误，不抛异常', async () => {
-        const { dispatchTool } = buildDispatch(EMPTY, [], DEFAULT_TAB_URL, () => {
+        const { dispatchTool } = buildDispatch(EMPTY, DEFAULT_TAB_URL, () => {
             throw new Error('本机应用未连接');
         });
         const out = j(await dispatchTool('sandbox', { action: 'list', path: '.' }));
@@ -1489,7 +1277,7 @@ const run = async () => {
     });
 
     await check('sandbox 应用返回的 error 原样回灌', async () => {
-        const { dispatchTool } = buildDispatch(EMPTY, [], DEFAULT_TAB_URL, () => ({
+        const { dispatchTool } = buildDispatch(EMPTY, DEFAULT_TAB_URL, () => ({
             error: 'ENOENT: no such file or directory',
         }));
         const out = j(await dispatchTool('sandbox', { action: 'read', path: 'nope.md' }));
@@ -1676,7 +1464,7 @@ const run = async () => {
             .replace(/\r\n/g, '\n');
         const block = typeSrc.slice(typeSrc.indexOf('export type AgentToolName ='));
         const declared = [...block.slice(0, block.indexOf(';')).matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
-        assert(declared.length >= 7, `应从类型里解出全部工具名，实际 ${declared.length}`);
+        assert(declared.length >= 6, `应从类型里解出全部工具名，实际 ${declared.length}`);
 
         const toolsSrc = AGENT_SOURCES.find((s) => s.file === 'tools.ts').text;
         const promptSrc = AGENT_SOURCES.find((s) => s.file === 'prompt.ts').text;
@@ -1696,7 +1484,7 @@ const run = async () => {
         const src = AGENT_SOURCES.find((s) => s.file === 'prompt.ts').text;
         assert(/SANDBOX_EXEC_TIMEOUT_MAX_MS/.test(src), '超时上限应插值常量');
         assert(/SANDBOX_TEXT_LIMIT_BYTES/.test(src), '回传上限应插值常量');
-        const at = src.indexOf('7. sandbox');
+        const at = src.indexOf('6. sandbox');
         assert(at > 0, '提示词应有 sandbox 一条');
         const spec = src.slice(at, src.indexOf('## 执行准则', at));
         assert(/沙箱/.test(spec) && /\.\./.test(spec), '必须写明只能在沙箱内、.. 会被拒');
@@ -1897,7 +1685,7 @@ const run = async () => {
         assert(at > 0, '应能找到工具消息的构造点');
         const block = src.slice(at, at + 700);
         assert(/^\s*label,$/m.test(block),
-            '工具消息必须带 label 字段：历史里只写工具名分不出 script_store 四个动作');
+            '工具消息必须带 label 字段：历史里只写工具名分不出 sandbox 五个动作');
     });
 
     await check('推理与脚本源码不进历史', async () => {
@@ -1966,116 +1754,22 @@ const run = async () => {
         const produced = buildTranscript([
             msg({ role: 'user', content: 'q' }),
             msg({ role: 'tool', label: 'js', result: 'r' }),
-            msg({ role: 'tool', content: '自动执行：x', origin: 'auto', result: 'r' }),
-            msg({ role: 'tool', content: '手动执行：y', origin: 'manual', result: 'r' }),
             msg({ role: 'tool', label: '协议错误', result: '我忘了写 JSON', ok: false }),
             msg({ role: 'assistant', content: '提示', notice: true }),
         ]).map((m) => m.content).join('\n');
 
         // 界面补的提示前缀写作 [系统提示]（带右括号），提示词里也是这么写的
-        for (const prefix of ['[工具 ', '[自动脚本', '[用户手动执行了脚本', '[系统提示]', '[协议错误]']) {
+        for (const prefix of ['[工具 ', '[系统提示]', '[协议错误]']) {
             assert(produced.includes(prefix), `实现应写出 ${prefix}（本断言已失效，需更新）`);
             assert(spec.includes(prefix), `提示词必须声明 ${prefix}，否则模型不知道那是历史`);
         }
-    });
-
-    /**
-     * 自动执行的脚本不是模型发出的调用。
-     * 写成「[工具 js·自动·x 的执行结果]」会凭空捏造一次模型从未发出的调用 ——
-     * 模型据此会以为自己已经跑过那段脚本，从而不再主动取数。
-     */
-    await check('自动执行的脚本按环境事件写回，不伪装成工具调用', async () => {
-        const out = buildTranscript([
-            msg({ role: 'user', content: 'q' }),
-            msg({ role: 'tool', content: '自动执行：抓价格', tool: 'js', origin: 'auto', result: '{"p":1}' }),
-        ]);
-        const blob = JSON.stringify(out);
-        assert(blob.includes('[自动脚本'), `应按自动脚本写回，实际：${blob.slice(0, 120)}`);
-        assert(!blob.includes('[工具 js'), '不得伪装成模型发出的工具调用');
-        assert(blob.includes('抓价格'), '应带上脚本名，模型才知道页面上发生了什么');
-    });
-
-    /**
-     * 环境事件消息只由 recordScriptRun 一处构造，且 origin 必须由调用方给出。
-     *
-     * 原先来源同时活在三个地方：`auto` 布尔、`label` 里的「自动/手动」、
-     * `content` 前缀，外加重建侧用 `startsWith('自动执行：')` 再猜一次。
-     * 四处任一处漂移都不会报错，只会让「谁按的」各说一套。
-     */
-    await check('环境事件只有一个构造点，来源只有一个存放处', async () => {
-        const src = ALL_SRC;
-        const at = src.indexOf('private recordScriptRun(');
-        assert(at > 0, '应能找到环境事件的构造点');
-        // 到下一个方法定义为止。不用具体依赖数组收尾 —— 那是 hook 时代的形状，
-        // 引擎里方法之间只隔一个空行，认依赖数组会一直找不到结尾。
-        const next = src.indexOf('\n    private ', at + 10);
-        const block = src.slice(at, next > 0 ? next : at + 1200);
-
-        assert(/^\s*origin,$/m.test(block), '构造点必须把 origin 原样写进消息');
-        assert(/origin === 'manual' \? MANUAL_RUN_PREFIX : AUTO_RUN_PREFIX/.test(block),
-            '正文前缀必须按 origin 选，不得由调用方各拼一份');
-
-        // 两个入口都走这一个记账点，不得再各写一份 appendMessage
-        const runs = src.match(/recordScriptRun\(script, result, '(auto|manual)'\)/g) || [];
-        assert(runs.length === 2,
-            `自动与手动两个入口都应走 recordScriptRun，实际 ${runs.length} 处`);
-        assert(!/^\s*auto: true,$/m.test(src), 'auto 布尔已由 origin 取代，不得残留');
-        assert(!/message\.auto\b/.test(src), '不得再有第二个来源判据');
-    });
-
-    /**
-     * 手动执行与自动执行**都必须报成环境事件，但来源要分得开**。
-     *
-     * 两条都是环境事件（都不是模型发出的调用），可对模型来说"谁按的"有实质区别：
-     * 自动那条是 URL 命中的副作用，手动那条是用户刚亲手验证过这个脚本。
-     * 原先重建时统一写成「自动脚本」，用户手动点的那次在模型眼里成了页面自动行为；
-     * 而按 `^自动执行：` 剥前缀对手动那条无效，脚本名里会拖着一整段前缀。
-     */
-    await check('环境事件区分自动与手动来源', async () => {
-        const auto = buildTranscript([
-            msg({ role: 'user', content: 'q' }),
-            msg({ role: 'tool', content: '自动执行：抓价格', tool: 'js', origin: 'auto', result: '{"p":1}' }),
-        ]).map((m) => m.content).join('\n');
-
-        const manual = buildTranscript([
-            msg({ role: 'user', content: 'q' }),
-            msg({ role: 'tool', content: '手动执行：抓价格', tool: 'js', origin: 'manual', result: '{"p":1}' }),
-        ]).map((m) => m.content).join('\n');
-
-        assert(auto.includes('[自动脚本「抓价格」'), `自动那条应写成自动脚本，实际：${auto}`);
-        assert(manual.includes('[用户手动执行了脚本「抓价格」'), `手动那条应写明是用户按的，实际：${manual}`);
-
-        // 两条都不得伪装成模型发出的工具调用
-        assert(!auto.includes('[工具 ') && !manual.includes('[工具 '),
-            '环境事件不得写成工具调用：那会凭空捏造一次模型从未发出的调用');
-
-        // 前缀必须剥干净：脚本名里不得残留「执行：」
-        assert(!manual.includes('执行：抓价格'), '手动那条的前缀必须剥掉，否则名字里拖着一整段前缀');
-    });
-
-    /**
-     * 前缀字面量只有一个来源，且只用来**拼正文**。
-     *
-     * 构造侧写 `自动执行：`、重建侧按同一个常量剥 —— 任一侧改字就静默退化
-     * （前缀剥不掉，模型看到的名字里带着前缀），所以这里钉住它只声明一次。
-     * 判断来源**不许**再用前缀（那是第二个真值）：origin 字段才是判据。
-     */
-    await check('执行来源的前缀只有一个来源', async () => {
-        const src = ALL_SRC;
-        assert(/const AUTO_RUN_PREFIX = '自动执行：';/.test(src), '自动前缀必须由具名常量给出');
-        assert(/const MANUAL_RUN_PREFIX = '手动执行：';/.test(src), '手动前缀必须由具名常量给出');
-        // 剥前缀只发生在 scriptNameOf 里，且它按 origin 选前缀、不猜内容
-        assert(/const prefix = message\.origin === 'manual' \? MANUAL_RUN_PREFIX : AUTO_RUN_PREFIX;/.test(src),
-            '剥前缀必须按 origin 选，不能靠试哪条前缀能匹配上');
-        assert(!/message\.content\.startsWith\(MANUAL_RUN_PREFIX\)/.test(src),
-            '不得再用正文前缀判断来源 —— 那是 origin 字段的职责');
     });
 
     await check('连续多个观察合并进一条 user 消息', async () => {
         const out = buildTranscript([
             msg({ role: 'user', content: 'q' }),
             msg({ role: 'tool', label: 'js', result: 'A' }),
-            msg({ role: 'tool', label: 'script_store·list', result: 'B' }),
+            msg({ role: 'tool', label: 'sandbox·list', result: 'B' }),
         ]);
         assert(out.length === 2, `两个观察应合并成一条，实际 ${out.length} 条`);
         assert(out[1].content.includes('A') && out[1].content.includes('B'), '两段结果都要在');
@@ -2177,17 +1871,17 @@ const run = async () => {
     });
 
     await check('孤立观察（无新提问）自然留在上一轮里', async () => {
-        // 上一轮结束后页面自己触发了 urlPattern 脚本：此时还没有新的用户提问。
+        // 一轮收尾之后工具消息还挂在末尾：此时还没有新的用户提问。
         // 轮次边界只有"新的用户提问"一个，所以这些观察本就还在 current 里没被 flush 过，
         // 不需要任何额外判断 —— 它们自然挂在上一轮尾部，而不是单开一个没有提问的"轮次"。
         const out = buildTranscript([
             msg({ role: 'user', content: '第一轮' }),
             msg({ role: 'assistant', content: '答一' }),
-            msg({ role: 'tool', content: '自动执行：x', tool: 'js', origin: 'auto', result: 'R' }),
+            msg({ role: 'tool', label: 'sandbox·list', tool: 'sandbox', result: 'R' }),
         ]);
         assert(out.length === 3, `应并进上一轮成为第 3 条，实际 ${out.length} 条`);
         assert(out[0].content === '第一轮', '首条仍是上一轮的提问');
-        assert(out[2].content.includes('[自动脚本'), '孤立观察应挂在上一轮尾部');
+        assert(out[2].content.includes('[工具'), '孤立观察应挂在上一轮尾部');
     });
 
     await check('空历史返回空数组（首轮对话）', async () => {
@@ -2653,33 +2347,6 @@ const run = async () => {
         assert(last.content === '存储读不到。', `应走到模型的 final，实际 ${JSON.stringify(last)}`);
     });
 
-    /* ---------------------- 手动执行已保存脚本 ---------------------- */
-
-    /**
-     * 手动执行走完整记账：lastRunAt / lastResult 更新 + 一条 tool 消息进对话。
-     *
-     * 这里用 webview:false 造"没有可用页面"的场景，于是执行结果是那条错误串 ——
-     * 正好断言"失败也要记账"：用户点完运行，卡片上必须留下这次的结果，
-     * 不能悄无声息。
-     */
-    await check('手动执行：无页面时错误原样记账并进对话', async () => {
-        const h = await buildAgentHarness({ webview: false, seedScripts: [{ id: 's1', name: '取价', code: 'return 1;' }] });
-        const before = h.state().messages.length;
-
-        const out = await h.state().actions.runScriptNow('s1');
-
-        assert(out.includes('当前没有可用的页面'), `应返回无页面错误，实际 ${out}`);
-        const st = h.state();
-        assert(st.scripts.length === 1, '脚本清单不应增减');
-        assert(st.scripts[0].lastResult === out, 'lastResult 应记下这次的结果（含失败）');
-        assert(typeof st.scripts[0].lastRunAt === 'number', 'lastRunAt 应更新');
-        const tool = st.messages.slice(before).find((m) => m.role === 'tool');
-        assert(tool, '手动执行应追加一条 tool 消息');
-        assert(tool.origin === 'manual', '手动执行的消息应标 origin: manual（环境事件语义，且来源要分得开）');
-        assert(tool.content.includes('手动执行'), `消息内容应标明手动，实际 ${tool.content}`);
-        assert(tool.ok === false, '失败的执行 ok 应为 false');
-    });
-
     /**
      * 每次执行都要**重新问**宿主当前是哪个标签页，不得缓存。
      *
@@ -2691,48 +2358,20 @@ const run = async () => {
      * 判据是 activeTab() 的调用次数：切换后再执行一次，必须重新问。
      */
     await check('执行前重新解析活动标签，不缓存 tabId', async () => {
-        const h = await buildAgentHarness({ seedScripts: [{ id: 's1', name: '取价', code: 'return 1;' }] });
+        const h = await buildAgentHarness({ toolCall: true });
 
-        await h.state().actions.runScriptNow('s1');
+        await h.send('第一轮提问');
         const afterFirst = h.activeTabCalls();
+        assert(h.lastEvalTabId() === 1, `首轮应跑在标签页 1，实际 ${h.lastEvalTabId()}`);
 
-        // 模拟用户切到另一个标签页
+        // 模拟用户切到另一个标签页，再跑一步 js
         h.switchTab(99);
-        await h.state().actions.runScriptNow('s1');
+        await h.send('第二轮提问');
 
         assert(h.activeTabCalls() > afterFirst,
             `切换标签页后必须重新问宿主，实际调用次数停在 ${afterFirst}`);
         assert(h.lastEvalTabId() === 99,
             `脚本应跑在新标签页上，实际 ${h.lastEvalTabId()}`);
-    });
-
-    await check('手动执行：未知 id 不记账不进对话', async () => {
-        const h = await buildAgentHarness({ seedScripts: [{ id: 's1', name: '取价', code: 'return 1;' }] });
-        const before = h.state().messages.length;
-
-        const out = await h.state().actions.runScriptNow('不存在的-id');
-
-        assert(out.includes('error'), '未知 id 应返回错误串');
-        assert(h.state().messages.length === before, '不得追加消息');
-        assert(h.state().scripts[0].lastResult === undefined, '不得污染现存脚本的记账');
-    });
-
-    await check('运行中：手动执行被拒绝', async () => {
-        let release;
-        const gate = new Promise((r) => { release = r; });
-        const h = await buildAgentHarness({ hold: gate, seedScripts: [{ id: 's1', name: '取价', code: 'return 1;' }] });
-        await h.send('第一轮提问');
-        const before = h.state().messages.length;
-
-        const pending = h.sendPending('第二轮提问');
-        const out = await h.state().actions.runScriptNow('s1');
-
-        assert(out.includes('正在运行'), `运行中应拒绝，实际 ${out}`);
-        assert(h.state().messages.length >= before, '运行中的手动执行不得追加消息');
-        assert(h.state().scripts[0].lastResult === undefined, '运行中的手动执行不得记账');
-
-        release();
-        await pending;
     });
 
     /* --------------------------- 提示词：行为约束 --------------------------- */
@@ -2781,15 +2420,15 @@ const run = async () => {
         assert(/不要同时给/.test(section), '必须声明 tool 与 final 互斥（同时给时 final 被忽略）');
     });
 
-    await check('工具说明：全小写匹配、update 动作、导航归一都有交代', async () => {
+    await check('工具说明：全小写匹配、沙箱动作、导航归一都有交代', async () => {
         const src = ALL_SRC;
         const at = src.indexOf('## 可用工具定义');
         assert(at > 0, '应有「可用工具定义」一节');
         const spec = src.slice(at, src.indexOf('## 执行准则', at));
         assert(/全小写/.test(spec), '必须声明全小写严格匹配（写错名字第一步就暴露）');
-        assert(/"action": "update"/.test(spec), 'script_store 的 update 必须写进说明，否则模型永远用 delete+save 两步');
+        assert(/"action": "exec"/.test(spec), 'sandbox 的 exec 必须写进说明，否则模型只会 write 不会跑');
         assert(/相对路径/.test(spec), 'navigate 的相对路径必须写进说明');
-        assert(/子串/.test(spec), 'script_store 的 url_pattern 子串语义必须点明');
+        assert(/子串/.test(spec), 'tamper 的 url_pattern 子串语义必须点明');
         assert(/"op": "set" \| "delete"/.test(spec), 'tamper 的 op 必须写进说明（删字段用 delete，不许猜）');
     });
 

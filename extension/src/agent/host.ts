@@ -14,7 +14,7 @@ import type { CookieItem, HeaderRule, TamperRule } from '../../../shared/meta';
  * "Agent 跑在什么环境里"这件事渗进业务逻辑**，而它本来只该是一个接口问题。
  *
  * 所以把差异收进这一个接口：引擎不认识 webview、不认识 tabId、不认识
- * chrome.*，只认识"执行一段代码""导航到某个地址""页面就绪了"。
+ * chrome.*，只认识"执行一段代码""导航到某个地址"。
  *
  * ## 与 AgentDeps 的对应关系
  *
@@ -23,7 +23,7 @@ import type { CookieItem, HeaderRule, TamperRule } from '../../../shared/meta';
  * | `getActiveWebview()` | `activeTab()` | 浏览器里没有"当前 webview"，只有 tabId + URL |
  * | `webview.executeJavaScript()` | `evaluate()` | 宿主是 chrome.debugger，见 page-host |
  * | `webview.loadURL()` | `navigate()` | 同上 |
- * | `onPageReady()` | `onPageReady()` | 语义相同，事件源从 webview 换成 webNavigation |
+ * | `onPageReady()` | —（已删） | 唯一的订阅者是"URL 命中自动跑脚本"，那套机制已移除；页面就绪等待收进宿主自己的 `navigate()` |
  * | `tamper` | `tamper` | 语义相同，实现换到插件侧 |
  *
  * ## 所有成员都是必填的
@@ -61,8 +61,6 @@ export interface AgentHost {
     evaluate: (tabId: number, code: string) => Promise<EvaluateResult>;
     /** 导航并等页面就绪。返回最终地址 */
     navigate: (tabId: number, url: string) => Promise<{ url: string; loaded: boolean }>;
-    /** 页面就绪广播。返回退订函数 */
-    onPageReady: (cb: (tabId: number, url: string) => void) => () => void;
 
     /** 读页面的 localStorage / sessionStorage 原文 */
     readWebStorage: (tabId: number, area: 'local' | 'session') => Promise<string>;

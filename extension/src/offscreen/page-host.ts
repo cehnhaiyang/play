@@ -46,7 +46,7 @@ const attached = new Map<number, Promise<void>>();
  * 页面导航监听者。
  *
  * `chrome.webNavigation.onCompleted` 是 SW 侧的事件，而这里要把它转成
- * "某个 tabId 就绪了"的回调 —— 引擎的 `onPageReady` 就是这个形状。
+ * "某个 tabId 就绪了"的回调，供 `waitForReady` 结束导航等待。
  */
 const readyListeners = new Set<(tabId: number, url: string) => void>();
 
@@ -384,13 +384,6 @@ export const pageHost: AgentHost = {
         }
         const loaded = await ready;
         return { url, loaded };
-    },
-
-    onPageReady: (cb) => {
-        readyListeners.add(cb);
-        return () => {
-            readyListeners.delete(cb);
-        };
     },
 
     readWebStorage,

@@ -464,17 +464,13 @@ export interface ParsedAiBook {
 /**
  * Agent 可调用的工具名（全小写，严格匹配）。
  *
- * `js` 是执行器（在页面主世界跑一段脚本），`script_store` 管脚本的持久化
- * （列出 / 保存 / 更新 / 删除）；两者分开是因为“跑一次”与“存下来复用”是
- * 两件不同的事， prompt 里各占一条，模型不会把它们搞混。
- *
- * 后四个是把**用户手动面板里的能力**开放给模型：导航、拦截规则、存储、令牌。
+ * `js` 是执行器（在页面主世界跑一段脚本），`navigate` 换页，后四个把**用户手动
+ * 面板里的能力**开放给模型：拦截规则、存储、令牌、本机沙箱。
  * 规则类能力必须在引擎层生效（钩子装在页面主世界，脚本只能影响自己
  * 那一次调用），存储类能力必须走原生 API（Cookie 在渲染进程里读不到 HttpOnly）。
  */
 export type AgentToolName =
     | 'js'
-    | 'script_store'
     | 'navigate'
     | 'tamper'
     | 'storage'
@@ -541,15 +537,6 @@ export interface SandboxResult {
 }
 
 /**
- * 一条工具消息的来源：谁让它跑的。
- *
- * 两个值对模型有实质区别，不是同义标签：
- * - `auto`：urlPattern 命中，页面就绪时自动跑的（副作用，该当背景）
- * - `manual`：用户在脚本页亲手点的「运行」（刚验证过这段脚本，是有效信号）
- */
-export type AgentMessageOrigin = 'auto' | 'manual';
-
-/**
  * 对话流里的一条消息。
  *
  * 这里不复用 AiChatMessage：那条是发给模型的协议消息，
@@ -562,7 +549,7 @@ export interface AgentMessage {
      * 正文。
      *
      * 助手轮次是它说的话（或界面补的提示，见 notice）；工具消息是这一步做了什么
-     * —— 模型发起的调用写 thought，环境事件（见 origin）写脚本名。
+     * —— 模型发起的调用写 thought。
      */
     content: string;
     /**
@@ -587,22 +574,12 @@ export interface AgentMessage {
     /** 工具消息：调用的工具名 */
     tool?: AgentToolName;
     /**
-     * 工具消息：工具名 + 动作（如 script_store·save）。
+     * 工具消息：工具名 + 动作（如 sandbox·write）。
      *
-     * 重建模型上下文时要用它：只写 "script_store" 的话，「列清单 / 存脚本 /
-     * 改脚本 / 删脚本」在历史里长得一模一样，模型看不出自己上一轮到底做过哪一件。
+     * 重建模型上下文时要用它：只写 "sandbox" 的话，「列目录 / 读文件 / 写文件 /
+     * 跑命令」在历史里长得一模一样，模型看不出自己上一轮到底做过哪一件。
      */
     label?: string;
-    /**
-     * 工具消息：这条**不是模型发出的调用**，而是脚本被跑了一次；值即来源
-     * （见 {@link AgentMessageOrigin}）。缺省即模型自己发起的调用。
-     *
-     * 两个消费者都只读这一个字段，不从 label 或正文里各猜一次：
-     *  - 重建上下文（buildTranscript）—— 写成「工具 X 的执行结果」等于凭空捏造
-     *    一次模型从未发出的调用，它会以为自己已经跑过那段脚本；
-     *  - 界面角标 —— 从别处猜的话，「谁按的」与「哪来的」会各说一套。
-     */
-    origin?: AgentMessageOrigin;
     /** 工具消息：执行的脚本源码（供界面展开查看） */
     script?: string;
     /** 工具消息：是否执行成功 */
@@ -623,27 +600,6 @@ export interface AgentMessage {
      */
     compaction?: AgentCompaction;
     at: number;
-}
-
-/**
- * 保存下来的脚本。
- *
- * `urlPattern` 非空时，页面 dom-ready 且 URL 命中即自动执行 ——
- * 这一步复用 AgentDeps.onPageReady 的广播，不需要另挂监听。
- */
-export interface AgentScript {
-    id: string;
-    name: string;
-    /** 用途说明，会进系统提示词帮模型挑选 */
-    description: string;
-    code: string;
-    /** URL 子串匹配；空串表示只在对话中被显式调用 */
-    urlPattern: string;
-    enabled: boolean;
-    /** 最近一次执行时间（含自动执行） */
-    lastRunAt?: number;
-    /** 最近一次执行结果（已截断，供界面显示） */
-    lastResult?: string;
 }
 
 /** Agent 循环的运行状态 */

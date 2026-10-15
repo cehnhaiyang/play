@@ -136,10 +136,7 @@ export type AgentAction =
     | { type: 'compact' }
     | { type: 'set-compact-ratio'; ratio: number }
     | { type: 'remove-message'; id: string }
-    | { type: 'rewind'; id: string }
-    | { type: 'run-script'; id: string }
-    | { type: 'remove-script'; id: string }
-    | { type: 'toggle-script'; id: string };
+    | { type: 'rewind'; id: string };
 
 export type BallRequest =
     | { target: 'sw'; kind: 'sniffer-get-state' }
@@ -199,14 +196,6 @@ export type BallRequest =
      * 必须经 SW 中转：`chrome.offscreen` 不在 content script 可见的 API 集合里。
      */
     | { target: 'sw'; kind: 'host-ensure' }
-    /**
-     * 直接执行一段脚本，不走引擎的主循环。
-     *
-     * 给"手动运行一条已保存脚本"用：它不属于任何一次模型调用，走 dispatchTool
-     * 反而会被 busy 闸门挡住。串行化仍由引擎的队列保证。
-     */
-    | { target: 'sw'; kind: 'page-eval'; tabId: number; code: string }
-    | { target: 'sw'; kind: 'page-navigate'; tabId: number; url: string }
     | { target: 'sw'; kind: 'cookies-get'; url: string }
     | { target: 'sw'; kind: 'cookies-set'; url: string; name: string; value: string }
     | { target: 'sw'; kind: 'cookies-remove'; url: string; name: string }
@@ -241,7 +230,7 @@ export type BallEvent =
     | { target: 'ball'; kind: 'sniffed-media'; item: SniffedMedia }
     /** 标签页被打开 / 关闭 / 换了地址或标题 —— 球据此刷新标签栏 */
     | { target: 'ball'; kind: 'tabs-changed' }
-    /** 引擎快照（消息、脚本、状态） */
+    /** 引擎快照（消息与状态） */
     | { target: 'ball'; kind: 'agent-snapshot'; snapshot: unknown }
     /** 流式增量。整个快照太大，逐字重发不现实 */
     | { target: 'ball'; kind: 'agent-delta'; delta: { content?: string; reasoning?: string } };

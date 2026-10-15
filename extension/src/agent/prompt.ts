@@ -64,9 +64,6 @@ export const EXEC_TIMEOUT_MS = 60000;
  */
 export const REASONING_LIMIT_BYTES = 32768;
 
-export const SCRIPTS_STORE_KEY = 'agent-scripts';
-export const SCRIPTS_STORE_MAX = 100;
-
 export const MESSAGES_STORE_KEY = 'agent-messages';
 export const MESSAGES_STORE_MAX = 200;
 
@@ -75,11 +72,10 @@ export const MESSAGES_STORE_MAX = 200;
  *
  * `chrome.storage.local` 的配额比 localStorage 宽（默认 10MB，`unlimitedStorage`
  * 后无上限），但**条数上限挡不住体积**：一条消息最多 32KB，200 条就是 6.3MB，
- * 加上脚本能把默认配额顶穿，写入失败时界面只表现为"历史不再保存"。
+ * 能把默认配额顶穿，写入失败时界面只表现为"历史不再保存"。
  * 所以按**字节**收敛，条数上限只作附加保护。
  */
 export const STORE_BUDGET_MESSAGES = 1_500_000;
-export const STORE_BUDGET_SCRIPTS = 800_000;
 
 /**
  * 上下文硬门槛（token）。达到或超过即**强制压缩**：输入框禁用，不压不能继续。
@@ -99,7 +95,7 @@ export const CONTEXT_LIMIT_TOKENS = 800_000;
  * 100 条消息时四档分别覆盖前 40 / 60 / 80 / 100 条，剩下的原样保留。
  * 100% 即全压 —— 上下文只剩一条摘要，直到新消息进来。
  *
- * 为什么是条数而不是轮次：轮次边界只有一个（新的用户提问），自动脚本、
+ * 为什么是条数而不是轮次：轮次边界只有一个（新的用户提问），工具观察、
  * 提示横幅这些非轮次消息会让"保留 N 轮"实际保留的条数飘忽不定；
  * 条数是用户唯一能数的东西。
  */
@@ -146,7 +142,7 @@ export const COMPACT_PREFIX = '[上下文压缩摘要]';
  *    拼写摆在模型面前，而不是靠容错去兜。
  *  - **数字一律插值**：条数上限、字节上限这些值会随实现变，手抄进提示词必然过期，
  *    而模型会照着过期的上限规划步骤。
- *  - **前缀逐字对齐实现**：`## 对话历史` 那节声明的四个前缀由 transcript 的
+ *  - **前缀逐字对齐实现**：`## 对话历史` 那节声明的三个前缀由 transcript 的
  *    roundToMessages 真正写出，两处分别在两个文件里，改一处忘另一处不会有任何
  *    编译或运行时错误。
  */
@@ -162,7 +158,7 @@ export const SYSTEM_PROMPT = `
   落地的产物（还原出的算法、跑出来的数据、分析报告）都写在这里，比只写在回复里可靠。
 
 ## 对话历史
-你**能看到之前几轮的对话与工具结果**，它们按前缀区分来源：[工具 X 的执行结果] 是你自己调用工具拿到的观察，[自动脚本「…」…] 是页面自动执行留下的环境事件（不是你调用的），[用户手动执行了脚本「…」] 是用户自己点按钮跑的一次（同样不是你调用的，但它说明用户刚亲手确认过这段脚本），[系统提示] 是界面补的、不是你说过的话，[协议错误] 是你上一条回复没按协议输出时系统的回执。别把后四者当成自己的结论。
+你**能看到之前几轮的对话与工具结果**，它们按前缀区分来源：[工具 X 的执行结果] 是你自己调用工具拿到的观察，[系统提示] 是界面补的、不是你说过的话，[协议错误] 是你上一条回复没按协议输出时系统的回执。别把后两者当成自己的结论。
 
 ## 输出协议（严格执行）
 只输出单个合法的 JSON 对象，禁止输出 Markdown 围栏代码块（禁止使用 \`\`\`json）：
@@ -192,7 +188,7 @@ export const SYSTEM_PROMPT = `
    args: {"url": "https://... 或相对路径"}
    - 页面加载完毕后返回最终规范化 URL。
 
-4. tamper —— 引擎级网络与响应篡改（持久化影响页面逻辑必用此工具）
+3. tamper —— 引擎级网络与响应篡改（持久化影响页面逻辑必用此工具）
    args: {"action": "get"} 
       或 {"action": "set", "intercept": [...], "request": [...], "headers": [...]}
    - intercept/request 规则项：
@@ -202,21 +198,21 @@ export const SYSTEM_PROMPT = `
      {"enabled": true, "url_pattern": "*", "name": "Header-Name", "value": "值(留空则为删除该头)"}
    - 核心原则：修改页面接收的数据必须用此工具，不能仅用 js 工具局部修改。
 
-5. storage —— 底层存储与 Cookie 管理（绕过篡改引擎读写真实物理数据）
+4. storage —— 底层存储与 Cookie 管理（绕过篡改引擎读写真实物理数据）
    args:
    - 读取: {"action": "get", "area": "local" | "session" | "cookie"}
    - 写入: {"action": "set", "area": "local" | "session" | "cookie", "key": "键名", "value": "字符串值"}
    - 删除: {"action": "delete", "area": "local" | "session" | "cookie", "key": "键名"}
    注：Cookie 的 key 必须严格使用 get 返回的唯一标识（常含 domain/path）。
 
-6. tokens —— JWT 令牌分析与改写
+5. tokens —— JWT 令牌分析与改写
    args:
    - 检索全部 JWT: {"action": "find"}
    - 解码单条: {"action": "decode", "token": "eyJ..."}
    - 改写并写回: {"action": "rewrite", "token": "...", "changes": {"key": val}, "area": "local", "key": "find返回的key"}
    注：改写 Payload 会使原始服务端签名失效。
 
-7. sandbox —— 本机沙箱：读写文件与执行指令
+6. sandbox —— 本机沙箱：读写文件与执行指令
    args（action 全小写，可用 ${SANDBOX_ACTIONS.join(' / ')}）:
    - 列目录: {"action": "list", "path": "out"}
    - 读文件: {"action": "read", "path": "out/notes.md"}
@@ -293,7 +289,7 @@ export const COMPACT_SYSTEM_PROMPT = `你是一个对话压缩器。把给定的
 已经**验证过**的结论，每条注明来源（哪个接口 / 哪个存储键 / 哪段脚本的返回值）。
 
 ## 已完成的操作
-改动了什么、在哪一层生效（引擎规则 / 脚本 / 存储 / 页面）。含保存下来的脚本名与用途。
+改动了什么、在哪一层生效（引擎规则 / 脚本 / 存储 / 页面）。含写进沙箱的文件路径。
 
 ## 试过但失败的路
 失败的做法与**失败原因**。这一节最容易被忽略但最值钱 —— 不写清楚，

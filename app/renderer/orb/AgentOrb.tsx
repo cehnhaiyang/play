@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { AgentMessage, AgentScript, AgentUsage, HeaderRule, TamperRule } from '../../../shared/meta';
+import type { AgentMessage, AgentUsage, HeaderRule, TamperRule } from '../../../shared/meta';
 import { exportAgentSession } from '../../../shared/core';
 import { OrbShell } from './OrbShell';
 import { TerminalIcon } from './icons';
@@ -51,14 +51,10 @@ const COMPACT_RATIOS = [0.4, 0.6, 0.8, 1] as const;
  * `agent-delta` 用来让文字实时滚起来，`agent-snapshot` 才是真值。所以每收到
  * 一次快照就丢掉本地累积的增量 —— 两者叠加会让文字重复一遍。
  *
- * ## 六个页签
+ * ## 五个页签
  *
- * 「对话」「规则」「请求头」「存储」「JWT」「脚本」。后五个不是装饰：
+ * 「对话」「规则」「请求头」「存储」「JWT」。后四个不是装饰：
  *
- *  · **脚本**：`script_store` 工具能让模型存下脚本并按 URL 自动执行，而
- *    **只有这个界面能让人看见存了什么、改掉它、或者停掉它**。没有它的话，
- *    模型偷偷装上一个每次打开某站点就自动跑的脚本，用户无从知晓 ——
- *    那既是能力缺失也是安全问题。
  *  · **规则 / 请求头**：模型改的规则立刻生效但不落盘，用户必须能看见它改了什么，
  *    并且能自己写规则（不是所有篡改都值得让模型代劳）。
  *  · **存储 / JWT**：Agent 改页面时最常问的两个问题 —— "这个值到底存在哪"、
@@ -67,8 +63,8 @@ const COMPACT_RATIOS = [0.4, 0.6, 0.8, 1] as const;
  * 页签清单与 `新建文件夹/BrowsePanel.tsx` 的 `AGENT_TABS` 一致。
  */
 
-/** 页签清单。顺序即显示顺序：对话在最前，脚本在最后（它是低频的审阅页） */
-type AgentTab = 'chat' | 'rules' | 'headers' | 'storage' | 'jwt' | 'scripts';
+/** 页签清单。顺序即显示顺序：对话在最前，JWT 在最后 */
+type AgentTab = 'chat' | 'rules' | 'headers' | 'storage' | 'jwt';
 
 const AGENT_TABS: { id: AgentTab; label: string }[] = [
     { id: 'chat', label: '对话' },
@@ -76,7 +72,6 @@ const AGENT_TABS: { id: AgentTab; label: string }[] = [
     { id: 'headers', label: '请求头' },
     { id: 'storage', label: '存储' },
     { id: 'jwt', label: 'JWT' },
-    { id: 'scripts', label: '脚本' },
 ];
 
 export const AgentOrb = () => {
@@ -248,13 +243,12 @@ export const AgentOrb = () => {
     const state = snapshot;
     const busy = state?.status !== 'idle';
     const messages = state?.messages || [];
-    const scripts = state?.scripts || [];
     const canEdit = state?.canEdit !== false && !busy;
 
     /*
      * 页签条。
      *
-     * 放在**标题栏下面**而不是塞进标题栏：标题栏只有 440px 宽，六个页签加上
+     * 放在**标题栏下面**而不是塞进标题栏：标题栏只有 440px 宽，五个页签加上
      * 停止/清空/收起会全部挤成单字。独立一行还能给每个页签足够的点击面积。
      */
     const tabBar = (
@@ -271,7 +265,6 @@ export const AgentOrb = () => {
                     }`}
                 >
                     {entry.label}
-                    {entry.id === 'scripts' && scripts.length > 0 ? ` ${scripts.length}` : ''}
                 </button>
             ))}
         </nav>
@@ -341,16 +334,6 @@ export const AgentOrb = () => {
             )}
 
             {tabBar}
-
-            {tab === 'scripts' && (
-                <ScriptList
-                    scripts={scripts}
-                    busy={busy}
-                    onToggle={(id) => void act({ type: 'toggle-script', id })}
-                    onRun={(id) => void act({ type: 'run-script', id })}
-                    onRemove={(id) => void act({ type: 'remove-script', id })}
-                />
-            )}
 
             {tab === 'rules' && (
                 <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
@@ -434,8 +417,8 @@ export const AgentOrb = () => {
                     <div className="shrink-0 border-t border-white/10 p-2">
                         {/*
                           次要动作放在输入框上方，不占标题栏。
-                          标题栏只有 440px 宽，塞进「脚本 / 停止 / 压缩 / 导出 /
-                          简洁 / 清空 / 收起」七个按钮会把标签挤到看不见。
+                          标题栏只有 440px 宽，塞进「停止 / 压缩 / 导出 /
+                          简洁 / 清空 / 收起」六个按钮会把标签挤到看不见。
                         */}
                         <div className="mb-1.5 flex items-center gap-2 px-0.5">
                             <button
@@ -580,9 +563,7 @@ const MessageRow = ({
         return message.ok === false ? 'text-rose-300' : 'text-emerald-300';
     }, [message]);
 
-    const badge = message.origin
-        ? message.origin === 'manual' ? '手动' : '自动'
-        : message.label || message.tool || message.role;
+    const badge = message.label || message.tool || message.role;
 
     /*
      * 折叠长结果。
@@ -682,134 +663,6 @@ const MessageRow = ({
                 </pre>
             )}
         </li>
-    );
-};
-
-/* ========================================================================== */
-/* 脚本页                                                                      */
-/* ========================================================================== */
-
-/**
- * 脚本清单。
- *
- * ## 为什么这个页面必须存在
- *
- * `script_store` 工具让**模型自己**存脚本，而 `urlPattern` 非空的脚本会在
- * 页面就绪时自动执行 —— 也就是说模型可以装上一个"每次打开某站点就自动跑"
- * 的东西。用户必须能看见它、停掉它、删掉它。没有这个页面，那件事就是
- * 完全隐形的，而这既是能力缺失也是安全问题。
- *
- * ## 为什么没有"新建"按钮
- *
- * 脚本由模型写（它才有页面上下文去验证选择器）。手工从零写一段要在页面里跑的
- * 代码，在球这个 440×640 的窗口里做不了，做了也是个更差的编辑器。
- * 用户能做的是**审阅、启停、立刻跑一次、删掉** —— 那正是这里提供的四件事。
- */
-const ScriptList = ({
-    scripts,
-    busy,
-    onToggle,
-    onRun,
-    onRemove,
-}: {
-    scripts: AgentScript[];
-    busy: boolean;
-    onToggle: (id: string) => void;
-    onRun: (id: string) => void;
-    onRemove: (id: string) => void;
-}) => {
-    const [expanded, setExpanded] = useState('');
-
-    if (scripts.length === 0) {
-        return (
-            <p className="p-4 text-[11px] leading-relaxed text-slate-500">
-                还没有保存的脚本。模型可以用 <code className="font-mono">script_store</code> 把
-                验证过的代码存下来，填了 URL 匹配的脚本会在页面打开时自动执行 ——
-                存下来的东西都会出现在这里。
-            </p>
-        );
-    }
-
-    return (
-        <div className="min-h-0 flex-1 overflow-y-auto">
-            <ul className="divide-y divide-white/5">
-                {scripts.map((script) => (
-                    <li key={script.id} className="px-3 py-2">
-                        <div className="flex items-center gap-1.5">
-                            {/*
-                              启停开关。自动执行的脚本靠它停 —— 删掉是另一个决定
-                              （下次还想跑就得让模型重写一遍），所以两者分开。
-                            */}
-                            <button
-                                type="button"
-                                onClick={() => onToggle(script.id)}
-                                disabled={busy}
-                                title={script.enabled ? '已启用：URL 命中时自动执行' : '已停用'}
-                                className={`h-3.5 w-6 shrink-0 rounded-full transition disabled:opacity-40 ${
-                                    script.enabled ? 'bg-emerald-500/70' : 'bg-white/15'
-                                }`}
-                            >
-                                <span
-                                    className={`block h-2.5 w-2.5 rounded-full bg-white transition ${
-                                        script.enabled ? 'translate-x-3' : 'translate-x-0.5'
-                                    }`}
-                                />
-                            </button>
-                            <span className="min-w-0 flex-1 truncate text-[11px] text-slate-200" title={script.description}>
-                                {script.name}
-                            </span>
-                            <button
-                                type="button"
-                                onClick={() => onRun(script.id)}
-                                disabled={busy}
-                                title="立刻在当前页面跑一次，结果会进对话"
-                                className="shrink-0 text-[9px] text-slate-500 transition hover:text-emerald-300 disabled:opacity-30"
-                            >
-                                运行
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => onRemove(script.id)}
-                                disabled={busy}
-                                className="shrink-0 text-[9px] text-slate-500 transition hover:text-rose-300 disabled:opacity-30"
-                            >
-                                删除
-                            </button>
-                        </div>
-
-                        {script.urlPattern && (
-                            <div className="mt-0.5 truncate font-mono text-[9px] text-slate-600" title={script.urlPattern}>
-                                匹配 {script.urlPattern}
-                            </div>
-                        )}
-                        {script.description && (
-                            <div className="mt-0.5 text-[9px] leading-relaxed text-slate-500">
-                                {script.description}
-                            </div>
-                        )}
-
-                        <button
-                            type="button"
-                            onClick={() => setExpanded((v) => (v === script.id ? '' : script.id))}
-                            className="mt-0.5 text-[9px] text-slate-500 hover:text-slate-300"
-                        >
-                            {expanded === script.id ? '收起代码' : '查看代码'}
-                        </button>
-                        {expanded === script.id && (
-                            <pre className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap break-words rounded bg-white/[0.03] p-1.5 font-mono text-[9px] leading-relaxed text-slate-400">
-                                {script.code}
-                            </pre>
-                        )}
-
-                        {script.lastResult && (
-                            <div className="mt-1 truncate font-mono text-[9px] text-slate-600" title={script.lastResult}>
-                                上次：{script.lastResult.slice(0, 120)}
-                            </div>
-                        )}
-                    </li>
-                ))}
-            </ul>
-        </div>
     );
 };
 

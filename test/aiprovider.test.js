@@ -35,18 +35,21 @@ const run = () => {
   const { AI_PROVIDERS, DEFAULT_AI_CONFIG, resolveReasoningEffort, findAiModelPreset, findAiProvider, getModelPresets } = aiService;
 
   const byId = (id) => AI_PROVIDERS.find((p) => p.id === id);
-  const TC = byId('tc2api').baseUrl;
+  // 按地址而不是按 id 取「默认配置所属的服务商」：服务商 id 会被改名
+  // （tc2api 早先就叫 agent2api），地址与模型表才是这份契约里不变的东西。
+  const TC = DEFAULT_AI_CONFIG.baseUrl;
   const GCLI = byId('ofm').baseUrl;
   const A2A = byId('agent2api').baseUrl;
 
   /* ------------------------------ 服务商表 ------------------------------ */
 
-  check('服务商表: agent2api 的地址、密钥与模型符合约定', () => {
+  check('服务商表: agent2api 的地址与密钥符合约定', () => {
     const p = byId('agent2api');
     assert(p, 'AI_PROVIDERS 里应有 agent2api');
     assert.strictEqual(p.baseUrl, 'http://127.0.0.1:3065/v1', '地址应是本地 3065 的 /v1');
     assert(p.apiKey.startsWith('sk-a2a-'), `密钥应是 agent2api 的默认密钥，实际前缀 "${p.apiKey.slice(0, 6)}"`);
-    assert.strictEqual(p.models[0].id, 'LongCat-2.0', '默认模型应是 LongCat-2.0');
+    // models[0] 是什么不再这里钉死：它是"套用预设时的默认值"，由下面那条同源检查
+    // 与 DEFAULT_AI_CONFIG 对齐，模型表换名字那次就是这么漏过去的。
   });
 
   check('服务商表: LongCat-2.0 声明没有思考配置', () => {
@@ -95,10 +98,35 @@ const run = () => {
       '调用方传 max 时仍下发了参数——LongCat-2.0 会被这个值带偏');
   });
 
-  check('映射: 认思考的模型保持原档位（现有行为不变）', () => {
-    for (const tier of ['low', 'high', 'max']) {
-      assert.strictEqual(wire(TC, 'global:deepseek-v4.1-flash', tier), tier, `tc2api ${tier} 应原值下发`);
-      assert.strictEqual(wire(TC, 'global:glm-5.2', tier), tier, `tc2api glm ${tier} 应原值下发`);
+  /**
+   * efforts 这条分支：预设备选表里**当前没有任何模型声明 efforts**（都是 reasoning:false
+   * 或"需要思考、原值下发"），所以走真实表数据永远测不到它。
+   *
+   * 但不能就这么跳过：这条分支一旦坏掉，表现为"该改写的档位被原样发下去"，
+   * 界面还照样显示改写后的值，属于静默错。这里用一条临时注册的服务商来钉它 ——
+   * findAiProvider 是查 AI_PROVIDERS 的，所以注册后必须还原，否则污染后续用例。
+   */
+  check('映射: 模型自己声明的 efforts 改写档位（预设备选表里暂无此例，临时注册）', () => {
+    const base = 'http://127.0.0.1:29999/v1';
+    AI_PROVIDERS.push({
+      id: '__efforts_probe__',
+      label: 'probe',
+      note: 'test only',
+      baseUrl: base,
+      apiKey: 'x',
+      models: [{ id: 'probe-model', efforts: { low: 'low-probe', high: 'high-probe', max: 'max-probe' } }],
+    });
+    try {
+      const wireEff = (tier) => resolveReasoningEffort({ baseUrl: base, apiKey: 'x', model: 'probe-model', ...(tier ? { reasoningEffort: tier } : {}) });
+      assert.strictEqual(wireEff('low'), 'low-probe', 'low 应被改写成模型认的写法');
+      assert.strictEqual(wireEff('high'), 'high-probe', 'high 应被改写成模型认的写法');
+      assert.strictEqual(wireEff('max'), 'max-probe', 'max 应被改写成模型认的写法');
+      assert.strictEqual(wireEff('mid'), 'mid', '映射表没覆盖的档位按原值下发');
+      assert.strictEqual(wireEff(undefined), undefined, '没有档位就是不下发');
+    } finally {
+      const i = AI_PROVIDERS.findIndex((p) => p.id === '__efforts_probe__');
+      assert(i >= 0, '探针服务商应还在表里，否则上面的断言测的是空气');
+      AI_PROVIDERS.splice(i, 1);
     }
   });
 
@@ -138,13 +166,15 @@ const run = () => {
    * 原先这里把三个候选 id 逐个抄进断言，模型表一改就必然过期 ——
    * 而它要钉的从来不是"表里有哪几个名字"，是"默认配置与候选表同源"。
    */
-  check('候选: tc2api 的首个候选与默认配置同源，且默认模型在预设表内', () => {
+  check('映射: 默认配置里的模型名与地址必须在预设表里查得到', () => {
     const ids = getModelPresets(TC).map((m) => m.id);
-    assert(ids.length > 0, 'tc2api 应有模型候选');
+    assert(ids.length > 0, `默认服务商（${TC}）应有模型候选`);
+    assert(ids[0] !== undefined, '候选表为空');
     assert.strictEqual(ids[0], DEFAULT_AI_CONFIG.model,
       `首个候选应与默认配置的模型一致，实际 ${ids[0]} vs ${DEFAULT_AI_CONFIG.model}`);
     assert(findAiModelPreset(TC, DEFAULT_AI_CONFIG.model),
       `默认模型 ${DEFAULT_AI_CONFIG.model} 必须在预设表里，否则档位映射会静默失效`);
+    assert.strictEqual(TC, A2A, '默认配置应指向预设表里的服务商，否则这条同源检查名存实亡');
   });
 
   console.log(`AI 服务商与档位映射：通过 ${passed} 项，失败 ${failed} 项`);

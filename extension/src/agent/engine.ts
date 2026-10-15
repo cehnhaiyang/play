@@ -1,9 +1,7 @@
 import type {
     AgentCompaction,
     AgentMessage,
-    AgentMessageOrigin,
     AgentRunStatus,
-    AgentScript,
     AgentState,
     AgentToolName,
     AgentUsage,
@@ -26,18 +24,13 @@ import {
     MAX_PROTOCOL_ERRORS,
     MESSAGES_STORE_KEY,
     MESSAGES_STORE_MAX,
-    SCRIPTS_STORE_KEY,
-    SCRIPTS_STORE_MAX,
     STORE_BUDGET_MESSAGES,
-    STORE_BUDGET_SCRIPTS,
     SYSTEM_PROMPT,
     compactCoverCount,
     contextFullMessage,
     contextTokensOf,
 } from './prompt';
 import {
-    AUTO_RUN_PREFIX,
-    MANUAL_RUN_PREFIX,
     PROTOCOL_ERROR_LABEL,
     buildTranscript,
     insertAfterId,
@@ -49,7 +42,6 @@ import {
 import { asString, errorText, keepReasoning, trimToBudget } from './text';
 import { buildScriptSource, extractJsonObject, isJsErrorResult } from './parse';
 import { dispatchTool } from './tools';
-import type { ScriptStore } from './tools';
 
 /**
  * Agent 引擎。
@@ -147,7 +139,6 @@ export class AgentEngine {
     private readonly options: EngineOptions;
 
     private messages: AgentMessage[] = [];
-    private scripts: AgentScript[] = [];
     private status: AgentRunStatus = 'idle';
     private error = '';
     private streaming: { content: string; reasoning: string } | null = null;
@@ -162,10 +153,9 @@ export class AgentEngine {
     /**
      * 脚本执行的串行队列。
      *
-     * 模型步骤与自动脚本都会进这里，而 `Runtime.evaluate` 的并发语义不可靠：
-     * 两段脚本交错读页面时，双方看到的都是对方改了一半的状态。串行后"谁先谁后"
-     * 有明确顺序，排查时能复现。队列自身吞掉异常 —— 某一次失败不能把排在后面的
-     * 全部卡死。
+     * `Runtime.evaluate` 的并发语义不可靠：两段脚本交错读页面时，双方看到的都是
+     * 对方改了一半的状态。串行后"谁先谁后"有明确顺序，排查时能复现。
+     * 队列自身吞掉异常 —— 某一次失败不能把排在后面的全部卡死。
      */
     private execChain: Promise<unknown> = Promise.resolve();
 
@@ -179,17 +169,12 @@ export class AgentEngine {
 
     /** 从存储恢复。构造之后必须先 await 它，否则第一次快照是空的 */
     async hydrate(): Promise<void> {
-        const [messages, scripts, ratio] = await Promise.all([
+        const [messages, ratio] = await Promise.all([
             this.options.storage.load<AgentMessage[]>(MESSAGES_STORE_KEY, []),
-            this.options.storage.load<unknown[]>(SCRIPTS_STORE_KEY, []),
             this.options.storage.load<number>(COMPACT_RATIO_STORE_KEY, COMPACT_RATIO_DEFAULT),
         ]);
 
         this.messages = Array.isArray(messages) ? messages : [];
-        this.scripts = (Array.isArray(scripts) ? scripts : [])
-            .map(normalizeScript)
-            .filter((s): s is AgentScript => !!s)
-            .slice(-SCRIPTS_STORE_MAX);
         this.compactRatio = (COMPACT_RATIOS as readonly number[]).includes(ratio)
             ? ratio
             : COMPACT_RATIO_DEFAULT;
@@ -202,7 +187,6 @@ export class AgentEngine {
         const usage: AgentUsage = sumUsage(this.messages, contextTokens);
         return {
             messages: this.messages,
-            scripts: this.scripts,
             status: this.status,
             error: this.error,
             streaming: this.streaming,
@@ -220,9 +204,6 @@ export class AgentEngine {
                 rewindTo: (id) => this.rewindTo(id),
                 compact: () => this.compact(),
                 setCompactRatio: (ratio) => this.setCompactRatio(ratio),
-                runScriptNow: (id) => this.runScriptNow(id),
-                removeScript: (id) => this.removeScript(id),
-                toggleScript: (id) => this.toggleScript(id),
             },
             revision: this.revision,
         };
@@ -246,40 +227,13 @@ export class AgentEngine {
      */
     private persist(): void {
         const messages = trimToBudget(this.messages, STORE_BUDGET_MESSAGES).slice(-MESSAGES_STORE_MAX);
-        const scripts = trimToBudget(this.scripts, STORE_BUDGET_SCRIPTS);
         void this.options.storage.save(MESSAGES_STORE_KEY, messages).catch(() => undefined);
-        void this.options.storage.save(SCRIPTS_STORE_KEY, scripts).catch(() => undefined);
     }
 
     private appendMessage(message: AgentMessage): void {
         this.messages = [...this.messages, message];
         this.persist();
         this.emit();
-    }
-
-    /* ---------------------------------------------------------------------- */
-    /* 脚本清单（工具层的读写口）                                               */
-    /* ---------------------------------------------------------------------- */
-
-    private scriptStore(): ScriptStore {
-        return {
-            list: () => this.scripts,
-            add: (script) => {
-                this.scripts = [...this.scripts, script].slice(-SCRIPTS_STORE_MAX);
-                this.persist();
-                this.emit();
-            },
-            update: (id, patch) => {
-                this.scripts = this.scripts.map((s) => (s.id === id ? { ...s, ...patch } : s));
-                this.persist();
-                this.emit();
-            },
-            remove: (id) => {
-                this.scripts = this.scripts.filter((s) => s.id !== id);
-                this.persist();
-                this.emit();
-            },
-        };
     }
 
     /* ---------------------------------------------------------------------- */
@@ -561,7 +515,6 @@ export class AgentEngine {
                 try {
                     result = await dispatchTool(tool, args, {
                         host: this.options.host,
-                        scripts: this.scriptStore(),
                         exec: (code) => this.execActive(code),
                         sandbox: this.options.sandbox,
                     });
@@ -575,11 +528,9 @@ export class AgentEngine {
                 protocolErrors = 0;
 
                 // 日志只写工具名会分不清模型做的是哪件事
-                // （列清单 / 存脚本 / 改脚本 / 删脚本都是 "script_store"；
-                //  读写删跑命令都是 "sandbox"）。
+                // （读写删跑命令都是 "sandbox"）。
                 const rawAction = asString(args.action);
-                const needsAction = tool === 'script_store' || tool === 'sandbox';
-                const label = needsAction && rawAction ? `${tool}·${rawAction}` : tool;
+                const label = tool === 'sandbox' && rawAction ? `${tool}·${rawAction}` : tool;
 
                 /**
                  * 失败判据按工具分岔，因为"什么算失败"对两者本就不同：
@@ -595,7 +546,7 @@ export class AgentEngine {
                     reasoning: keepReasoning(liveReasoning),
                     tool,
                     // 显示文案会被 thought 顶掉，而 label 是**稳定**的那一份：重建上下文时
-                    // 若只按 tool 写回，模型在历史里看不出这一步做的是列清单还是存脚本。
+                    // 若只按 tool 写回，模型在历史里看不出这一步做的是读文件还是跑命令。
                     label,
                     // js 跑的源码存下来供界面展开查看；其它工具没有源码。
                     script: tool === 'js' ? asString(args.code) : undefined,
@@ -797,97 +748,6 @@ export class AgentEngine {
             this.emit();
         }
     }
-
-    /* ---------------------------------------------------------------------- */
-    /* 脚本执行                                                                */
-    /* ---------------------------------------------------------------------- */
-
-    /**
-     * 记一次脚本执行：更新卡片上的"最近执行"，并往对话流里落一条环境事件消息。
-     *
-     * **两个触发入口共用这一个记账点**（手动点运行 / urlPattern 自动执行）。
-     * 分开写两份的后果不是"重复代码"那么轻：两份里任何一份漏掉 lastResult，
-     * 用户就会看到"点了运行但卡片上没痕迹"，而另一份是好的。
-     */
-    private recordScriptRun(script: AgentScript, result: string, origin: AgentMessageOrigin): void {
-        this.scripts = this.scripts.map((s) => (
-            s.id === script.id ? { ...s, lastRunAt: Date.now(), lastResult: result } : s
-        ));
-        this.appendMessage({
-            id: generateId(),
-            role: 'tool',
-            content: `${origin === 'manual' ? MANUAL_RUN_PREFIX : AUTO_RUN_PREFIX}${script.name}`,
-            tool: 'js',
-            // label 只说"做了什么"，来源由 origin 表达：两处都写来源时，
-            // 界面的「自动」角标会和 label 里的「自动」叠成"自动·js·自动·x"
-            label: `js·${script.name}`,
-            // 环境事件：不属于任何一次模型调用，重建上下文时不能伪造成工具调用
-            origin,
-            script: script.code,
-            ok: !isJsErrorResult(result),
-            result,
-            at: Date.now(),
-        });
-    }
-
-    /**
-     * 手动执行一条已保存脚本。
-     *
-     * 运行中拒绝：主循环正拿着页面跑模型的步骤，此刻手动执行会与它的下一步交错
-     * 读页面，两边看到的状态互相污染。规则与改历史一致。
-     */
-    private async runScriptNow(id: string): Promise<string> {
-        if (this.busy) return JSON.stringify({ error: 'Agent 正在运行，先停止再手动执行' });
-        const script = this.scripts.find((s) => s.id === id);
-        if (!script) return JSON.stringify({ error: '脚本不存在（可能已被删除）' });
-        const result = await this.execActive(script.code);
-        this.recordScriptRun(script, result, 'manual');
-        return result;
-    }
-
-    private removeScript(id: string): void {
-        this.scripts = this.scripts.filter((s) => s.id !== id);
-        this.persist();
-        this.emit();
-    }
-
-    private toggleScript(id: string): void {
-        this.scripts = this.scripts.map((s) => (s.id === id ? { ...s, enabled: !s.enabled } : s));
-        this.persist();
-        this.emit();
-    }
-
-    /**
-     * 直接执行一段脚本，不走主循环。
-     *
-     * 给"手动运行一条已保存脚本"用：它不属于任何一次模型调用，走 dispatchTool
-     * 反而会被 busy 闸门挡住。串行化仍由同一个队列保证 —— 这正是它必须留在
-     * 引擎上的原因：换一条路径执行就等于绕开了"模型步骤与手动执行不交错"。
-     */
-    execForScript(tabId: number, code: string): Promise<string> {
-        return this.execOnPage(tabId, code);
-    }
-
-    /** 直接导航。理由同上：脚本页的跳转也要走引擎的页面宿主 */
-    async navigateForScript(tabId: number, url: string): Promise<{ url: string; loaded: boolean }> {
-        return this.options.host.navigate(tabId, url);
-    }
-
-    /**
-     * 页面就绪时跑一遍命中的脚本。
-     *
-     * 并发由 execOnPage 内的串行队列消化：模型步骤与自动脚本不会交错读页面，
-     * 这里不需要再判 busy 而跳过 —— 跳过会漏掉命中的自动化，而排队只是晚一点跑。
-     */
-    async onPageReady(tabId: number, url: string): Promise<void> {
-        if (!url) return;
-        const hits = this.scripts.filter((s) => s.enabled && s.urlPattern && url.includes(s.urlPattern));
-        if (hits.length === 0) return;
-        for (const script of hits) {
-            const result = await this.execOnPage(tabId, script.code);
-            this.recordScriptRun(script, result, 'auto');
-        }
-    }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -918,21 +778,4 @@ const toChatMessage = (message: AgentMessage): { role: 'user' | 'assistant'; con
     if (message.role === 'assistant') return { role: 'assistant', content: message.content };
     const label = message.label || message.tool || '工具';
     return { role: 'user', content: `[工具 ${label}]\n${message.result || message.content}` };
-};
-
-/** 把落盘数据收敛成合法脚本。坏数据丢掉而不是猜 */
-const normalizeScript = (raw: unknown): AgentScript | null => {
-    if (!raw || typeof raw !== 'object') return null;
-    const item = raw as Partial<AgentScript>;
-    if (typeof item.code !== 'string' || !item.code.trim()) return null;
-    return {
-        id: typeof item.id === 'string' && item.id ? item.id : generateId(),
-        name: (typeof item.name === 'string' && item.name.trim()) || '未命名脚本',
-        description: asString(item.description),
-        code: item.code,
-        urlPattern: asString(item.urlPattern),
-        enabled: item.enabled !== false,
-        lastRunAt: typeof item.lastRunAt === 'number' ? item.lastRunAt : undefined,
-        lastResult: typeof item.lastResult === 'string' ? item.lastResult : undefined,
-    };
 };

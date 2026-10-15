@@ -1,5 +1,4 @@
 import type {
-    AgentScript,
     AgentToolName,
     CookieItem,
     HeaderRule,
@@ -18,12 +17,11 @@ import {
     rewriteJwtPayload,
 } from '../../../shared/core';
 import type { AgentHost } from './host';
-import { SCRIPTS_STORE_MAX } from './prompt';
 import { asString, errorText } from './text';
 import { isJsErrorResult, safeParseObject } from './parse';
 
 /**
- * 七个工具的派发。
+ * 六个工具的派发。
  *
  * ## 为什么从 hook 里搬出来
  *
@@ -38,17 +36,8 @@ import { isJsErrorResult, safeParseObject } from './parse';
  * 能让模型少走一整步。改动这些措辞时要知道它们在影响模型行为。
  */
 
-/** 脚本清单的读写口。由引擎注入，工具层不持有真值 */
-export interface ScriptStore {
-    list: () => AgentScript[];
-    add: (script: AgentScript) => void;
-    update: (id: string, patch: Partial<AgentScript>) => void;
-    remove: (id: string) => void;
-}
-
 export interface ToolContext {
     host: AgentHost;
-    scripts: ScriptStore;
     /** 在页面里执行代码（走引擎的串行队列，不与模型的其它步骤交错） */
     exec: (code: string) => Promise<string>;
     /**
@@ -220,81 +209,6 @@ export const dispatchTool = async (
                 return JSON.stringify({ error: '缺少 code（要运行的 JS，必须显式 return 一个可序列化值）' });
             }
             return ctx.exec(code);
-        }
-
-        /**
-         * script_store —— 脚本的持久化管理（列出 / 保存 / 更新 / 删除）。
-         *
-         * 与 js 分开：一个管"跑一次"，一个管"存下来复用"。动作全小写严格匹配。
-         */
-        case 'script_store': {
-            const action = asString(args.action);
-
-            if (action === 'list') {
-                return JSON.stringify(ctx.scripts.list().map((s) => ({
-                    id: s.id, name: s.name, description: s.description,
-                    url_pattern: s.urlPattern, enabled: s.enabled,
-                })));
-            }
-
-            if (action === 'save') {
-                const code = asString(args.code);
-                if (!code.trim()) return JSON.stringify({ error: '缺少 code' });
-                if (ctx.scripts.list().length >= SCRIPTS_STORE_MAX) {
-                    // 满了就明说，不能静默丢弃：原先 slice(0, MAX) 砍掉的正是刚加进去的
-                    // 那一条（在数组末尾），却仍回 {saved:true}，模型会一直找不到它。
-                    return JSON.stringify({
-                        error: `脚本数量已达上限 ${SCRIPTS_STORE_MAX}，请先用 script_store 的 delete 删掉不用的`,
-                    });
-                }
-                const script: AgentScript = {
-                    id: generateId(),
-                    name: asString(args.name) || '未命名脚本',
-                    description: asString(args.description),
-                    code,
-                    urlPattern: asString(args.url_pattern),
-                    enabled: true,
-                };
-                ctx.scripts.add(script);
-                return JSON.stringify({ saved: true, id: script.id, name: script.name });
-            }
-
-            /**
-             * 按 id 部分更新：只改传了的字段，其余保留。
-             *
-             * 没有它时模型改脚本要走 delete+save 两步 —— 中间那一步清单里就没有这个脚本，
-             * 若 delete 成功而 save 的 code 恰好写错，等于亲手删掉了原来能跑的版本。
-             */
-            if (action === 'update') {
-                const id = asString(args.id);
-                const existing = ctx.scripts.list().find((s) => s.id === id);
-                if (!existing) {
-                    return JSON.stringify({ error: `找不到脚本 ${id}（id 从 list 的返回里取）` });
-                }
-                if (args.code !== undefined) {
-                    const code = asString(args.code);
-                    if (!code.trim()) return JSON.stringify({ error: 'code 传了就不能为空（不想改就别传这个字段）' });
-                }
-                ctx.scripts.update(id, {
-                    ...(typeof args.name === 'string' ? { name: args.name || '未命名脚本' } : {}),
-                    ...(typeof args.description === 'string' ? { description: args.description } : {}),
-                    ...(typeof args.code === 'string' ? { code: args.code } : {}),
-                    ...(typeof args.url_pattern === 'string' ? { urlPattern: args.url_pattern } : {}),
-                    ...(typeof args.enabled === 'boolean' ? { enabled: args.enabled } : {}),
-                });
-                return JSON.stringify({ updated: true, id });
-            }
-
-            if (action === 'delete') {
-                const id = asString(args.id);
-                if (!ctx.scripts.list().some((s) => s.id === id)) {
-                    return JSON.stringify({ error: `找不到脚本 ${id}` });
-                }
-                ctx.scripts.remove(id);
-                return JSON.stringify({ deleted: true, id });
-            }
-
-            return JSON.stringify({ error: unknownActionError(action, ['list', 'save', 'update', 'delete']) });
         }
 
         case 'navigate': {
@@ -621,7 +535,7 @@ export const dispatchTool = async (
          *
          * ## 为什么只有这里能碰磁盘
          *
-         * 前六个工具的作用域都在浏览器里（页面、存储、规则、令牌）。本机文件系统与
+         * 前五个工具的作用域都在浏览器里（页面、存储、规则、令牌）。本机文件系统与
          * 子进程两者都不属于扩展的能力范围，必须过桥交给应用（归属见
          * `shared/meta/bridge.ts` 的 `sandbox`）。工具层因此**不自己拼路径**：
          * 沙箱根的边界由执行者守，发起方声明"我没越界"不作数。

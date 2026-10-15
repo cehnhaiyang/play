@@ -29,7 +29,7 @@ export { COMPACT_PREFIX };
  *
  * ## 措辞必须逐字共用
  *
- * 三种非工具调用（协议错误 / 环境事件 / 普通工具结果）各有专属文案函数。
+ * 两种非工具调用（协议错误 / 普通工具结果）各有专属文案函数。
  * 它们与主循环当场回灌的那一份**逐字共用**，不在这里各写一遍：同一段历史在
  * "本轮循环里"与"下一轮重建时"长得不一样的话，模型对"这一步到底错在哪"的判断
  * 会随轮次漂移。
@@ -42,8 +42,8 @@ export { COMPACT_PREFIX };
  * 档位切片，切在轮次中间是允许的 —— roundToMessages 对任意消息列表都能转，
  * 按轮对齐反而会让"压前 40%"这种承诺无法兑现。
  *
- * 首条消息就是工具消息时（页面自动执行脚本，用户还没提问过），它自成一轮而不是
- * 被丢掉：那段环境事件确实发生过，模型应当知道。
+ * 首条消息就是工具消息时（上一轮结束时还有观察没被 flush，用户没再提问），它自成一轮而不是
+ * 被丢掉：那一步确实发生过，模型应当知道。
  */
 export const splitRounds = (messages: AgentMessage[]): AgentMessage[][] => {
     const rounds: AgentMessage[][] = [];
@@ -86,45 +86,6 @@ export const protocolErrorObservation = (reply: string): string =>
     + 'args.code 是 JSON 字符串：里面的换行必须写成 \\n、引号必须写成 \\"，'
     + '直接粘多行 JS 会破坏 JSON 解析。'
     + `\n\n你上一条回复的原文：\n${reply}`;
-
-/**
- * 环境事件消息的正文前缀。
- *
- * **只用于拼给人看的正文与从中剥回脚本名，不用于判断来源** —— 来源是 origin 字段。
- * 用正文前缀判来源等于给同一个事实留第二个真值：前缀改字时构造侧照样能拼出来，
- * 判断侧却会静默失配。
- */
-export const AUTO_RUN_PREFIX = '自动执行：';
-export const MANUAL_RUN_PREFIX = '手动执行：';
-
-/**
- * 环境事件里那条消息的脚本名。
- *
- * 正文写成 `<前缀><脚本名>`，所以剥前缀就能取回名字。剥不掉时原样返回：
- * 那种情况说明正文不是由本模块构造的（手改过的落盘数据），把整段当名字至少
- * 还能看出发生过什么，而截断或猜一个空名会把事实抹掉。
- */
-export const scriptNameOf = (message: AgentMessage): string => {
-    const prefix = message.origin === 'manual' ? MANUAL_RUN_PREFIX : AUTO_RUN_PREFIX;
-    return message.content.startsWith(prefix)
-        ? message.content.slice(prefix.length)
-        : message.content;
-};
-
-/**
- * 环境事件的回灌文案：**只由这一个函数产出**。
- *
- * 自动执行与手动执行共用 `origin` 标记（都不是模型发出的调用），但对模型来说
- * "谁按的"这件事有实质区别：前者是 URL 命中的副作用，后者是用户刚亲手验证过
- * 这个脚本 —— 前者该被当成背景，后者是一条有用的信号。
- */
-export const environmentEventObservation = (message: AgentMessage): string => {
-    const name = scriptNameOf(message);
-    const result = message.result || '(无返回值)';
-    return message.origin === 'manual'
-        ? `[用户手动执行了脚本「${name}」]\n${result}`
-        : `[自动脚本「${name}」已在页面上执行]\n${result}`;
-};
 
 /**
  * 工具观察的回灌文案：**只由这一个函数产出**。
@@ -185,11 +146,7 @@ export const roundToMessages = (round: AgentMessage[]): AiChatMessage[] => {
         }
 
         if (message.result || message.content) {
-            // 脚本执行不是模型的调用，写成「工具结果」会凭空捏造一次调用；
-            // 但它确实改变了页面，所以作为一条**环境事件**如实告知。
-            if (message.origin) {
-                observations.push(environmentEventObservation(message));
-            } else if (message.label === PROTOCOL_ERROR_LABEL) {
+            if (message.label === PROTOCOL_ERROR_LABEL) {
                 observations.push(protocolErrorObservation(message.result || ''));
             } else {
                 observations.push(toolObservation(
