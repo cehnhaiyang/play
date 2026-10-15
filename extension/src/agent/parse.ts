@@ -6,7 +6,7 @@
  * 成败判据写错 → 一次成功的数据探测被标成失败，模型对着成功结果修 bug。
  */
 
-import { errorText } from './text';
+import { asString, errorText } from './text';
 
 /**
  * 回复不合协议时的**具体**原因。
@@ -26,7 +26,15 @@ export type ReplyProblem =
     | { kind: 'truncated'; detail: string }
     /** 括号闭合了但 JSON.parse 报错 */
     | { kind: 'badJson'; detail: string }
-    /** JSON 合法，但顶级字段里没有 tool 也没有 final */
+    /**
+     * 顶层有 `calls`，但里面**一项可执行的调用都没有**。
+     *
+     * 与 noTool 分开是必须的：那种情况下"没有 calls 也没有 final"是**自相矛盾**的
+     * 说法（诊断同时把 calls 列进了"顶层实际有的键"），模型照着一句错话去改，
+     * 只会把已经写对的字段名再改一遍。
+     */
+    | { kind: 'badCalls'; detail: string }
+    /** JSON 合法，顶层字段里既没有 calls 也没有 final */
     | { kind: 'noTool'; keys: string };
 
 /**
@@ -54,6 +62,30 @@ export const diagnoseReply = (text: string): ReplyProblem => {
     try {
         const parsed = JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>;
         const keys = parsed && typeof parsed === 'object' ? Object.keys(parsed) : [];
+
+        /*
+         * calls 存在但一项都执行不了 —— 单列一种错法。
+         *
+         * 落到 noTool 的话回灌文案会说"没有 calls 也没有 final"，而同一句里
+         * 又把 calls 列为"顶层实际有的键"：模型读到一句自相矛盾的话，只会去改
+         * 一个本来就写对的字段名。这里直接说清是哪一项坏了。
+         */
+        if ('calls' in parsed && !asString(parsed.final)) {
+            const raw = parsed.calls;
+            if (!Array.isArray(raw)) {
+                return { kind: 'badCalls', detail: `calls 不是数组，而是 ${typeof raw}` };
+            }
+            if (raw.length === 0) {
+                return { kind: 'badCalls', detail: 'calls 是空数组' };
+            }
+            const broken = raw.findIndex((item) => (
+                !item || typeof item !== 'object' || Array.isArray(item) || !asString((item as Record<string, unknown>).tool)
+            ));
+            if (broken >= 0) {
+                return { kind: 'badCalls', detail: `第 ${broken + 1} 项没有 tool 字段（每项都必须写工具名）` };
+            }
+        }
+
         return { kind: 'noTool', keys: keys.length ? keys.join('、') : '(空对象)' };
     } catch (e) {
         /*
@@ -118,8 +150,8 @@ const scanObject = (
 export const extractJsonObject = (text: string): Record<string, unknown> | null => {
     if (!text) return null;
 
-    // 起点全部收集：thought 里花括号再多也不能让外层 JSON 的起点被截掉。
-    // 曾经限制过起点数量，后果是"thought 里示例代码多写几个 { }，真正的调用就解析不到"。
+    // 起点全部收集：intent 或代码里花括号再多也不能让外层 JSON 的起点被截掉。
+    // 曾经限制过起点数量，后果是"回复里示例代码多写几个 { }，真正的调用就解析不到"。
     for (let start = text.indexOf('{'); start >= 0; start = text.indexOf('{', start + 1)) {
         const { end } = scanObject(text, start);
         if (end < 0) continue;
@@ -133,6 +165,69 @@ export const extractJsonObject = (text: string): Record<string, unknown> | null 
         }
     }
     return null;
+};
+
+/**
+ * 一次回复里的工具调用。**唯一权威**是 `calls` 数组。
+ *
+ * 解析与执行都只读这一个字段：另留一条 `{"tool":…,"args":…}` 的单数通道看着
+ * 无害，实际会让"一个回复里到底能发几个调用"有两个答案 —— 主循环读哪个、
+ * 提示词写哪个、历史怎么回放，三处各自漂移，而漂移的症状是**静默丢掉后半批**。
+ * 写错字段名的模型会收到协议错误回执，那比猜它想调什么便宜。
+ */
+export interface AgentCall {
+    tool: string;
+    args: Record<string, unknown>;
+}
+
+/**
+ * 一条回复里最多执行几个工具调用。
+ *
+ * 上限的理由是**成本**：一批的实际代价是各次观察之和，而它们会随后续每一步
+ * 重发。截断而不是报错 —— 前几条通常已经做完了事，丢掉它们等于白跑。
+ *
+ * **权威在本文件**（判据 extractCalls 就在这里），提示词那边 import 它去插值：
+ * 反过来的话 prompt → transcript → parse → prompt 会成环。
+ */
+export const MAX_CALLS_PER_REPLY = 8;
+
+/**
+ * 从回复里取出本批要执行的调用，顺序即模型写的顺序。
+ *
+ * 三条判据各有理由：
+ *  - **坏的一项不拖垮整批**：缺 tool 名的那一项只是被跳过（调用处发现列表为空
+ *    就按协议错误回灌），而不是把已经写对的几项一起丢掉 —— 后者会让模型以为
+ *    "整条回复白写了"，于是把同一批原样再发一次。
+ *  - **args 缺失归一成 `{}`**：工具层对缺参数有自己的错误文案（"缺少 code"
+ *    比"args 不是对象"更能让它一步改对）。
+ *  - **上限 MAX_CALLS_PER_REPLY 条**：一批的实际成本是各次观察之和，而它们会
+ *    随每一步重发。截断而不是报错，是因为前几条通常已经做完了事，丢掉它们
+ *    等于白跑。
+ *
+ * 同时回传 `written`（模型这一批写了几个）—— 截断与跳过都是**静默**的，
+ * 不回传的话模型看到的结果比它写的少，只会以为工具坏了，然后把同一批再发一遍。
+ */
+export const extractCalls = (
+    reply: Record<string, unknown> | null,
+): { calls: AgentCall[]; written: number } => {
+    const raw = reply?.calls;
+    if (!Array.isArray(raw)) return { calls: [], written: 0 };
+
+    const calls: AgentCall[] = [];
+    for (const item of raw.slice(0, MAX_CALLS_PER_REPLY)) {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+        const entry = item as Record<string, unknown>;
+        const tool = asString(entry.tool);
+        if (!tool) continue;
+        const args = entry.args;
+        calls.push({
+            tool,
+            args: args && typeof args === 'object' && !Array.isArray(args)
+                ? (args as Record<string, unknown>)
+                : {},
+        });
+    }
+    return { calls, written: raw.length };
 };
 
 /**

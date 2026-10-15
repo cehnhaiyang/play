@@ -82,6 +82,7 @@ const {
     toolObservation,
 } = TRANSCRIPT;
 const { CONTEXT_LIMIT_TOKENS } = PROMPT;
+const { MAX_CALLS_PER_REPLY } = PARSE;
 
 /** buildDispatch 的默认页面地址。传 false 才表示没有可用页面 */
 const DEFAULT_TAB_URL = 'https://example.com/';
@@ -151,9 +152,9 @@ const buildAgentHarness = async (options = {}) => {
                 // toolCase: 大写让模型回大写工具名，用来验证解析侧的严格匹配
                 // （全小写协议下大写即写错，必须落到未知工具）
                 const toolName = options.toolCase === 'upper' ? 'JS' : 'js';
-                return JSON.stringify({ thought: '取数', tool: toolName, args: { code: 'return 1;' } });
+                return JSON.stringify({ intent: '取数', calls: [{ tool: toolName, args: { code: 'return 1;' } }] });
             }
-            return JSON.stringify({ thought: '答完了', final: `第 ${chats.length} 轮的回答` });
+            return JSON.stringify({ intent: '答完了', final: `第 ${chats.length} 轮的回答` });
         };
 
         // hold：卡住**指定那一轮**（默认第 2 轮），用来观察"运行中"这个中间态。
@@ -1795,36 +1796,37 @@ const run = async () => {
 
         for (const name of declared) {
             assert(toolsSrc.includes(`case '${name}'`), `${name} 在类型里声明了，但 dispatchTool 没有分支`);
-            assert(new RegExp(`\\d\\. ${name} ——`).test(promptSrc), `${name} 没有写进提示词的可用工具定义`);
+            assert(new RegExp(`^${name} — `, 'm').test(promptSrc), `${name} 没有写进提示词的工具定义`);
         }
 
         // 反向：提示词里不得凭空多出没有实现的名字
-        for (const m of promptSrc.matchAll(/^\d\. ([a-z_]+) ——/gm)) {
+        for (const m of promptSrc.matchAll(/^([a-z_]+) — /gm)) {
             assert(declared.includes(m[1]), `提示词声明了 ${m[1]}，但类型与派发里没有它`);
         }
     });
 
     await check('提示词的沙箱说明覆盖新动作与不截断', async () => {
         const src = AGENT_SOURCES.find((s) => s.file === 'prompt.ts').text;
-        const at = src.indexOf('6. sandbox');
+        const at = src.indexOf('sandbox — local sandbox');
         assert(at > 0, '提示词应有 sandbox 一条');
-        const spec = src.slice(at, src.indexOf('## 执行准则', at));
-        assert(/沙箱/.test(spec) && /\.\./.test(spec), '必须写明只能在沙箱内、.. 会被拒');
+        const spec = src.slice(at, src.indexOf('## Working rules', at));
+        // 边界只在 Environment 那节声明一次（两处各写一份就是两个会漂移的来源）
+        assert(/inside it only/.test(src), '必须写明只能在沙箱内');
         /**
          * "改已有文件用 edit，别全量覆盖"是这次的核心约束：不写的话模型仍会
          * read + write 全量重写，那正是要修的行为。
          */
-        assert(/全量覆盖|不要.*write.*覆盖/.test(spec), '必须写明改已有文件用 edit 而不是全量重写');
-        assert(/逐字/.test(spec), 'old 要逐字照抄这一点必须写清（否则模型会随手省略缩进）');
-        assert(/不截断|不限长度/.test(spec), '要说明读写都不截断，否则模型会按旧上限自行拆分');
-        assert(!/exec/.test(spec), '不得再提 exec');
+        assert(/never read \+ full write/.test(spec), '必须写明改已有文件用 edit 而不是全量重写');
+        assert(/verbatim/.test(spec), 'old 要逐字照抄这一点必须写清（否则模型会随手省略缩进）');
+        assert(/Neither read nor write truncates/.test(spec), '要说明读写都不截断，否则模型会按旧上限自行拆分');
+        assert(!/\bexec\b/.test(spec), '不得再提 exec');
         /**
          * node 的三条约束缺一不可：**先写再跑**（它不接收源码）、**不是 shell**
          * （模型最容易顺手传 command）、**非零退出不是失败**（否则它会去改参数）。
          */
-        assert(/先用 write|先.*写好/.test(spec), '必须写明脚本要先 write 再 node');
-        assert(/不是 shell|不接受命令行/.test(spec), '必须写明它不是 shell，免得模型传命令');
-        assert(/不算工具失败|非零退出/.test(spec), '必须说明脚本非零退出不是工具失败');
+        assert(/write it first/.test(spec), '必须写明脚本要先 write 再 node');
+        assert(/no shell/.test(spec), '必须写明它不是 shell，免得模型传命令');
+        assert(/not a tool failure/.test(spec), '必须说明脚本非零退出不是工具失败');
         assert(/\$\{SANDBOX_NODE_TIMEOUT_MAX_MS/.test(src), '超时上限要插值常量，不手抄秒数');
     });
 
@@ -2016,12 +2018,16 @@ const run = async () => {
          *
          * 两者都是 role:'tool'，但协议错误的 label 是 PROTOCOL_ERROR_LABEL 常量，
          * 不是从 action 拼出来的 —— 从第一个 role:'tool' 开始切片会切到它，
-         * 于是这条断言测错了对象。认 content 里的 thought 拼接才是工具调用那条。
+         * 于是这条断言测错了对象。认 content 里的 intent 拼接才是工具调用那条。
          */
-        const at = src.indexOf("content: thought || ");
+        const at = src.indexOf('content: intent');
         assert(at > 0, '应能找到工具消息的构造点');
-        const block = src.slice(at, at + 700);
-        assert(/^\s*label,$/m.test(block),
+        // 从构造点切到这一批的观察回灌为止 —— 只切固定长度会在注释变长后
+        // 把 label 那行挤出窗口，而那时断言报的是"没写 label"，与事实相反。
+        const end = src.indexOf('batchObservation', at);
+        assert(end > at, '应能找到同一批的观察回灌点');
+        const block = src.slice(at, end);
+        assert(/^\s*label: item\.label,$/m.test(block),
             '工具消息必须带 label 字段：历史里只写工具名分不出 sandbox 八个动作');
     });
 
@@ -2074,18 +2080,21 @@ const run = async () => {
     });
 
     /**
-     * 提示词里承诺的三种前缀，必须与 buildTranscript 真正写出的**逐字一致**。
+     * 提示词声明的观察前缀与实现一致。
      *
      * 这两处分别在文件的头尾，改一处忘另一处不会有任何编译或运行时错误 ——
      * 只会让模型去找一个根本不存在的标记，于是"回看历史"这条纪律形同虚设。
+     *
+     * 锚在**英文提示词里那句原话**上：提示词已重写为英文，而前缀本身仍是中文
+     * （它们是实现写出来的字面量）。只锚前缀会失去"这句纪律还在不在"的保障。
      */
     await check('提示词声明的观察前缀与实现一致', async () => {
         const src = ALL_SRC;
 
         // 提示词那一段
-        const specAt = src.indexOf('你**能看到之前几轮的对话与工具结果**');
+        const specAt = src.indexOf('You can see earlier turns and their tool results');
         assert(specAt > 0, '应能在提示词里找到"能看到之前几轮"这条纪律');
-        const spec = src.slice(specAt, specAt + 300);
+        const spec = src.slice(specAt, specAt + 400);
 
         // 实现真正写出的前缀
         const produced = buildTranscript([
@@ -2285,6 +2294,204 @@ const run = async () => {
         assert(tool.result.includes('未知工具'), `应报未知工具，实际 ${tool.result}`);
     });
 
+    /* ---------------------- 一次回复里的多个工具调用 ---------------------- */
+
+    /**
+     * 一次回复里的多个调用必须**全部执行**，并各留一条记录。
+     *
+     * 这是"允许并发工具调用"的实质：只解析第一个的话，模型写对的第二、第三项
+     * 会被静默丢掉 —— 没有报错、没有回执，它只能从"结果里少了两条"去猜，
+     * 而它多半会以为是工具坏了，然后把同一批再发一遍。
+     */
+    await check('一批调用全部执行，逐条留痕并回灌', async () => {
+        const h = await buildAgentHarness({
+            replies: [
+                JSON.stringify({
+                    intent: '一次问三件事',
+                    calls: [
+                        { tool: 'js', args: { code: 'return 1;' } },
+                        { tool: 'sandbox', args: { action: 'list', path: '.' } },
+                        { tool: 'storage', args: { action: 'get', area: 'local' } },
+                    ],
+                }),
+                JSON.stringify({ intent: '答完了', final: '三个都拿到了。' }),
+            ],
+        });
+        await h.send('查一下');
+
+        const tools = h.state().messages.filter((m) => m.role === 'tool');
+        assert(tools.length === 3, `三个调用都该留痕，实际 ${tools.length} 条`);
+        assert(tools.map((m) => m.label).join(',') === 'js,sandbox·list,storage',
+            `记录顺序应与声明顺序一致，实际 ${tools.map((m) => m.label).join(',')}`);
+        assert(tools.every((m) => m.ok === true), '三个都该成功');
+        assert(tools.every((m) => m.content.includes('一次问三件事')),
+            '每条记录都应带这一步的 intent（否则列表上是三条看不出关系的记录）');
+        assert(h.sandboxCalls().length === 1, 'sandbox 端口应被真的调用一次');
+        assert(h.ranCode.length === 1, 'js 应真的执行一次');
+
+        // 回灌给模型的观察：一批一条，且说清这一步有几个结果
+        const wire = h.chats[1];
+        const observation = wire.find((m) => m.content.includes('执行了 3 个调用'));
+        assert(observation, `一批观察必须合成一条并标明批大小，实际：${JSON.stringify(wire)}`);
+        for (const label of ['[工具 js 的执行结果]', '[工具 sandbox·list 的执行结果]', '[工具 storage 的执行结果]']) {
+            assert(observation.content.includes(label), `批观察里应含 ${label}`);
+        }
+    });
+
+    /** 只有一个调用时不加批次头：多数回复只有一个，多一层是纯 token 开销 */
+    await check('单个调用不加批次头（措辞与从前一致）', async () => {
+        const h = await buildAgentHarness({ toolCall: true });
+        await h.send('取一下价格');
+        const observation = h.chats[1].find((m) => m.content.includes('[工具 js 的执行结果]'));
+        assert(observation, '单个调用的观察必须照旧回灌');
+        assert(!observation.content.includes('个调用'),
+            '单个调用不该带批次头 —— 那会让模型以为自己在批量做事');
+    });
+
+    /** 缺 tool 名的项被跳过，同一批里其余各项照跑 */
+    await check('一批里坏掉的一项不拖垮整批', async () => {
+        const h = await buildAgentHarness({
+            replies: [
+                JSON.stringify({
+                    intent: '第二项写漏了工具名',
+                    calls: [
+                        { tool: 'js', args: { code: 'return 1;' } },
+                        { args: { action: 'list' } },
+                    ],
+                }),
+                JSON.stringify({ intent: '收尾', final: '完成' }),
+            ],
+        });
+        await h.send('查一下');
+
+        const tools = h.state().messages.filter((m) => m.role === 'tool');
+        assert(tools.length === 1, `只有写对的那项该执行，实际 ${tools.length} 条`);
+        assert(tools[0].label === 'js', `执行的是写对的那项，实际 ${tools[0].label}`);
+        assert(h.state().messages[h.state().messages.length - 1].content === '完成', '循环应继续到 final');
+
+        /*
+         * 被跳过的那项必须**被说出来**。
+         *
+         * 静默跳过时模型看到的结果比它写的少，而它无从知道少在哪 —— 实测里
+         * 它会把整批原样再发一遍。这条断言认的是"回灌里有没有那个数字"。
+         */
+        const observation = h.chats[1].find((m) => m.content.includes('[工具 js 的执行结果]'));
+        assert(observation && observation.content.includes('写了 2 个调用'),
+            `跳过必须如实说明，实际：${observation && observation.content.slice(0, 120)}`);
+    });
+
+    /** 超过一批上限时截断执行，但同样要说明写了几个 */
+    await check('一批超过上限时截断执行并说明', async () => {
+        const h = await buildAgentHarness({
+            replies: [
+                JSON.stringify({
+                    intent: '一次发太多',
+                    calls: Array.from({ length: MAX_CALLS_PER_REPLY + 2 }, () => ({ tool: 'js', args: { code: 'return 1;' } })),
+                }),
+                JSON.stringify({ intent: '收尾', final: '完成' }),
+            ],
+        });
+        await h.send('查一下');
+
+        const tools = h.state().messages.filter((m) => m.role === 'tool');
+        eq(tools.length, MAX_CALLS_PER_REPLY,
+            `执行条数应被上限截断，实际 ${tools.length}`);
+        const observation = h.chats[1].find((m) => m.content.includes('[工具 js 的执行结果]'));
+        assert(observation && observation.content.includes(`写了 ${MAX_CALLS_PER_REPLY + 2} 个调用`),
+            `截断必须如实说明写了几个，实际：${observation && observation.content.slice(0, 120)}`);
+    });
+
+    /** calls 为空数组等同没给调用：不能当成"它说完了"，要走协议错误回灌 */
+    await check('calls 为空数组按协议错误处置', async () => {
+        const h = await buildAgentHarness({
+            replies: [
+                JSON.stringify({ intent: '我打算这么做', calls: [] }),
+                JSON.stringify({ intent: '收到', final: '真的结论' }),
+            ],
+        });
+        await h.send('看看');
+
+        const bad = h.state().messages.find((m) => m.label === '协议错误');
+        assert(bad, '空 calls 应回灌协议错误，而不是被当成收尾');
+        const fix = h.chats[1].find((m) => m.content.includes('[协议错误]'));
+        assert(fix && fix.content.includes('calls'), '回灌文案要点名 calls 字段');
+        assert(h.state().messages[h.state().messages.length - 1].content === '真的结论',
+            '回灌之后应能走到模型的 final');
+    });
+
+    /**
+     * 一批里的用量只记一次。
+     *
+     * 用量是用户拿来核账单的数：一批挂 N 份，累计就把**一次**调用算成 N 次，
+     * 而界面上每一份看起来都"有出处"，对不上时无从解释。
+     */
+    await check('一批调用的用量只记在第一条上', async () => {
+        const h = await buildAgentHarness({
+            replies: [
+                JSON.stringify({
+                    intent: '并行两件',
+                    calls: [
+                        { tool: 'js', args: { code: 'return 1;' } },
+                        { tool: 'js', args: { code: 'return 2;' } },
+                    ],
+                }),
+                JSON.stringify({ intent: '收尾', final: '完成' }),
+            ],
+        });
+        await h.send('查一下');
+
+        const tools = h.state().messages.filter((m) => m.role === 'tool');
+        assert(tools.length === 2, `两个调用都该执行，实际 ${tools.length} 条`);
+        assert(tools.filter((m) => m.usage).length === 1,
+            '一批只该有一条带用量，否则累计会把一次调用算成两次');
+        const st = h.state();
+        const sum = st.messages.reduce((s, m) => s + (m.usage ? m.usage.totalTokens : 0), 0);
+        assert(st.usage.totalTokens === sum,
+            `累计必须等于各条之和，实际 ${st.usage.totalTokens} vs ${sum}`);
+    });
+
+    /**
+     * 多调用的解析判据本身。
+     *
+     * 直接调 extractCalls 而不是只跑端到端：端到端能证明"这条路径通了"，
+     * 证明不了边界（上限、args 缺失、非数组），而那些边界正是模型真会踩的。
+     */
+    await check('extractCalls 的边界', async () => {
+        eq(PARSE.extractCalls(null).calls.length, 0, '没有回复时应返回空');
+        eq(PARSE.extractCalls({ final: 'x' }).calls.length, 0, '只给 final 时应返回空');
+        eq(PARSE.extractCalls({ calls: 'js' }).calls.length, 0, 'calls 不是数组时应返回空');
+
+        const one = PARSE.extractCalls({ calls: [{ tool: 'js', args: { code: 'return 1;' } }] });
+        eq(one.calls.length, 1, '单项数组应解析出一项');
+        eq(one.calls[0].tool, 'js', '工具名应原样保留（不做大小写归一）');
+        eq(one.calls[0].args.code, 'return 1;', 'args 应原样带出');
+        eq(one.written, 1, 'written 应报出模型这一批写了几个');
+
+        // args 缺失归一成空对象：工具层对缺参数有自己的错误文案，比"args 不是对象"更能改对
+        const noArgs = PARSE.extractCalls({ calls: [{ tool: 'js' }] });
+        eq(Object.keys(noArgs.calls[0].args).length, 0, 'args 缺失时应归一成空对象');
+        eq(PARSE.extractCalls({ calls: [{ tool: 'js', args: [1, 2] }] }).calls[0].args.code, undefined,
+            'args 是数组时同样归一成空对象');
+
+        /*
+         * 上限与 written 是一对：截断执行，但**报出模型写了几个**。
+         *
+         * 只截断不报数时，模型看到的结果比它写的少而没有任何解释 —— 它会以为
+         * 工具坏了，然后把同一批原样再发一遍。
+         */
+        const many = PARSE.extractCalls({
+            calls: Array.from({ length: 20 }, () => ({ tool: 'js', args: {} })),
+        });
+        eq(many.calls.length, MAX_CALLS_PER_REPLY,
+            `一批的条数必须有上限（各次观察都会随每一步重发），实际 ${many.calls.length}`);
+        eq(many.written, 20, 'written 必须报原始条数，截断才不是静默的');
+
+        // 缺 tool 名的项被跳过，但同样计入 written
+        const skipped = PARSE.extractCalls({ calls: [{ tool: 'js', args: {} }, { args: {} }] });
+        eq(skipped.calls.length, 1, '缺 tool 名的项应被跳过');
+        eq(skipped.written, 2, '被跳过的那项也要计入 written');
+    });
+
     /* ---------------------- 删除单条 / 回退到检查点 ---------------------- */
 
     /**
@@ -2477,8 +2684,8 @@ const run = async () => {
         const h = await buildAgentHarness({
             webview: false,
             replies: [
-                JSON.stringify({ thought: '取数', tool: 'js', args: { action: 'R', code: 'return 1;' } }),
-                JSON.stringify({ thought: '页面不可用，直接给结论', final: '拿不到页面数据。' }),
+                JSON.stringify({ intent: '取数', calls: [{ tool: 'js', args: { action: 'R', code: 'return 1;' } }] }),
+                JSON.stringify({ intent: '页面不可用，直接给结论', final: '拿不到页面数据。' }),
             ],
         });
         await h.send('取一下');
@@ -2500,7 +2707,7 @@ const run = async () => {
         const h = await buildAgentHarness({
             replies: [
                 '我先看看页面结构，稍等。',                       // 散文，没有 JSON
-                JSON.stringify({ thought: '收到', final: '真正的结论' }),
+                JSON.stringify({ intent: '收到', final: '真正的结论' }),
             ],
         });
         await h.send('看看');
@@ -2511,7 +2718,7 @@ const run = async () => {
         const wire = h.chats[1];
         const fix = wire.find((m) => m.content.includes('[协议错误]'));
         assert(fix, `应回灌协议错误提示，实际：${JSON.stringify(wire)}`);
-        assert(fix.content.includes('tool'), '提示里必须说明要用 tool / final 字段');
+        assert(fix.content.includes('calls'), '提示里必须说明要用 calls / final 字段');
         assert(fix.content.includes('我先看看页面结构'),
             '必须带上模型原文，否则它不知道自己错在哪');
 
@@ -2634,40 +2841,64 @@ const run = async () => {
             '整条回复没有 { 时应判 noJson');
 
         // 在字符串中间断掉 —— 与导出件里那三次失败逐字同形
-        eq(PARSE.diagnoseReply('{"thought":"x","tool":"js","args":{"code":"return 1').kind, 'truncated',
+        eq(PARSE.diagnoseReply('{"intent":"x","calls":[{"tool":"js","args":{"code":"return 1').kind, 'truncated',
             'JSON 没闭合时应判 truncated');
         // 括号闭合了但语法坏：少一个逗号
-        eq(PARSE.diagnoseReply('{"thought":"a" "tool":"js"}').kind, 'badJson',
+        eq(PARSE.diagnoseReply('{"intent":"a" "calls":[]}').kind, 'badJson',
             '括号闭合但解析失败时应判 badJson');
-        // 合法 JSON，但没有 tool 也没有 final
-        const noTool = PARSE.diagnoseReply('{"thought":"我打算这么做"}');
-        eq(noTool.kind, 'noTool', '缺少 tool / final 时应判 noTool');
-        assert(noTool.keys.includes('thought'), `应报出顶层实际有哪些键，实际 ${noTool.keys}`);
+        // 合法 JSON，但没有 calls 也没有 final
+        const noTool = PARSE.diagnoseReply('{"intent":"我打算这么做"}');
+        eq(noTool.kind, 'noTool', '缺少 calls / final 时应判 noTool');
+        assert(noTool.keys.includes('intent'), `应报出顶层实际有哪些键，实际 ${noTool.keys}`);
+
+        /*
+         * calls 在、但一项都执行不了 —— 必须与 noTool 分开。
+         *
+         * 归到 noTool 时回灌会说"没有 calls 也没有 final"，而同一句里又把 calls
+         * 列进"顶层实际有的键"：模型读到的是一句自相矛盾的话，只会去改一个
+         * 本来就写对的字段名。
+         */
+        const empty = PARSE.diagnoseReply('{"intent":"x","calls":[]}');
+        eq(empty.kind, 'badCalls', 'calls 是空数组时应判 badCalls');
+        const notArray = PARSE.diagnoseReply('{"intent":"x","calls":"js"}');
+        eq(notArray.kind, 'badCalls', 'calls 不是数组时应判 badCalls');
+        assert(notArray.detail.includes('不是数组'), `要点明类型不对，实际 ${notArray.detail}`);
+        const noName = PARSE.diagnoseReply('{"intent":"x","calls":[{"args":{}}]}');
+        eq(noName.kind, 'badCalls', 'calls 里某项缺 tool 时应判 badCalls');
+        assert(noName.detail.includes('第 1 项'), `要点明是第几项，实际 ${noName.detail}`);
+
+        // 有 final 时 calls 坏掉不算协议错误：收尾是明确意图，工具那部分被忽略
+        eq(PARSE.diagnoseReply('{"intent":"x","calls":[],"final":"结论"}').kind, 'noTool',
+            '带 final 的回复不该被判成 badCalls（它已经明确收尾）');
 
         // 语法错的诊断必须带**位置**，否则模型只能重读整段代码
-        const bad = PARSE.diagnoseReply('{"thought":"a" "tool":"js"}');
+        const bad = PARSE.diagnoseReply('{"intent":"a" "calls":[]}');
         assert(/position \d+/.test(bad.detail), `语法错要带出错位置，实际 ${bad.detail}`);
     });
 
     /** 四种错法的回灌文案必须互不相同，且截断那一路要明说"拆小" */
     await check('协议错误：回灌文案按错法分岔', async () => {
-        const truncated = protocolErrorObservation('{"thought":"x","code":"return 1');
+        const truncated = protocolErrorObservation('{"intent":"x","code":"return 1');
         const prose = protocolErrorObservation('我直接说了一句话');
-        const missing = protocolErrorObservation('{"thought":"x"}');
+        const missing = protocolErrorObservation('{"intent":"x"}');
+        const badCalls = protocolErrorObservation('{"intent":"x","calls":[]}');
 
-        assert(truncated !== prose && prose !== missing && truncated !== missing,
+        assert(new Set([truncated, prose, missing, badCalls]).size === 4,
             '不同错法的回灌文案不得相同 —— 相同等于没诊断');
         assert(truncated.includes('截断'), `截断那一路要明说是截断，实际 ${truncated.slice(0, 120)}`);
         assert(truncated.includes('拆'), '截断那一路要给出"把这一步拆小"的动作');
         assert(prose.includes('没有') && prose.includes('{'), '散文那一路要点明没有 JSON 对象');
-        assert(missing.includes('tool') && missing.includes('final'), '缺字段那一路要点名缺的是哪两个');
+        assert(missing.includes('calls') && missing.includes('final'), '缺字段那一路要点名缺的是哪两个');
+        assert(badCalls.includes('空数组'), `calls 坏掉那一路要说清坏在哪，实际 ${badCalls.slice(0, 160)}`);
+        assert(badCalls.includes('tool'), 'calls 坏掉那一路要给出改法（每项都要有 tool）');
+        assert(!badCalls.includes('没有 calls'), 'calls 坏掉时不得说"没有 calls"（自相矛盾）');
         // 三路都必须仍带原文：模型自查靠它
         assert(truncated.includes('你上一条回复的原文'), '回灌必须附原文');
     });
 
     /** 界面上那条记录只给一行结论，不贴原文（原文动辄几千字，会把对话流冲垮） */
     await check('协议错误：界面摘要是单行且不含原文', async () => {
-        const reply = `{"thought":"x","tool":"js","args":{"code":"${'a'.repeat(3000)}`;
+        const reply = `{"intent":"x","calls":[{"tool":"js","args":{"code":"${'a'.repeat(3000)}`;
         const summary = TRANSCRIPT.protocolErrorSummary(reply);
         assert(!summary.includes('\n'), '界面摘要必须是一行');
         assert(summary.length < 200, `界面摘要要短，实际 ${summary.length} 字符`);
@@ -2730,9 +2961,9 @@ const run = async () => {
         const h = await buildAgentHarness({
             replies: [
                 '第一次写错',                                     // 协议错误 1
-                JSON.stringify({ thought: '改好了', tool: 'js', args: { action: 'R', code: 'return 1;' } }),
+                JSON.stringify({ intent: '改好了', calls: [{ tool: 'js', args: { action: 'R', code: 'return 1;' } }] }),
                 '又写错了',                                       // 若没归零，这次就该触发上限
-                JSON.stringify({ thought: '收到', final: '结束' }),
+                JSON.stringify({ intent: '收到', final: '结束' }),
             ],
         });
         await h.send('看看');
@@ -2755,8 +2986,8 @@ const run = async () => {
         const h = await buildAgentHarness({
             throwOnBridge: true,
             replies: [
-                JSON.stringify({ thought: '读存储', tool: 'storage', args: { action: 'get', area: 'local' } }),
-                JSON.stringify({ thought: '桥断了，改用页面脚本', final: '存储读不到。' }),
+                JSON.stringify({ intent: '读存储', calls: [{ tool: 'storage', args: { action: 'get', area: 'local' } }] }),
+                JSON.stringify({ intent: '桥断了，改用页面脚本', final: '存储读不到。' }),
             ],
         });
         await h.send('读一下本地存储');
@@ -2802,22 +3033,25 @@ const run = async () => {
     /* --------------------------- 提示词：行为约束 --------------------------- */
 
     /**
-     * 方法论约束写漏了不会有任何编译或运行时错误 —— 只会让模型
-     * 退回"给概念解释、靠猜下结论、含糊收尾"的默认姿态。所以在这里钉住
-     * 新提示词里实际存在的等价表述，而不是已删掉的旧小节名。
+     * 行为约束写漏了不会有任何编译或运行时错误 —— 只会让模型
+     * 退回"给概念解释、靠猜下结论、含糊收尾"的默认姿态。
+     *
+     * 提示词是英文的，所以断言的是英文原句。锚在**措辞**上而不是小节名：
+     * 小节名会随重写变，而这五条要求本身就是产品行为。
      */
-    await check('提示词含行为约束（假设 / 证据 / 交付）', async () => {
+    await check('提示词含行为约束（证据 / 复现 / 交付 / 换路）', async () => {
         const src = ALL_SRC;
-        // thought 字段的写法即工作方式：先假设、再给证据链
-        assert(src.includes('假设或判断依据'), '工具调用的 thought 应要求写假设或判断依据');
-        assert(src.includes('推导与证据链'), '收尾的 thought 应要求写推导与证据链');
-        const at = src.indexOf('## 执行准则');
-        assert(at > 0, '应有「执行准则」一节');
-        const section = src.slice(at, src.indexOf('`;', at));
-        assert(section.includes('证据'), '结论必须有证据支撑');
-        assert(/实际采样值/.test(section), '提取数据必须给实际采样值与总量，而非"可以读取"');
-        assert(/篡改前后/.test(section), '验证绕过必须给篡改前后的行为对比');
-        assert(/已尝试的路径|卡点/.test(section), '做不到时要给可交接的状态，不许含糊收尾');
+        // intent 字段的写法即工作方式：它是一句话，思考属于模型自己的思维链
+        assert(src.includes('never a scratchpad'), 'intent 必须声明为一行摘要，不是草稿纸');
+        assert(src.includes('in your own thinking'),
+            '必须把思考赶回模型自己的思维链 —— 写进 JSON 的"思考"是幻觉，不是推理');
+        const section = src.slice(src.indexOf('## Working rules'), src.indexOf('`;', src.indexOf('## Working rules')));
+        assert(section.length > 100, '应有「Working rules」一节');
+        assert(/Evidence over narrative/.test(section), '结论必须有证据支撑');
+        assert(/actual sampled value/.test(section), '提取数据必须给实际采样值与总量，而非"可以读取"');
+        assert(/behaviour before and after/.test(section), '验证绕过必须给篡改前后的行为对比');
+        assert(/reimplementation reproduces/.test(section), '算法还原必须要求复现原输出才算数');
+        assert(/where it got stuck/.test(section), '做不到时要给可交接的状态，不许含糊收尾');
     });
 
     /**
@@ -2836,31 +3070,32 @@ const run = async () => {
 
     /* --------------------------- 提示词：输出与参数契约 --------------------------- */
 
-    await check('输出协议：无围栏直接贴 JSON，且 tool/final 互斥', async () => {
+    await check('输出协议：无围栏直接贴 JSON，且 calls/final 互斥', async () => {
         const src = ALL_SRC;
-        const at = src.indexOf('## 输出协议');
-        assert(at > 0, '应有「输出协议」一节');
+        const at = src.indexOf('## Output protocol');
+        assert(at > 0, '应有「Output protocol」一节');
         const section = src.slice(at, src.indexOf('## ', at + 10));
         assert(!/```json/.test(section), '不得要求代码块围栏（解析器取首个合法对象，围栏是纯 token 开销）');
-        assert(/不要同时给/.test(section), '必须声明 tool 与 final 互斥（同时给时 final 被忽略）');
+        assert(/mutually exclusive/.test(section), '必须声明 calls 与 final 互斥（同时给时只执行 calls）');
+        assert(/no real newline/.test(section), 'final 必须声明整条回复只有一行');
     });
 
     await check('工具说明：全小写匹配、沙箱动作、导航归一都有交代', async () => {
         const src = ALL_SRC;
-        const at = src.indexOf('## 可用工具定义');
-        assert(at > 0, '应有「可用工具定义」一节');
-        const spec = src.slice(at, src.indexOf('## 执行准则', at));
-        assert(/全小写/.test(spec), '必须声明全小写严格匹配（写错名字第一步就暴露）');
+        const at = src.indexOf('## Tools (lowercase, exact match)');
+        assert(at > 0, '应有「Tools」一节');
+        const spec = src.slice(at, src.indexOf('## Working rules', at));
+        assert(/exact match/.test(spec), '必须声明全小写严格匹配（写错名字第一步就暴露）');
         assert(/"action": "edit"/.test(spec), 'sandbox 的 edit 必须写进说明，否则模型仍会 read + write 全量重写');
-        assert(/相对路径/.test(spec), 'navigate 的相对路径必须写进说明');
-        assert(/子串/.test(spec), 'tamper 的 url_pattern 子串语义必须点明');
+        assert(/relative path/.test(spec), 'navigate 的相对路径必须写进说明');
+        assert(/substring/.test(spec), 'tamper 的 url_pattern 子串语义必须点明');
         assert(/"op": "set" \| "delete"/.test(spec), 'tamper 的 op 必须写进说明（删字段用 delete，不许猜）');
     });
 
     await check('准则：失败两次换路，失败不是终点', async () => {
         const src = ALL_SRC;
-        const at = src.indexOf('## 执行准则');
-        assert(at > 0, '应有「执行准则」一节');
+        const at = src.indexOf('## Working rules');
+        assert(at > 0, '应有「Working rules」一节');
         /**
          * 这一节是提示词的**最后一节**，所以收尾锚点取模板字符串的结束符，
          * 不是下一个 `## ` —— 它后面已经没有别的标题了。
@@ -2871,9 +3106,8 @@ const run = async () => {
          * 因此永远为真，等于没测。所以下面先把锚点存在性钉住。
          */
         const section = src.slice(at, src.indexOf('`;', at));
-        assert(/更换策略/.test(section), '必须要求同一招失败两次就换路（死胡同里每步都要付一次调用费）');
-        assert(/不是任务的终点/.test(section), '必须声明失败只是这一步的结果，否则模型失败一两次就含糊收尾');
-        assert(!/再动手取数据/.test(section), '旧的"先数数再取数"必须删掉（与一次拿够矛盾）');
+        assert(/switch strategy/.test(section), '必须要求同一招失败两次就换路（死胡同里每步都要付一次调用费）');
+        assert(/not the end of the task/.test(section), '必须声明失败只是这一步的结果，否则模型失败一两次就含糊收尾');
     });
 
     /* ------------------------- 会话 token 统计 ------------------------- */

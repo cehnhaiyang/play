@@ -84,8 +84,10 @@ export const protocolErrorSummary = (reply: string): string => {
             return `协议错误：JSON 被截断（${problem.detail}）`;
         case 'badJson':
             return `协议错误：JSON 语法不合法（${problem.detail}）`;
+        case 'badCalls':
+            return `协议错误：calls 里没有可执行的调用（${problem.detail}）`;
         default:
-            return `协议错误：JSON 里既没有 tool 也没有 final（顶层只有 ${problem.keys}）`;
+            return `协议错误：JSON 里既没有 calls 也没有 final（顶层只有 ${problem.keys}）`;
     }
 };
 
@@ -129,9 +131,14 @@ export const protocolErrorObservation = (reply: string): string => {
             what = `大括号是闭上的，但 JSON 语法不合法：${problem.detail}`;
             fix = '检查 args 里的字符串：换行必须写成 \\n、双引号必须写成 \\"、反斜杠写成 \\\\。';
             break;
+        case 'badCalls':
+            what = `calls 字段在，但里面没有一项能执行：${problem.detail}`;
+            fix = 'calls 必须是数组，每一项都要有 tool（工具名，全小写）与 args 两个字段；'
+                + '只写一项时同样要用数组包起来：[{"tool":"js","args":{...}}]。';
+            break;
         default:
-            what = `JSON 本身合法，但没有 tool 也没有 final 字段（顶层只有：${problem.keys}）。`;
-            fix = '补上其中一个：要执行工具就写 tool + args，要收尾就写 final。';
+            what = `JSON 本身合法，但没有 calls 也没有 final 字段（顶层只有：${problem.keys}）。`;
+            fix = '补上其中一个：要执行工具就写 calls 数组，要收尾就写 final。';
             break;
     }
 
@@ -139,7 +146,7 @@ export const protocolErrorObservation = (reply: string): string => {
         + `具体是：${what}`
         + `改法：${fix}`
         + ' 协议要求只回一个 JSON 对象：'
-        + '{"thought":"...","tool":"js","args":{...}} 或 {"thought":"...","final":"..."}，'
+        + '{"intent":"...","calls":[{"tool":"js","args":{...}}]} 或 {"intent":"...","final":"..."}，'
         + '不要用 ```json 围栏。'
         + `\n\n你上一条回复的原文：\n${reply}`;
 };
@@ -160,6 +167,30 @@ export const toolObservation = (label: string, result: string, ok: boolean): str
     return ok
         ? `[工具 ${label} 的执行结果]\n${body}`
         : `[工具 ${label} 执行失败]\n${body}\n\n这一步没有成功。请根据上面的错误信息修正参数或换一条路，不要原样重试。`;
+};
+
+/**
+ * 一整批工具调用的回灌文案。**只由这一个函数产出**。
+ *
+ * 一次回复可以带多个调用，所以观察也必须按**批**回灌。逐条各发一条 user 消息
+ * 在时序上等价，但模型看到的是"我发了一次、回来三条"，读不出哪些结果是同一步
+ * 拿到的；而"哪几项可以并行"正是它规划下一步的依据。批次头把这件事说清楚。
+ *
+ * `shortfall` 是"你写的比跑的多"的说明（超出上限、或某项缺工具名）。它为空的
+ * 常见情形是单个调用 —— 多数回复只有一个，此时退化成原来的单条文案：
+ * 多一层批次头是纯 token 开销，且会让模型以为自己在批量做事。
+ */
+export const batchObservation = (
+    items: { label: string; result: string; ok: boolean }[],
+    shortfall = '',
+): string => {
+    if (items.length === 1 && !shortfall) return toolObservation(items[0].label, items[0].result, items[0].ok);
+
+    const failed = items.filter((i) => !i.ok).length;
+    const head = `[本步执行了 ${items.length} 个调用，结果如下；`
+        + (failed ? `其中 ${failed} 个失败。` : '全部成功。')
+        + shortfall;
+    return `${head}\n\n${items.map((i) => toolObservation(i.label, i.result, i.ok)).join('\n\n')}`;
 };
 
 /**

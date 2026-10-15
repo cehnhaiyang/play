@@ -608,7 +608,7 @@ export interface AgentMessage {
      * 正文。
      *
      * 助手轮次是它说的话（或界面补的提示，见 notice）；工具消息是这一步做了什么
-     * —— 模型发起的调用写 thought。
+     * —— 模型发起的调用写 intent（一批里的几条共用同一个 intent）。
      */
     content: string;
     /**

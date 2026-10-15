@@ -32,16 +32,23 @@ import {
 } from './prompt';
 import {
     PROTOCOL_ERROR_LABEL,
+    batchObservation,
     buildTranscript,
     insertAfterId,
     protocolErrorObservation,
     protocolErrorSummary,
     splitByCompaction,
     sumUsage,
-    toolObservation,
 } from './transcript';
 import { asString, errorText, keepReasoning, trimToBudget } from './text';
-import { buildScriptSource, extractJsonObject, isJsErrorResult, locateScriptError } from './parse';
+import {
+    buildScriptSource,
+    extractCalls,
+    extractJsonObject,
+    isJsErrorResult,
+    locateScriptError,
+    MAX_CALLS_PER_REPLY,
+} from './parse';
 import { dispatchTool } from './tools';
 
 /**
@@ -422,24 +429,21 @@ export class AgentEngine {
                 transcript.push({ role: 'assistant', content: reply });
 
                 const call = extractJsonObject(reply);
-                /*
-                 * 工具名全小写严格匹配，写错会落到"未知工具"。
-                 * 不归一：归一等于把"拼写检查"这道关口拆掉，写错名字是最便宜的笔误，
-                 * 就该在第一步暴露，而不是猜着执行。
-                 */
-                const tool = call?.tool as AgentToolName | undefined;
+                const { calls, written } = extractCalls(call);
+                /** 这一步的意图，只用于界面显示（不参与任何判据） */
+                const intent = asString(call?.intent);
 
                 /**
-                 * 没有可执行的工具调用 —— 三种情况必须分开处置，混为一谈会让 Agent
+                 * 没有可执行的调用 —— 三种情况必须分开处置，混为一谈会让 Agent
                  * 在最需要自救的时候停下来：
                  *
                  * 1. **模型明确收尾**（给了 final）：正常结束，落一条回答。
-                 * 2. **协议错误**（没给 final，也没给 tool）：这不是"它说完了"，
+                 * 2. **协议错误**（没给 final，也没给出可执行的 calls）：这不是"它说完了"，
                  *    而是**这一步没做成**。直接当成普通文本收尾，等于把一次失败的
                  *    调用当成结论交给用户。必须把错误回灌让它改。
                  * 3. **空回复**：推理模型偶发，回灌也无从改起，如实提示后停止。
                  */
-                if (!call || !tool) {
+                if (calls.length === 0) {
                     const finalText = asString(call?.final);
 
                     if (finalText) {
@@ -454,7 +458,7 @@ export class AgentEngine {
                         break;
                     }
 
-                    // 走到这里：既没有 final 也没有 tool。有正文内容才算协议错误 ——
+                    // 走到这里：既没有 final 也没有可执行的调用。有正文内容才算协议错误 ——
                     // 空回复回灌一句"你没输出"它也变不出内容来，那是浪费一次调用。
                     if (reply.trim()) {
                         protocolErrors += 1;
@@ -515,68 +519,107 @@ export class AgentEngine {
                     break;
                 }
 
-                const args = (call.args && typeof call.args === 'object' ? call.args : {}) as Record<string, unknown>;
-                const thought = asString(call.thought);
-
                 this.status = 'acting';
                 this.emit();
 
-                /**
-                 * 工具派发**不能让异常穿出去**。
+                /*
+                 * 一批调用是**一步**：先把它们全部发出去，再按声明顺序收结果。
                  *
-                 * dispatchTool 内部对预期内的失败（缺参数、找不到 id、脚本抛错）
-                 * 都返回 `{error}`，但意外异常仍然存在：宿主断连、标签页被关。
-                 * 原先这些异常会一路冒到 finally，循环直接终止 —— 用户看到的是
-                 * 对话停在半路，而模型连"这一步失败了"都不知道。
+                 * 不给每条观察各发一次 emit —— 一批里改三次界面，用户看到的是
+                 * 列表连跳三下，而它们本就是同一步发生的事。
+                 *
+                 * 并发只对非 js 工具成立：js 必须走 execActive 的串行队列
+                 * （`Runtime.evaluate` 并发语义不可靠，两段脚本交错会互相看到
+                 * 对方改了一半的页面）。这不是遗憾而是取舍 —— 模型要的是
+                 * "一次回复里能派几件事"，不是"几段脚本同时跑"。
                  */
-                let result: string;
-                try {
-                    result = await dispatchTool(tool, args, {
-                        host: this.options.host,
-                        exec: (code) => this.execActive(code),
-                        sandbox: this.options.sandbox,
-                    });
-                } catch (e) {
-                    result = JSON.stringify({ error: `工具 ${tool} 执行时抛出异常：${errorText(e)}` });
-                }
+                const batch = await Promise.all(calls.map(async (one) => {
+                    const tool = one.tool as AgentToolName;
+
+                    /**
+                     * 工具派发**不能让异常穿出去**。
+                     *
+                     * dispatchTool 内部对预期内的失败（缺参数、找不到 id、脚本抛错）
+                     * 都返回 `{error}`，但意外异常仍然存在：宿主断连、标签页被关。
+                     * 原先这些异常会一路冒到 finally，循环直接终止 —— 用户看到的是
+                     * 对话停在半路，而模型连"这一步失败了"都不知道。
+                     */
+                    let result: string;
+                    try {
+                        result = await dispatchTool(tool, one.args, {
+                            host: this.options.host,
+                            exec: (code) => this.execActive(code),
+                            sandbox: this.options.sandbox,
+                        });
+                    } catch (e) {
+                        result = JSON.stringify({ error: `工具 ${tool} 执行时抛出异常：${errorText(e)}` });
+                    }
+
+                    // 日志只写工具名会分不清模型做的是哪件事
+                    // （读写删改查语法都是 "sandbox"）。
+                    const rawAction = asString(one.args.action);
+                    const label = tool === 'sandbox' && rawAction ? `${tool}·${rawAction}` : tool;
+
+                    /**
+                     * 失败判据按工具分岔，因为"什么算失败"对两者本就不同：
+                     * js 的页面数据里 `{error:"..."}` 是**探测到的业务字段**，
+                     * 只有 `__agentError` 与 dispatchTool 自己的参数错误才算失败。
+                     */
+                    const failed = tool === 'js' ? isJsErrorResult(result) : isErrorResultLocal(result);
+                    return { tool, label, result, ok: !failed };
+                }));
+
+                // 用户在一批跑到一半时点停止：后面的调用已经发出去了，收不回来，
+                // 但结果不必再落进对话流 —— 他刚说了不要。
                 if (this.stopped) break;
 
                 // 这一步真的执行了（无论成败），协议错误计数归零 ——
                 // 判据是"模型能不能正确表达调用意图"，它已经表达对了。
                 protocolErrors = 0;
 
-                // 日志只写工具名会分不清模型做的是哪件事
-                // （读写删改查语法都是 "sandbox"）。
-                const rawAction = asString(args.action);
-                const label = tool === 'sandbox' && rawAction ? `${tool}·${rawAction}` : tool;
+                for (const [index, item] of batch.entries()) {
+                    this.appendMessage({
+                        id: generateId(),
+                        role: 'tool',
+                        /*
+                         * 显示文案用 intent，逐条带上序号。
+                         *
+                         * 一批里的每一条都出自**同一个** intent（一次回复只有一个），
+                         * 不编号的话列表上会出现几条一模一样的记录，用户分不清
+                         * 哪条对应哪次调用。而 label 是**稳定**的那一份：重建上下文时
+                         * 若只按 tool 写回，模型在历史里看不出这一步做的是读文件还是改文件。
+                         */
+                        content: intent
+                            ? (batch.length > 1 ? `${intent}（${index + 1}/${batch.length}）` : intent)
+                            : `调用 ${item.label}`,
+                        reasoning: keepReasoning(liveReasoning),
+                        tool: item.tool,
+                        label: item.label,
+                        // js 跑的源码存下来供界面展开查看；其它工具没有源码。
+                        script: item.tool === 'js' ? asString(calls[index].args.code) : undefined,
+                        ok: item.ok,
+                        result: item.result,
+                        // 用量挂在这条工具消息上而不是上一条 assistant：assistant 那条在这一步里
+                        // 只是"决定要调用工具"的中间产物，用户真正会展开看的是这一步干了什么。
+                        // 一批里的几条共用同一次调用的用量，只记在**第一条**上 —— 每条都挂一份，
+                        // 累计用量（sumUsage）会把一次调用算成 N 次，而那个数用户是拿来核账单的。
+                        ...(stepUsage && index === 0 ? { usage: stepUsage } : {}),
+                        at: Date.now(),
+                    });
+                }
 
-                /**
-                 * 失败判据按工具分岔，因为"什么算失败"对两者本就不同：
-                 * js 的页面数据里 `{error:"..."}` 是**探测到的业务字段**，
-                 * 只有 `__agentError` 与 dispatchTool 自己的参数错误才算失败。
-                 */
-                const failed = tool === 'js' ? isJsErrorResult(result) : isErrorResultLocal(result);
-
-                this.appendMessage({
-                    id: generateId(),
-                    role: 'tool',
-                    content: thought || `调用 ${label}`,
-                    reasoning: keepReasoning(liveReasoning),
-                    tool,
-                    // 显示文案会被 thought 顶掉，而 label 是**稳定**的那一份：重建上下文时
-                    // 若只按 tool 写回，模型在历史里看不出这一步做的是读文件还是改文件。
-                    label,
-                    // js 跑的源码存下来供界面展开查看；其它工具没有源码。
-                    script: tool === 'js' ? asString(args.code) : undefined,
-                    ok: !failed,
-                    result,
-                    // 用量挂在这条工具消息上而不是上一条 assistant：assistant 那条在这一步里
-                    // 只是"决定要调用工具"的中间产物，用户真正会展开看的是这一步干了什么。
-                    ...(stepUsage ? { usage: stepUsage } : {}),
-                    at: Date.now(),
+                transcript.push({
+                    role: 'user',
+                    content: batchObservation(
+                        batch,
+                        // 写多了几个、有几个没写工具名：两种"你写的比跑的多"都要说，
+                        // 否则模型只会看到结果比它写的少，以为工具坏了再发一遍。
+                        written > batch.length
+                            ? `你这一步写了 ${written} 个调用，其中 ${batch.length} 个被执行`
+                                + `（一批最多 ${MAX_CALLS_PER_REPLY} 个，且每一项都必须带 tool 名）。`
+                            : '',
+                    ),
                 });
-
-                transcript.push({ role: 'user', content: toolObservation(label, result, !failed) });
             }
         } finally {
             this.busy = false;
