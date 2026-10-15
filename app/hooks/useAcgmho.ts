@@ -12,8 +12,8 @@ import {
     GallerySaveProgress,
     GallerySavedFile,
     getElectronAPI,
-} from '../../../shared/meta';
-import { loadJSON, removeStored, saveJSON } from '../../../shared/core';
+} from '../../shared/meta';
+import { loadJSON, removeStored, saveJSON } from '../../shared/core';
 
 interface ChannelCache {
     items: AcgmhoGalleryItem[];

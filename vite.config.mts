@@ -7,11 +7,11 @@ const here = fileURLToPath(new URL('.', import.meta.url));
 /**
  * 应用渲染层的构建。
  *
- * root 指向 app/renderer/ —— 与插件的构建（extension/vite.config.mts）各自独立，
+ * root 指向 app/ —— 与插件的构建（extension/vite.config.mts）各自独立，
  * 产物也分开：这里是 dist/（由 BrowserWindow.loadFile 以 file:// 打开），
  * 插件是 extension/dist/（由 chrome-extension:// 加载）。
  *
- * 源码在 app/renderer/ 下，但它 import 的 shared/ 在仓库根 —— vite 允许
+ * 源码在 app/ 下，但它 import 的 shared/ 在仓库根 —— vite 允许
  * root 之外的 import，只要在 fs.allow 里（默认已包含工作区根）。
  *
  * ## 三个入口，不是一个
@@ -28,7 +28,7 @@ const here = fileURLToPath(new URL('.', import.meta.url));
  * 都把另外两个页面的代码一起加载 —— 而球是常驻窗口，那份浪费一直在。
  */
 export default defineConfig({
-  root: `${here}app/renderer`,
+  root: `${here}app`,
   plugins: [react()],
   // 必须是相对路径：打包后主进程用 BrowserWindow.loadFile() 以 file:// 打开
   // dist/index.html，而 Vite 默认的 base:'/' 会产出 /assets/index-xxx.js ——
@@ -40,9 +40,9 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: {
       input: {
-        index: `${here}app/renderer/index.html`,
-        'orb/sniff': `${here}app/renderer/orb/sniff.html`,
-        'orb/agent': `${here}app/renderer/orb/agent.html`,
+        index: `${here}app/index.html`,
+        'orb/sniff': `${here}app/orb/sniff.html`,
+        'orb/agent': `${here}app/orb/agent.html`,
       },
     },
   },

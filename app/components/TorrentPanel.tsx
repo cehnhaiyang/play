@@ -17,10 +17,10 @@ import {
     SlidersHorizontal,
     X,
 } from 'lucide-react';
-import { SORT_OPTIONS, useMagnetSearch } from '../renderer/hooks';
+import { SORT_OPTIONS, useMagnetSearch } from '../hooks';
 import { SITE_GROUP_LABELS } from '../../shared/meta';
 import type { SearchHit, SearchSiteStatus, TorrentPanelProps, TorrentTaskSnapshot } from '../../shared/meta';
-import { formatBytes } from '../renderer/services/SearchService';
+import { formatBytes } from '../services/SearchService';
 
 /**
  * ============================================================================

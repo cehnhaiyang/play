@@ -281,7 +281,7 @@ const run = () => {
      *
      * 拼错一个字母的表现与"忘了过桥"完全一样：界面永远不更新，且不报错。
      */
-    const orbClient = path.join(ROOT, 'app', 'renderer', 'orb', 'bridge-client.ts');
+    const orbClient = path.join(ROOT, 'app', 'orb', 'orb-kit.tsx');
     if (fs.existsSync(orbClient)) {
         const clientSrc = fs.readFileSync(orbClient, 'utf8');
         const declared = clientSrc.slice(clientSrc.indexOf('export type BridgeEventName'));

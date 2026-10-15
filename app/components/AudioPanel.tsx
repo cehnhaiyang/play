@@ -32,7 +32,7 @@ import {
     WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline';
 import { AppState, ParserError, Project } from '../../shared/meta';
-import { useAudio } from '../renderer/hooks';
+import { useAudio } from '../hooks';
 
 /**
  * 音频工坊（Sound Particle Studio）。

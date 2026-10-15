@@ -1,5 +1,5 @@
-import { loadJSON, saveJSON } from '../../../shared/core';
-import type { LogEntry, LogLevel } from '../../../shared/meta';
+import { loadJSON, saveJSON } from '../../shared/core';
+import type { LogEntry, LogLevel } from '../../shared/meta';
 
 /**
  * ============================================================================

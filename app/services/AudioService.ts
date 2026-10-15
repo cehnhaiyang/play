@@ -18,7 +18,7 @@ import type {
   FilterDef, FilterKind, InstrumentDef, LFODef, LFOTarget, MixTrack, NoiseColor,
   NoteExpression, ParseResult, ParserError, ProgressionCommand, Project,
   RunCommand, ScheduledEvent, SequenceCommand, SequenceDef, SPGWarning, VoicingStyle,
-} from '../../../shared/meta';
+} from '../../shared/meta';
 
 /* ==================== 乐理与数值工具 ==================== */
 

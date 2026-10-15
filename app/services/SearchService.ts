@@ -28,7 +28,7 @@ import type {
     ProviderHit,
     SearchHit, SearchQuery, SearchResult, SearchSiteStatus, SearchSort, SiteDescriptor, SiteGroup,
     SiteProvider, Transport, TransportRequest, TransportResponse,
-} from '../../../shared/meta';
+} from '../../shared/meta';
 
 /* ==========================================================================
  * 一、插口契约

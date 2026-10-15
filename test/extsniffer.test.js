@@ -590,10 +590,10 @@ const run = () => {
      * 拿归属表当判据会把那批全部误报。
      *
      * 真正要守的是"球调的每一个端点，插件都认识"。所以这里扫的是
-     * `app/renderer/orb/` 下的**实际调用字面量**——那是唯一权威。
+     * `app/orb/` 下的**实际调用字面量**——那是唯一权威。
      */
     check('悬浮球调的每个桥端点都有 dispatchBridge 分支', () => {
-        const orbDir = path.join(ROOT, 'app', 'renderer', 'orb');
+        const orbDir = path.join(ROOT, 'app', 'orb');
         const swSrc = fs.readFileSync(
             path.join(ROOT, 'extension', 'src', 'background', 'service-worker.ts'), 'utf8');
         const start = swSrc.indexOf('const dispatchBridge');
@@ -727,7 +727,7 @@ const run = () => {
      */
     check('标签栏不依赖 tabs.length 渲染，且失败会显示原因', () => {
         const src = fs.readFileSync(
-            path.join(ROOT, 'app', 'renderer', 'orb', 'SniffOrb.tsx'), 'utf8');
+            path.join(ROOT, 'app', 'orb', 'sniff.tsx'), 'utf8');
 
         /*
          * 判据是"标签栏那个容器有没有被 tabs.length 门住"，不是"文件里有没有

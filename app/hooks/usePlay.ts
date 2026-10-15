@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import Hls from 'hls.js';
-import { PlayerState, PlaylistState, PlaybackMode, ObjectFitMode, VideoFile, MediaType, AiBookEntryPage, PagePosition, UsePlayReturn } from '../../../shared/meta';
+import { PlayerState, PlaylistState, PlaybackMode, ObjectFitMode, VideoFile, MediaType, AiBookEntryPage, PagePosition, UsePlayReturn } from '../../shared/meta';
 import {
     canPlayback,
     createStreamFile,
@@ -13,9 +13,9 @@ import {
     saveStr,
     signAcgHlsUrl,
     STORAGE_KEYS,
-} from '../../../shared/core';
+} from '../../shared/core';
 // gallery 刻意不在 shared/core 的索引里导出（它拖着 JSZip 与 File API），按具体路径引
-import { detectGalleryFolders, dirOfFile, galleryNameFromMarker } from '../../../shared/core/gallery';
+import { detectGalleryFolders, dirOfFile, galleryNameFromMarker } from '../../shared/core/gallery';
 
 /* -------------------------------------------------------------------------- */
 /* 播放列表落盘：只存可重建的在线条目（type==='file' 的本地 File/Blob 重进    */

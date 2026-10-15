@@ -10,7 +10,7 @@
  */
 const { MockBaseContext, MockOfflineAudioContext } = require('./mockAudio');
 
-const ROOT = './build/app/renderer';
+const ROOT = './build/app';
 const {
   SPGParser, SPGError, EventScheduler, AudioSynthesizer,
   parseDuration, getMidi, midiToFreq,
@@ -1800,7 +1800,7 @@ const path = require('path');
  * 因为名字表依赖把整个音频引擎拖进 bundle）。
  */
 const aiSource = fs.readFileSync(
-  path.join(__dirname, '..', 'app', 'renderer', 'services', 'SpgAiService.ts'), 'utf8'
+  path.join(__dirname, '..', 'app', 'services', 'SpgAiService.ts'), 'utf8'
 ).replace(/\\`/g, '`').replace(/\\\$/g, '$').replace(/\\\\/g, '\\');
 
 check('提示词里出现的所有指令名都被引擎支持', () => {
@@ -2034,7 +2034,7 @@ check('修复提示词明确排除作品名规则', () => {
  */
 check('新建工程把作品名写进工程标题（代码形状断言，非行为验证）', () => {
   const hookSrc = fs.readFileSync(
-    path.join(__dirname, '..', 'app', 'renderer', 'hooks', 'useAudio.ts'), 'utf8');
+    path.join(__dirname, '..', 'app', 'hooks', 'useAudio.ts'), 'utf8');
   const start = hookSrc.indexOf('const createProject = useCallback');
   assert(start > 0, '找不到 createProject');
   const end = hookSrc.indexOf('const deleteProject', start);
@@ -2062,7 +2062,7 @@ check('工作台里没有会话容器（创作/迭代/修复各有独立入口�
   // 文件头的历史说明里提到 ChatInterface 是正当的，
   // 而扫全文字面量会逼着注释绕开自己的历史（实测：这条一开始就是这么红的）。
   const panelSrc = fs.readFileSync(
-    path.join(__dirname, '..', 'app', 'renderer', 'components', 'AudioPanel.tsx'), 'utf8');
+    path.join(__dirname, '..', 'app', 'components', 'AudioPanel.tsx'), 'utf8');
   for (const [pattern, what] of [
     [/const ChatInterface\s*=/, 'ChatInterface 组件定义'],
     [/<ChatInterface[\s/>]/, 'ChatInterface 的渲染'],
@@ -2099,7 +2099,7 @@ check('工程数据里不再有会话历史', () => {
   assert(!/messages/.test(body), 'Project 不应再有 messages 字段');
 
   const svc = fs.readFileSync(
-    path.join(__dirname, '..', 'app', 'renderer', 'services', 'AudioService.ts'), 'utf8');
+    path.join(__dirname, '..', 'app', 'services', 'AudioService.ts'), 'utf8');
   const createStart = svc.indexOf('export const createNewProject');
   const createBody = svc.slice(createStart, svc.indexOf('export const saveProjects', createStart));
   assert(!/messages/.test(createBody), 'createNewProject 不应再初始化 messages');
@@ -2164,7 +2164,7 @@ check('迭代结果落进新工程，原工程一字不动（代码形状断言�
   // 原稿只存在于工程里，没有第二份可以回退。覆盖它就等于把用户的曲子弄丢了，
   // 而"保有原曲"正是这个功能的卖点 —— 所以落点必须是新建工程。
   const hookSrc = fs.readFileSync(
-    path.join(__dirname, '..', 'app', 'renderer', 'hooks', 'useAudio.ts'), 'utf8');
+    path.join(__dirname, '..', 'app', 'hooks', 'useAudio.ts'), 'utf8');
   const start = hookSrc.indexOf('const refineSpg = useCallback');
   assert(start > 0, '找不到 refineSpg');
   const end = hookSrc.indexOf('// 5. 组装出参', start);
@@ -2185,7 +2185,7 @@ check('导入与迭代都从项目根的 .spg 目录取件（系统文件框，�
   // 而 .spg 是固定落点（生成时就写在那儿），用户每次都得自己导航回去。
   // 所以取件必须走主进程的 dialog —— 一旦退回 input，这个便利就没了。
   const panelSrc = fs.readFileSync(
-    path.join(__dirname, '..', 'app', 'renderer', 'components', 'AudioPanel.tsx'), 'utf8');
+    path.join(__dirname, '..', 'app', 'components', 'AudioPanel.tsx'), 'utf8');
   // 只针对 .spg 取件那两个 input：实验室里还有三个给音频工具用的
   // `<input type="file">`，它们与本次改动无关，不该被这条断言扫到
   assert(!/accept="\.spg,\.txt"/.test(panelSrc),

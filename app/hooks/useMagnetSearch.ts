@@ -10,8 +10,8 @@ import {
     SiteGroup,
     MagnetSearchState,
     getElectronAPI,
-} from '../../../shared/meta';
-import { loadJSON, saveJSON } from '../../../shared/core';
+} from '../../shared/meta';
+import { loadJSON, saveJSON } from '../../shared/core';
 import { search as runSearch, sitesFor } from '../services/SearchService';
 
 /**

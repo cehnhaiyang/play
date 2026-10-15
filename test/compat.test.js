@@ -6,7 +6,7 @@
  * 否则用户已经存下来的项目会在升级后突然跑不动。
  */
 const { MockBaseContext } = require('./mockAudio');
-const ROOT = './build/app/renderer';
+const ROOT = './build/app';
 const { SPGParser, EventScheduler, AudioSynthesizer } = require(`${ROOT}/services/AudioService`);
 
 const parser = new SPGParser();

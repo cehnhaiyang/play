@@ -26,9 +26,9 @@
  *   · SPG 段（原 L769-1101）
  * 逻辑一行未动，只补了 import。
  */
-import type { AiChatMessage } from '../../../shared/meta';
+import type { AiChatMessage } from '../../shared/meta';
 import { PRESET_NAMES, DRUM_NAMES, CHORD_QUALITY_NAMES } from './AudioService';
-import { chat } from '../../../shared/ai/AiService';
+import { chat } from '../../shared/ai/AiService';
 /** 去除 Markdown 代码块围栏与首尾空白 */
 export const cleanCodeBlock = (text: string): string => {
     if (!text) return '';

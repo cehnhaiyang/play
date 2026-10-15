@@ -60,7 +60,7 @@ import {
     getLogEntries,
     getLogVersion,
     subscribeLogs,
-} from '../renderer/services/LogService';
+} from '../services/LogService';
 
 /**
  * 悬浮球与它的两个面板。

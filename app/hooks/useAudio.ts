@@ -1,10 +1,10 @@
 /// <reference lib="dom" />
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type React from 'react';
-import { Project, AppState, ParserError, SPGWarning, SpgPickResult, getElectronAPI } from '../../../shared/meta';
+import { Project, AppState, ParserError, SPGWarning, SpgPickResult, getElectronAPI } from '../../shared/meta';
 import { loadProjects, saveProjects, createNewProject, BrowserAudioEngine, bufferToWave, } from '../services/AudioService';
 import { generateSyntax, fixSyntax, refineSyntax } from '../services/SpgAiService';
-import { downloadBlob, loadJSON, removeStored, saveJSON } from '../../../shared/core';
+import { downloadBlob, loadJSON, removeStored, saveJSON } from '../../shared/core';
 
 interface UseAudioParams {
     initialProjectId?: string | null;

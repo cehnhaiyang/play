@@ -28,8 +28,8 @@ const eq = (a, b, msg) => {
 };
 
 const run = () => {
-    const svc = require('./build/app/renderer/services/LogService');
-    const src = fs.readFileSync(path.join(ROOT, 'app', 'renderer', 'services', 'LogService.ts'), 'utf8');
+    const svc = require('./build/app/services/LogService');
+    const src = fs.readFileSync(path.join(ROOT, 'app', 'services', 'LogService.ts'), 'utf8');
 
     /* ====================================================================== */
     /* 1. formatLogArgs 真逻辑                                                  */
@@ -124,7 +124,7 @@ const run = () => {
     /* ====================================================================== */
 
     check('契约：LogService 是 index.tsx 的首个 import 并显式安装', () => {
-        const indexSrc = fs.readFileSync(path.join(ROOT, 'app', 'renderer', 'index.tsx'), 'utf8');
+        const indexSrc = fs.readFileSync(path.join(ROOT, 'app', 'index.tsx'), 'utf8');
         const logAt = indexSrc.indexOf("from './services/LogService'");
         assert(logAt > 0, 'index.tsx 没有引入 LogService');
         const reactAt = indexSrc.indexOf("from 'react'");
@@ -133,7 +133,7 @@ const run = () => {
     });
 
     check('契约：悬浮球有运行日志面板（元信息 + 顺序 + 常驻）', () => {
-        const floatingSrc = fs.readFileSync(path.join(ROOT, 'app', 'renderer', 'components', 'Floating.tsx'), 'utf8');
+        const floatingSrc = fs.readFileSync(path.join(ROOT, 'app', 'components', 'Floating.tsx'), 'utf8');
         assert(/type FloatingPanelType = 'settings' \| 'logs';/.test(floatingSrc),
             'FloatingPanelType 没有加 logs');
         assert(/logs: \{\s*\n?\s*label: '运行日志'/.test(floatingSrc), 'PANEL_META 里没有运行日志');
@@ -143,7 +143,7 @@ const run = () => {
     });
 
     check('契约：日志面板有级别过滤 + 搜索 + 清空', () => {
-        const floatingSrc = fs.readFileSync(path.join(ROOT, 'app', 'renderer', 'components', 'Floating.tsx'), 'utf8');
+        const floatingSrc = fs.readFileSync(path.join(ROOT, 'app', 'components', 'Floating.tsx'), 'utf8');
         assert(/const LogsFloating/.test(floatingSrc), '找不到 LogsFloating 组件');
         assert(/setLevelFilter\(f\)/.test(floatingSrc), '没有级别过滤 chips');
         assert(/搜索日志内容/.test(floatingSrc), '没有搜索框');
@@ -152,7 +152,7 @@ const run = () => {
     });
 
     check('契约：隐藏时不订阅（keep-alive 常驻，不能每次 console 都重渲染）', () => {
-        const floatingSrc = fs.readFileSync(path.join(ROOT, 'app', 'renderer', 'components', 'Floating.tsx'), 'utf8');
+        const floatingSrc = fs.readFileSync(path.join(ROOT, 'app', 'components', 'Floating.tsx'), 'utf8');
         assert(/useSyncExternalStore\(subscribe, getLogVersion\)/.test(floatingSrc),
             '没有用 useSyncExternalStore 订阅 —— 每次渲染都重读全量');
         // 判据是"订阅被 activeRef 门控、隐藏时返回空退订函数"，不是大括号之间

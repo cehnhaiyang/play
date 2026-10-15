@@ -411,7 +411,7 @@ function run() {
      * electron 39/44、vite 7/8。这里静态盯住，改 package.json 时必须同步改 index.html。
      */
     checks += 1;
-    const htmlSrc = fs.readFileSync(path.join(ROOT, 'app', 'renderer', 'index.html'), 'utf8');
+    const htmlSrc = fs.readFileSync(path.join(ROOT, 'app', 'index.html'), 'utf8');
     const mapBlock = htmlSrc.slice(
         htmlSrc.indexOf('<script type="importmap">'),
         htmlSrc.indexOf('</script>', htmlSrc.indexOf('<script type="importmap">')));
@@ -459,10 +459,10 @@ function run() {
      */
     checks += 1;
     const parserSrc = fs.readFileSync(
-        path.join(ROOT, 'app', 'renderer', 'services', 'AudioService.ts'), 'utf8');
+        path.join(ROOT, 'app', 'services', 'AudioService.ts'), 'utf8');
     // SPG 的语法文档（含「可用效果器」清单）已按功能归属切到 SpgAiService.ts ——
     // 它需要 AudioService 的名字表，留在 AiService 里会把整个音频引擎拖进插件 bundle。
-    const aiSrc = fs.readFileSync(path.join(ROOT, 'app', 'renderer', 'services', 'SpgAiService.ts'), 'utf8');
+    const aiSrc = fs.readFileSync(path.join(ROOT, 'app', 'services', 'SpgAiService.ts'), 'utf8');
 
     const effectNamesBlock = parserSrc.match(/const EFFECT_NAMES[^=]*=\s*\[([\s\S]*?)\]/);
     const parserEffects = effectNamesBlock
@@ -502,7 +502,7 @@ function run() {
     checks += 1;
     const svc = require(path.join(ROOT, 'app', 'main', 'acgmhoService.js'));
     const gallerySrc = fs.readFileSync(
-        path.join(ROOT, 'app', 'renderer', 'components', 'GalleryPanel.tsx'), 'utf8');
+        path.join(ROOT, 'app', 'components', 'GalleryPanel.tsx'), 'utf8');
 
     // 从源码里抠出 rangeIncludesPage 的实现（它是组件内私有函数，无法 import）。
     //
@@ -581,7 +581,7 @@ function run() {
      */
     checks += 1;
     const settingsSrc = fs.readFileSync(path.join(ELECTRON_DIR, 'settings.js'), 'utf8');
-    const floatingSrc = fs.readFileSync(path.join(ROOT, 'app', 'renderer', 'components', 'Floating.tsx'), 'utf8');
+    const floatingSrc = fs.readFileSync(path.join(ROOT, 'app', 'components', 'Floating.tsx'), 'utf8');
     const aiSvcSrc = fs.readFileSync(path.join(ROOT, 'shared', 'ai', 'AiService.ts'), 'utf8');
 
     const effortsBlock = settingsSrc.match(/REASONING_EFFORTS\s*=\s*\[([^\]]*)\]/);

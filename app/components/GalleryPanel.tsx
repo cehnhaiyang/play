@@ -29,7 +29,7 @@ import {
     useAcgDownloads,
     bindSaveFileSync,
     acgTaskKeyOf,
-} from '../renderer/hooks';
+} from '../hooks';
 import type {
     AcgSaveTask,
     AcgmhoGalleryItem,
