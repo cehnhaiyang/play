@@ -203,6 +203,7 @@ const buildAgentHarness = async (options = {}) => {
     const hasPage = options.webview !== false;
     const ranCode = [];
     const navigated = [];
+    const sandboxCalls = [];
 
     /*
      * 当前标签页可变，且记录 activeTab() 被问了几次。
@@ -257,6 +258,17 @@ const buildAgentHarness = async (options = {}) => {
         host,
         storage,
         chat: { chat: chatImpl },
+        /**
+         * 沙箱端口。默认**成功且什么都没做**。
+         *
+         * 传 options.sandboxThrow 则复刻"桥断了"那条路径 —— 它是唯一一条
+         * 工具内部 catch 不住的失败（reject 而非返回 error），必须能单独造出来。
+         */
+        sandbox: async (request) => {
+            sandboxCalls.push(request);
+            if (options.sandboxThrow) throw new Error('本机应用未连接');
+            return options.sandboxResult || { bytes: 1 };
+        },
         onDelta: () => {},
         onSnapshot: (s) => snapshots.push(s),
     });
@@ -266,6 +278,8 @@ const buildAgentHarness = async (options = {}) => {
         chats,
         ranCode,
         navigated,
+        /** 沙箱端口被调了几次、每次收到什么。用来证明参数确实转给了应用 */
+        sandboxCalls: () => sandboxCalls,
         engine,
         /** 当前状态。引擎的快照是同步可取的（hydration 已经 await 过） */
         state: () => engine.snapshot(),
@@ -304,10 +318,10 @@ const buildAgentHarness = async (options = {}) => {
  * tamper 是个可观测的假引擎：applyRules 记账，
  * 这样"有没有越界落盘"是可断言的（引擎侧没有 saveRules 这个口）。
  */
-const buildDispatch = (tamperState, scripts = [], webviewUrl = DEFAULT_TAB_URL) => {
+const buildDispatch = (tamperState, scripts = [], webviewUrl = DEFAULT_TAB_URL, sandboxImpl = null) => {
     const calls = {
         apply: 0, save: 0, setCookie: [], setLocal: [], setSession: [], removed: [],
-        ranCode: [], navigated: [],
+        ranCode: [], navigated: [], sandbox: [],
     };
 
     const tamper = JSON.parse(JSON.stringify(tamperState));
@@ -389,6 +403,11 @@ const buildDispatch = (tamperState, scripts = [], webviewUrl = DEFAULT_TAB_URL) 
         host,
         scripts: scriptStore,
         exec: async (code) => { calls.ranCode.push(code); return '{"ok":true}'; },
+        sandbox: async (request) => {
+            calls.sandbox.push(request);
+            // 默认成功且写了一个字节；要造"应用回 error"的用例自己传实现
+            return sandboxImpl ? sandboxImpl(request) : { bytes: 1 };
+        },
         tabId: hasPage ? 1 : null,
     };
 
@@ -406,6 +425,10 @@ const check = async (name, fn) => {
     catch (e) { fails.push({ name, message: e && e.message ? e.message : String(e) }); }
 };
 const assert = (cond, msg) => { if (!cond) throw new Error(msg || '断言失败'); };
+/** 两值必须严格相等。带 msg 时把实际值打出来，省得再去复现 */
+const eq = (a, b, msg) => {
+    if (a !== b) throw new Error(`${msg || '不相等'}：实际 ${JSON.stringify(a)}，预期 ${JSON.stringify(b)}`);
+};
 const j = (s) => JSON.parse(s);
 
 /** 无规则 / 无 cookie / 无存储的空引擎状态，多数用例用它 */
@@ -1390,6 +1413,294 @@ const run = async () => {
         });
         const out = j(await dispatchTool('tokens', { action: 'rewrite', token: t, area: 'local', key: 'k' }));
         assert(typeof out.error === 'string', '应回错误');
+    });
+
+    /* ------------------------- sandbox：本机沙箱 ------------------------- */
+
+    /**
+     * 派发层只认「参数有没有转过去」与「失败有没有如实报」，
+     * 路径越界的判据在应用侧（下面 SBX 那一段直接调它），这里不重复实现一份。
+     */
+    await check('sandbox write 把 action/path/content 原样转给应用', async () => {
+        const { dispatchTool, calls } = buildDispatch(EMPTY, []);
+        const out = j(await dispatchTool('sandbox', {
+            action: 'write', path: 'out/notes.md', content: '# 结论',
+        }));
+        assert(calls.sandbox.length === 1, `应调用一次，实际 ${calls.sandbox.length}`);
+        const sent = calls.sandbox[0];
+        eq(sent.action, 'write');
+        eq(sent.path, 'out/notes.md');
+        eq(sent.content, '# 结论');
+        eq(out.bytes, 1);
+    });
+
+    await check('sandbox exec 不带 path，只带 command 与 timeout', async () => {
+        const { dispatchTool, calls } = buildDispatch(EMPTY, []);
+        await dispatchTool('sandbox', { action: 'exec', command: 'node out/a.js', timeout: 30000 });
+        const sent = calls.sandbox[0];
+        eq(sent.command, 'node out/a.js');
+        eq(sent.timeout, 30000);
+        assert(!('path' in sent), 'exec 不该带 path（带了会被应用侧的判据误当成文件动作）');
+    });
+
+    await check('sandbox 未知 action 列出全部可用值', async () => {
+        const { dispatchTool, calls } = buildDispatch(EMPTY, []);
+        const out = j(await dispatchTool('sandbox', { action: 'WRITE', path: 'a' }));
+        assert(typeof out.error === 'string', '大写 WRITE 必须失败（全小写严格匹配）');
+        assert(out.error.includes('list / read / write / delete / exec'),
+            `错误里必须列全可用动作，实际：${out.error}`);
+        assert(calls.sandbox.length === 0, '动作写错时不得惊动应用');
+    });
+
+    /**
+     * write 缺 content 必须报错，而不是当成空串写下去。
+     *
+     * 当成空串的话，模型少打一个字段就**清空了一个它本来想保留的文件**，
+     * 而回执是 {bytes:0} —— 看起来像是"写了个空文件"，不像出了事。
+     */
+    await check('sandbox write 缺 content 报错而不是清空文件', async () => {
+        const { dispatchTool, calls } = buildDispatch(EMPTY, []);
+        const out = j(await dispatchTool('sandbox', { action: 'write', path: 'out/keep.md' }));
+        assert(typeof out.error === 'string', '应报错');
+        assert(calls.sandbox.length === 0, '绝不能把清空文件的请求发出去');
+    });
+
+    await check('sandbox 文件动作缺 path 报错，exec 缺 command 报错', async () => {
+        const { dispatchTool } = buildDispatch(EMPTY, []);
+        assert(typeof j(await dispatchTool('sandbox', { action: 'read' })).error === 'string',
+            'read 缺 path 应报错');
+        assert(typeof j(await dispatchTool('sandbox', { action: 'exec', command: '  ' })).error === 'string',
+            'exec 的空白 command 应报错');
+    });
+
+    /**
+     * 桥断了（端口 reject）与"应用回了 error"是两条不同的失败路径。
+     *
+     * reject 若穿出 dispatchTool，引擎那圈 catch 只会给出「工具 sandbox 执行时抛出异常」，
+     * 模型读不出"是应用没开"，于是反复改参数 —— 而改参数永远好不了。
+     */
+    await check('sandbox 应用未连接时回可行动的错误，不抛异常', async () => {
+        const { dispatchTool } = buildDispatch(EMPTY, [], DEFAULT_TAB_URL, () => {
+            throw new Error('本机应用未连接');
+        });
+        const out = j(await dispatchTool('sandbox', { action: 'list', path: '.' }));
+        assert(typeof out.error === 'string', '应回 error 字段而不是抛出');
+        assert(out.error.includes('本机应用未连接'), `应把原始故障原因带出来，实际：${out.error}`);
+    });
+
+    await check('sandbox 应用返回的 error 原样回灌', async () => {
+        const { dispatchTool } = buildDispatch(EMPTY, [], DEFAULT_TAB_URL, () => ({
+            error: 'ENOENT: no such file or directory',
+        }));
+        const out = j(await dispatchTool('sandbox', { action: 'read', path: 'nope.md' }));
+        assert(out.error.includes('ENOENT'), 'fs 的错误码是模型改参数的依据，不得改写');
+    });
+
+    /* ------------------- sandbox：越界判据（直接调用） ------------------- */
+
+    /**
+     * 这一段直接 require 应用侧的 `app/main/sandbox.js` 并**调用判据**。
+     *
+     * 不去 grep main.js 的源码：把 `resolveSandboxPath` 换成 `() => null` 或
+     * `() => 'C:\\'`，源码断言照样全绿（见 §5.4 的教训）。判据必须被求值。
+     */
+    const SBX = require(path.join(ROOT, 'app', 'main', 'sandbox.js'));
+    const FAKE_ROOT = path.join(path.sep + 'tmp', 'fake-sandbox');
+    const okPath = (p) => SBX.resolveSandboxPath(FAKE_ROOT, p) !== null;
+
+    await check('沙箱根内的相对路径放行', async () => {
+        assert(okPath('a.md'), '根内单层应放行');
+        assert(okPath('out/sub/a.md'), '根内多层应放行');
+        assert(okPath('out\\sub\\a.md'), 'Windows 分隔符同样应放行');
+        assert(okPath('./a.md'), '开头的 ./ 应被吸收');
+        // 模型问"沙箱里有什么"最自然的写法就是 path:"."，拒了它等于功能不可用
+        eq(SBX.resolveSandboxPath(FAKE_ROOT, '.'), FAKE_ROOT, 'path "." 应解析到沙箱根');
+        eq(SBX.resolveSandboxPath(FAKE_ROOT, './'), FAKE_ROOT, '"./" 同样');
+        eq(SBX.resolveSandboxPath(FAKE_ROOT, 'out/..'), null, '带 .. 的一律拒绝');
+        const resolved = SBX.resolveSandboxPath(FAKE_ROOT, 'out/a.md');
+        assert(resolved.startsWith(FAKE_ROOT), `解析结果应在根内，实际 ${resolved}`);
+    });
+
+    await check('越界写法一律拒绝', async () => {
+        for (const bad of ['../a', 'out/../../a', '..', '/etc/passwd', 'C:\\Windows\\a', '']) {
+            assert(!okPath(bad), `应拒绝：${JSON.stringify(bad)}`);
+            eq(SBX.resolveSandboxPath(FAKE_ROOT, bad), null, `应拒绝：${bad}`);
+        }
+    });
+
+    /**
+     * 拒绝的判据要**覆盖三类不同写法**，而不是同一类的三种拼法：
+     * 相对上跳（..）、绝对路径（/ 开头）、盘符（C:）。只测第一类的话，
+     * 把判据写成"只查 .."的弱版本照样全绿。
+     */
+    await check('拒绝判据不是只查 ..', async () => {
+        assert(!okPath('/etc/passwd'), '绝对路径必须被拒（否则判据只防了 ..）');
+        assert(!okPath('C:\\Windows'), '盘符必须被拒');
+    });
+
+    await check('clipToBytes 不切断多字节字符', async () => {
+        const text = '中文'.repeat(10);
+        const clipped = SBX.clipToBytes(text, 5);
+        assert(clipped.truncated, '应标记截断');
+        assert(!clipped.text.includes('\uFFFD'), `不得留下替换字符，实际：${JSON.stringify(clipped.text)}`);
+        assert(Buffer.byteLength(clipped.text, 'utf8') <= 5, '不得超限');
+        assert(SBX.clipToBytes('short', 50).truncated === false, '未超限不应标记');
+    });
+
+    /* -------------------- sandbox：读写删跑命令的真实往返 -------------------- */
+
+    /**
+     * 用真实的临时目录跑一遍 handle：写、读、列、跑命令、删。
+     *
+     * 假 root 只能验判据的形状，验不了"内容真的落盘了""cwd 真的在沙箱里"。
+     */
+    const os = require('os');
+    const tmpRoot = path.join(os.tmpdir(), `the-play-sbx-${process.pid}`);
+    await check('sandbox 写→读→列→删 真实往返', async () => {
+        await fs.promises.rm(tmpRoot, { recursive: true, force: true });
+
+        const w = await SBX.handle({ action: 'write', path: 'out/a.md', content: '# 结论\n' }, tmpRoot);
+        assert(!w.error, `write 应成功，实际 ${w.error}`);
+        eq(w.bytes, Buffer.byteLength('# 结论\n', 'utf8'));
+        assert(fs.existsSync(path.join(tmpRoot, 'out', 'a.md')), '文件应真的落盘');
+
+        const r = await SBX.handle({ action: 'read', path: 'out/a.md' }, tmpRoot);
+        eq(r.content, '# 结论\n');
+
+        const l = await SBX.handle({ action: 'list', path: 'out' }, tmpRoot);
+        assert(l.entries.some((e) => e.name === 'a.md'), '列目录应看到写进去的文件');
+
+        const d = await SBX.handle({ action: 'delete', path: 'out/a.md' }, tmpRoot);
+        assert(!d.error && d.deleted.replace(/\\/g, '/') === 'out/a.md', `delete 应回相对路径，实际 ${JSON.stringify(d)}`);
+        assert(!fs.existsSync(path.join(tmpRoot, 'out', 'a.md')), '文件应真的被删掉');
+    });
+
+    await check('sandbox 读不存在的文件回 ENOENT 而不是崩', async () => {
+        const r = await SBX.handle({ action: 'read', path: 'nope.md' }, tmpRoot);
+        assert(typeof r.error === 'string' && r.error.includes('ENOENT'),
+            `应如实回 ENOENT，实际 ${JSON.stringify(r)}`);
+    });
+
+    await check('sandbox 越界路径根本到不了 fs', async () => {
+        const r = await SBX.handle({ action: 'read', path: '../../../Windows/win.ini' }, tmpRoot);
+        assert(r.error && r.error.includes('路径不合法'), `应先被判据拒掉，实际 ${JSON.stringify(r)}`);
+    });
+
+    await check('sandbox exec 的工作目录就是沙箱根', async () => {
+        const r = await SBX.handle({ action: 'exec', command: process.platform === 'win32' ? 'cd' : 'pwd' }, tmpRoot);
+        assert(!r.error, `exec 应成功，实际 ${r.error}`);
+        eq(r.exitCode, 0);
+        assert(r.output.replace(/\r/g, '').includes(path.basename(tmpRoot)),
+            `输出应含沙箱根目录名，实际：${JSON.stringify(r.output)}`);
+    });
+
+    await check('sandbox exec 非零退出码不算超时', async () => {
+        const r = await SBX.handle({
+            action: 'exec',
+            command: process.platform === 'win32' ? 'exit /b 3' : 'exit 3',
+        }, tmpRoot);
+        assert(!r.timedOut, '正常失败不能被说成超时（否则模型会加大 timeout 重跑）');
+        assert(typeof r.exitCode === 'number' && r.exitCode !== 0, `应回非零退出码，实际 ${r.exitCode}`);
+    });
+
+    await check('sandbox exec 超时会被杀并如实标注', async () => {
+        const r = await SBX.handle({
+            action: 'exec',
+            command: process.platform === 'win32' ? 'ping -n 30 127.0.0.1' : 'sleep 30',
+            timeout: 500,
+        }, tmpRoot);
+        assert(r.timedOut === true, `应标记超时，实际 ${JSON.stringify(r)}`);
+        assert(typeof r.error === 'string' && r.error.includes('强制终止'), '错误文案要说明是被杀的');
+    });
+
+    /**
+     * 超时要**杀干净整棵树**，不只是"不再等它"。
+     *
+     * 这条是被现场踩出来的：原先用 exec，timeout 只杀它自己拉起的 shell，
+     * shell 起的孙子进程继续在跑 —— 回给模型一句"已强制终止"是假话，而模型
+     * 据此以为机器干净，接着起下一条命令，同时沙箱目录还被上一个进程占着
+     * （连临时目录都 rm 不掉，EBUSY）。
+     *
+     * 判据取"目录现在删得掉"：删不掉就是还有进程占着它，而那正是根因本身，
+     * 不是靠 sleep 一段时间去赌时序。rm 失败会抛，断言也就跟着红。
+     */
+    await check('sandbox exec 超时后不留占着沙箱的进程', async () => {
+        await SBX.handle({ action: 'write', path: 'busy', content: 'x' }, tmpRoot);
+        assert(fs.existsSync(path.join(tmpRoot, 'busy')), '构造前提：文件已在沙箱里');
+
+        await SBX.handle({
+            action: 'exec',
+            command: process.platform === 'win32' ? 'ping -n 20 127.0.0.1 >nul' : 'sleep 20',
+            timeout: 300,
+        }, tmpRoot);
+
+        // 能删掉即没有进程还占着它；删不掉会抛 EBUSY
+        await fs.promises.rm(tmpRoot, { recursive: true, force: true });
+        assert(!fs.existsSync(tmpRoot), '沙箱目录应已释放');
+    });
+
+    await check('sandbox 未知 action 由应用侧兜住', async () => {
+        const r = await SBX.handle({ action: 'stat', path: 'a' }, tmpRoot);
+        assert(typeof r.error === 'string' && r.error.includes('未知 action'), `实际 ${JSON.stringify(r)}`);
+    });
+
+    await fs.promises.rm(tmpRoot, { recursive: true, force: true });
+
+    /* -------------------- sandbox：两处数字不许漂移 -------------------- */
+
+    /**
+     * `shared/meta/type.ts` 是这三个值的**唯一权威**；`app/main/sandbox.js`
+     * 因为只能写 CommonJS 而抄了一份（同 host.js 抄 BRIDGE_PROTOCOL_VERSION）。
+     *
+     * 抄来的那份必须逐个求值比对。写成"源码里有这个数字"就退化成字符串断言了。
+     */
+    await check('沙箱上限：主进程副本与 shared 权威逐值相等', async () => {
+        const META = require('./build/shared/meta/type.js');
+        eq(SBX.SANDBOX_TEXT_LIMIT_BYTES, META.SANDBOX_TEXT_LIMIT_BYTES, '回传上限漂移');
+        eq(SBX.SANDBOX_EXEC_TIMEOUT_DEFAULT_MS, META.SANDBOX_EXEC_TIMEOUT_DEFAULT_MS, '默认超时漂移');
+        eq(SBX.SANDBOX_EXEC_TIMEOUT_MAX_MS, META.SANDBOX_EXEC_TIMEOUT_MAX_MS, '超时上限漂移');
+    });
+
+    /* --------------------- 工具名注册表不许留空位 --------------------- */
+
+    /**
+     * 新增一个工具名要同时落在三处：类型联合、派发 switch、提示词。
+     *
+     * 少一处都不会有任何编译错误，也不会报错：
+     *   · 少 switch 分支 → 模型调到它只拿到「未知工具」，它会以为是自己拼错了；
+     *   · 少提示词声明 → 模型根本不知道有这个能力，功能等于没做。
+     * 这是 §5.3-C（注册了但没人听）在本项目里的形态，所以一次断言钉死三处。
+     */
+    await check('每个 AgentToolName 都有派发分支且写进了提示词', async () => {
+        const typeSrc = fs.readFileSync(path.join(ROOT, 'shared', 'meta', 'type.ts'), 'utf8')
+            .replace(/\r\n/g, '\n');
+        const block = typeSrc.slice(typeSrc.indexOf('export type AgentToolName ='));
+        const declared = [...block.slice(0, block.indexOf(';')).matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+        assert(declared.length >= 7, `应从类型里解出全部工具名，实际 ${declared.length}`);
+
+        const toolsSrc = AGENT_SOURCES.find((s) => s.file === 'tools.ts').text;
+        const promptSrc = AGENT_SOURCES.find((s) => s.file === 'prompt.ts').text;
+
+        for (const name of declared) {
+            assert(toolsSrc.includes(`case '${name}'`), `${name} 在类型里声明了，但 dispatchTool 没有分支`);
+            assert(new RegExp(`\\d\\. ${name} ——`).test(promptSrc), `${name} 没有写进提示词的可用工具定义`);
+        }
+
+        // 反向：提示词里不得凭空多出没有实现的名字
+        for (const m of promptSrc.matchAll(/^\d\. ([a-z_]+) ——/gm)) {
+            assert(declared.includes(m[1]), `提示词声明了 ${m[1]}，但类型与派发里没有它`);
+        }
+    });
+
+    await check('提示词的沙箱说明带出真实数字，不手抄', async () => {
+        const src = AGENT_SOURCES.find((s) => s.file === 'prompt.ts').text;
+        assert(/SANDBOX_EXEC_TIMEOUT_MAX_MS/.test(src), '超时上限应插值常量');
+        assert(/SANDBOX_TEXT_LIMIT_BYTES/.test(src), '回传上限应插值常量');
+        const at = src.indexOf('7. sandbox');
+        assert(at > 0, '提示词应有 sandbox 一条');
+        const spec = src.slice(at, src.indexOf('## 执行准则', at));
+        assert(/沙箱/.test(spec) && /\.\./.test(spec), '必须写明只能在沙箱内、.. 会被拒');
+        assert(/exec 的工作目录/.test(spec), '要说明 exec 的 cwd 就是沙箱根');
     });
 
     /* --------------------- 推理文本的定稿（本次修复） --------------------- */

@@ -223,6 +223,12 @@ export const BRIDGE_ENDPOINTS = {
         route: 'app',
         reason: '把 .torrent 落到磁盘需要文件系统权限；白名单防 SSRF 也在应用侧。',
     },
+    'sandbox': {
+        route: 'app',
+        reason: 'Agent 的本地沙箱：写文件要 fs、执行指令要子进程，两者都只有主进程能做；'
+            + '而"路径必须落在项目根的 sandbox 目录内"这条边界必须由执行者自己守 —— '
+            + '放进插件就等于由发起方自行声明它没有越界。',
+    },
     'acgmho-start-download': {
         route: 'app',
         reason: '批量落盘：任意路径写入 + 并发控制 + 断点续传状态，都是 Node 侧能力。',

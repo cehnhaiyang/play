@@ -9,6 +9,8 @@ import type {
     AgentUsage,
     AiChatMessage,
     AiUsage,
+    SandboxRequest,
+    SandboxResult,
 } from '../../../shared/meta';
 import { generateId } from '../../../shared/core';
 import type { AgentHost } from './host';
@@ -112,6 +114,14 @@ export interface EngineOptions {
     host: AgentHost;
     storage: EngineStorage;
     chat: ChatPort;
+    /**
+     * 本机沙箱端口（`sandbox` 工具的实现）。
+     *
+     * **不放 `AgentHost`**：那一层是"页面宿主"的抽象（见 host.ts 的对照表），
+     * 而沙箱既不认识 tab，也不碰 chrome.* —— 它唯一的通路是过桥到桌面应用。
+     * 混进去会让 pageHost 背上与页面无关的能力。
+     */
+    sandbox: (request: SandboxRequest) => Promise<SandboxResult>;
     /**
      * 增量回调。流式输出的每个分片都走它 ——
      * 整个快照太大，逐字重发不现实。
@@ -553,6 +563,7 @@ export class AgentEngine {
                         host: this.options.host,
                         scripts: this.scriptStore(),
                         exec: (code) => this.execActive(code),
+                        sandbox: this.options.sandbox,
                     });
                 } catch (e) {
                     result = JSON.stringify({ error: `工具 ${tool} 执行时抛出异常：${errorText(e)}` });
@@ -564,9 +575,11 @@ export class AgentEngine {
                 protocolErrors = 0;
 
                 // 日志只写工具名会分不清模型做的是哪件事
-                // （列清单 / 存脚本 / 改脚本 / 删脚本都是 "script_store"）。
+                // （列清单 / 存脚本 / 改脚本 / 删脚本都是 "script_store"；
+                //  读写删跑命令都是 "sandbox"）。
                 const rawAction = asString(args.action);
-                const label = tool === 'script_store' && rawAction ? `${tool}·${rawAction}` : tool;
+                const needsAction = tool === 'script_store' || tool === 'sandbox';
+                const label = needsAction && rawAction ? `${tool}·${rawAction}` : tool;
 
                 /**
                  * 失败判据按工具分岔，因为"什么算失败"对两者本就不同：

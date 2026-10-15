@@ -3,7 +3,7 @@
     "target": "ES2022",
     "module": "CommonJS",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["node"],
+    "types": ["node", "chrome"],
     "skipLibCheck": true,
     "noEmit": false,
     "outDir": "./build",
@@ -27,6 +27,9 @@
     "../shared/meta/**/*.ts",
     "../extension/src/shared/classify.ts",
     "../extension/src/shared/inpage.ts",
-    "../extension/src/agent/**/*.ts"
+    "../extension/src/shared/protocol.ts",
+    "../extension/src/agent/**/*.ts",
+    "../extension/src/offscreen/host.ts",
+    "../extension/src/background/bridge-port.ts"
   ]
 }

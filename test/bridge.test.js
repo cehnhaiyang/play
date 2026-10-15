@@ -103,12 +103,46 @@ const run = () => {
             + '请在 shared/meta/bridge.ts 的 BRIDGE_ENDPOINTS 里归类。');
     });
 
+    /**
+     * route 为 app、但**故意不注册 ipcMain 通道**的端点。
+     *
+     * `sandbox` 在这里：它的调用方只有插件的 Agent，而能力是"写文件 + 跑本机命令"。
+     * 主进程每注册一个通道，渲染层就多一个可调用的口；给一个没有调用方的口开通道，
+     * 等于把执行面摊给用不上的地方。
+     *
+     * ⚠ 这条名单是上面那条断言的**免检牌**，代价与 `orb:` 那张一样：下面必须
+     * 反向核对它确实有 `bridge.setRequestHandler` 的分派。否则"表里注册了端点、
+     * 应用里谁都没接"就正好从这条免检里漏过去 —— 而那恰是这条断言原本要拦的事故。
+     */
+    const BRIDGE_ONLY_APP_ENDPOINTS = ['sandbox'];
+
     check('端点表里 app/split 路由都有真实 handler（无悬空目标）', () => {
+        const exempt = new Set(BRIDGE_ONLY_APP_ENDPOINTS);
         const dangling = Object.entries(bridge.BRIDGE_ENDPOINTS)
-            .filter(([name, meta]) => meta.route !== 'extension' && !registeredHandlers.has(name))
+            .filter(([name, meta]) => meta.route !== 'extension' && !exempt.has(name))
+            .filter(([name]) => !registeredHandlers.has(name))
             .map(([name, meta]) => `${name}(${meta.route})`);
         eq(dangling.length, 0,
             `这些端点在表里归给应用，但主进程没有 handler：${dangling.join('、')}`);
+    });
+
+    /**
+     * 免检名单的反向核对：列进来的端点必须真的被 `setRequestHandler` 分派。
+     *
+     * 认 `case '<name>'` 的形状，因为那份分派就是 switch。
+     * 只免检不反查的话，这张名单就成了"我可以随便往里塞东西且不实现"的口子 ——
+     * 症状与当年那个"注册了但没人监听"完全一致：插件发出去的请求等满超时，
+     * 而没有任何一处代码是错的。
+     */
+    check('免检的桥专属端点必须有 setRequestHandler 分派', () => {
+        const mainSrc = fs.readFileSync(path.join(ELECTRON_DIR, 'main.js'), 'utf8');
+        const missing = BRIDGE_ONLY_APP_ENDPOINTS.filter((name) => !mainSrc.includes(`case '${name}'`));
+        eq(missing.length, 0,
+            `这些端点免检了 ipcMain 注册，但插件请求的分派里也没有它：${missing.join('、')}`);
+        for (const name of BRIDGE_ONLY_APP_ENDPOINTS) {
+            assert(!(name in bridge.BRIDGE_ENDPOINTS) || bridge.BRIDGE_ENDPOINTS[name].route === 'app',
+                `免检名单里的 ${name} 不是 app 路由 —— 那张表按路由分岔，放错了等于绕过两条断言`);
+        }
     });
 
     /*

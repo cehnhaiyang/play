@@ -3,8 +3,11 @@ import type {
     AgentToolName,
     CookieItem,
     HeaderRule,
+    SandboxRequest,
+    SandboxResult,
     TamperRule,
 } from '../../../shared/meta';
+import { SANDBOX_ACTIONS } from '../../../shared/meta';
 import {
     buildCookieKeys,
     collectDroppedRules,
@@ -20,7 +23,7 @@ import { asString, errorText } from './text';
 import { isJsErrorResult, safeParseObject } from './parse';
 
 /**
- * 六个工具的派发。
+ * 七个工具的派发。
  *
  * ## 为什么从 hook 里搬出来
  *
@@ -48,6 +51,13 @@ export interface ToolContext {
     scripts: ScriptStore;
     /** 在页面里执行代码（走引擎的串行队列，不与模型的其它步骤交错） */
     exec: (code: string) => Promise<string>;
+    /**
+     * 本机沙箱。宿主没接通时工具如实报"未接通"，不回落成"成功但什么都没做"。
+     *
+     * 必填而不是可选：可选会在缺实现时走进一条运行时分支，而"沙箱能用吗"
+     * 是接线问题，编译时就该报错（与 `tamper` 同一教训，见 host.ts）。
+     */
+    sandbox: (request: SandboxRequest) => Promise<SandboxResult>;
 }
 
 /**
@@ -604,6 +614,71 @@ export const dispatchTool = async (
                 token: next,
                 warning: '签名已失效 —— 签名覆盖的正是 payload，服务端验签就会拒绝。这是这类调试的固有前提。',
             });
+        }
+
+        /**
+         * sandbox —— 本机项目根 `sandbox/` 目录里的文件操作与命令执行。
+         *
+         * ## 为什么只有这里能碰磁盘
+         *
+         * 前六个工具的作用域都在浏览器里（页面、存储、规则、令牌）。本机文件系统与
+         * 子进程两者都不属于扩展的能力范围，必须过桥交给应用（归属见
+         * `shared/meta/bridge.ts` 的 `sandbox`）。工具层因此**不自己拼路径**：
+         * 沙箱根的边界由执行者守，发起方声明"我没越界"不作数。
+         *
+         * ## 动作校验在这里做，而不是交给应用
+         *
+         * 与 storage / tokens 同一取舍：动作写错时模型要看到的是"可用 list / read /
+         * write / delete / exec"，而过桥一趟拿回来的只会是一句应用侧的未知动作。
+         * 参数形状在这里收敛，路径合法性交给应用。
+         */
+        case 'sandbox': {
+            const rawAction = asString(args.action) || 'list';
+            /**
+             * 用 `SANDBOX_ACTIONS.find()` 而不是 `includes()` 做门禁。
+             *
+             * 两者行为一样，但只有前者能把值**收窄成联合类型**：includes 版在下面
+             * 组装请求时 `action` 仍是 string，编译器抓不到"往 action 里塞了个
+             * 白名单外的值"这类错（实测就是在那里报红的）。清单也只剩 shared 一份。
+             */
+            const action = SANDBOX_ACTIONS.find((a) => a === rawAction);
+            if (!action) {
+                return JSON.stringify({ error: unknownActionError(rawAction, [...SANDBOX_ACTIONS]) });
+            }
+
+            const relPath = asString(args.path);
+            const command = asString(args.command);
+            if (action !== 'exec' && !relPath) {
+                return JSON.stringify({ error: '缺少 path（相对 sandbox 的路径，如 out/notes.md）' });
+            }
+            if (action === 'exec' && !command.trim()) {
+                return JSON.stringify({ error: '缺少 command（action 为 exec 时必须给；运行沙箱内的脚本也用这里）' });
+            }
+            if (action === 'write' && typeof args.content !== 'string') {
+                return JSON.stringify({ error: '缺少 content（write 必须给要写入的文本；不给会当成空内容把文件清空）' });
+            }
+
+            const request: SandboxRequest = {
+                action,
+                ...(relPath ? { path: relPath } : {}),
+                ...(command ? { command } : {}),
+                ...(typeof args.content === 'string' ? { content: args.content } : {}),
+                ...(typeof args.timeout === 'number' ? { timeout: args.timeout } : {}),
+            };
+
+            let result: SandboxResult;
+            try {
+                result = await ctx.sandbox(request);
+            } catch (e) {
+                // 桥断了 / 应用没开：这是环境故障，与参数写错是两件事，
+                // 回一句"未知错误"模型会反复改参数，而改参数永远好不了
+                return JSON.stringify({
+                    error: `本机沙箱不可用：${errorText(e)}。要确认桌面应用正在运行且插件已连上。`,
+                });
+            }
+
+            if (result?.error) return JSON.stringify(result);
+            return JSON.stringify(result ?? {});
         }
 
         default:

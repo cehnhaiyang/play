@@ -338,6 +338,17 @@ export interface AiUsage {
  * 一次补全请求的可选参数
  */
 export interface AiChatOptions {
+    /**
+     * 本次调用使用的配置。
+     *
+     * 配置的**所有者是应用主进程**（settings.json），桌面宿主由 AiService 自己经
+     * preload 去读；而插件宿主读不到（offscreen 文档里没有 electronAPI，扩展的
+     * localStorage 也不是配置的存放处），必须由插件侧经桥取回后随请求带进来。
+     *
+     * 不传即"由 AiService 自行读取当前配置"（桌面宿主的行为）。
+     * 插件侧**必须传**：漏传会静默落回内置默认值，那正是"改了设置不生效"。
+     */
+    config?: AiConfig;
     /** 系统提示词，会作为首条 system 消息插入 */
     system?: string;
     /** 对话消息列表 */
@@ -467,7 +478,67 @@ export type AgentToolName =
     | 'navigate'
     | 'tamper'
     | 'storage'
-    | 'tokens';
+    | 'tokens'
+    | 'sandbox';
+
+/**
+ * 沙箱的动作白名单。**唯一权威**：类型由它推出来，工具层拿它回错误文案，
+ * 提示词的断言拿它核对模型看得见的那份清单。
+ */
+export const SANDBOX_ACTIONS = ['list', 'read', 'write', 'delete', 'exec'] as const;
+
+export type SandboxAction = typeof SANDBOX_ACTIONS[number];
+
+/**
+ * 沙箱的三条上限。**这里是唯一权威**，主进程 `app/main/sandbox.js` 按同值钳制
+ * （那边是 CommonJS，与 `extension/host/host.js` 抄 `BRIDGE_PROTOCOL_VERSION`
+ * 同一处境）。两处漂移的表现是"插件以为还能等、应用已经杀了"，
+ * 由 `test/bridge.test.js` 钉住。
+ */
+export const SANDBOX_TEXT_LIMIT_BYTES = 32768;
+export const SANDBOX_EXEC_TIMEOUT_DEFAULT_MS = 120000;
+export const SANDBOX_EXEC_TIMEOUT_MAX_MS = 600000;
+
+/**
+ * `sandbox` 工具：本机项目根 `sandbox/` 目录里的文件与命令操作。
+ *
+ * ## 形状
+ *
+ * 一次调用只做一件事：`action` 二选一 —— 文件动作或执行命令。
+ * 合并成一个请求而不是两条端点，是因为"作用范围恒为沙箱根"这一条对两者都成立：
+ * 分开写就要在两个地方各自钉一次根目录，而漏掉一处的表现是那一半能越界。
+ */
+export interface SandboxRequest {
+    action: SandboxAction;
+    /** 相对沙箱根的 POSIX 风格路径。`..`、绝对路径、盘符一律拒绝 */
+    path?: string;
+    /** write 的内容（UTF-8） */
+    content?: string;
+    /** exec 的命令行 */
+    command?: string;
+    /** exec 的等待毫秒。缺省用 SANDBOX_EXEC_TIMEOUT_DEFAULT_MS，超过上限被钳制 */
+    timeout?: number;
+}
+
+/**
+ * `sandbox` 的返回。
+ *
+ * `error` 是**失败的唯一标记**：非空即失败，工具层据此让引擎把这一步标红。
+ * 成功时按动作带 `entries` / `content` / `bytes` / `output` 之一。
+ *
+ * `bytes` 是写入的字节数（不是字符数）：模型拿它核对"内容有没有被改短"。
+ */
+export interface SandboxResult {
+    error?: string;
+    entries?: { name: string; dir: boolean; size: number }[];
+    content?: string;
+    bytes?: number;
+    deleted?: string;
+    exitCode?: number;
+    /** exec 的 stdout+stderr（主进程侧已截断）。超限的部分以末行说明 */
+    output?: string;
+    timedOut?: boolean;
+}
 
 /**
  * 一条工具消息的来源：谁让它跑的。

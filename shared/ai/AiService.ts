@@ -16,13 +16,7 @@ import type {
     ReasoningEffort,
 } from '../meta';
 import { getElectronAPI } from '../meta';
-import { fileToDataUrl, loadStr, saveStr, splitDataUrl } from '../core';
-
-/**
- * ============================================================================
- * AI 服务（OpenAI 兼容协议）
- * ============================================================================
- */
+import { fileToDataUrl, splitDataUrl } from '../core';
 
 /* -------------------------------------------------------------------------- */
 /*                                服务商预设                                   */
@@ -30,10 +24,10 @@ import { fileToDataUrl, loadStr, saveStr, splitDataUrl } from '../core';
 
 /** 默认配置：本地 tc2api。预设表引用它，所以声明在表前面 */
 export const DEFAULT_AI_CONFIG: AiConfig = {
-    baseUrl: 'http://127.0.0.1:7863/v1',
-    apiKey: '1',
+    baseUrl: 'http://127.0.0.1:3065/v1',
+    apiKey: 'sk-a2a-f345da9360a116c54801e02675eb0c37',
     model: 'global:deepseek-v4.1-flash',
-    reasoningEffort: 'low',
+    reasoningEffort: 'max',
 };
 
 /** 界面档位：不思考 + 低 / 高 / 最大三档 */
@@ -46,15 +40,6 @@ export const EFFORT_OPTIONS: AiEffortOption[] = [
 
 /** 服务商预设表。都是本地服务，顺序即界面按钮顺序 */
 export const AI_PROVIDERS: AiProviderPreset[] = [
-    {
-        id: 'tc2api',
-        label: 'tc2api',
-        note: '本地 tc2api（7863），默认密钥 1',
-        baseUrl: 'http://127.0.0.1:7863/v1',
-        apiKey: '1',
-        // reasoning_effort 就叫 low / high / max，三个模型都认，不需要映射
-        models: [{ id: 'global:deepseek-v4.1-flash' }, { id: 'deepseek-v4-flash' }, { id: 'global:glm-5.2' }],
-    },
     {
         id: 'ofm',
         label: 'gcli2api',
@@ -71,12 +56,14 @@ export const AI_PROVIDERS: AiProviderPreset[] = [
         baseUrl: 'http://127.0.0.1:3065/v1',
         apiKey: 'sk-a2a-f345da9360a116c54801e02675eb0c37',
         models: [
-            // 妙手
-            { id: 'LongCat-2.0', reasoning: false, }, { id: 'MiniMax-M3', reasoning: false, }, { id: 'deepseek-v4-flash' }, { id: 'glm-5.3-flashx' },
+            // workbuddy
+            { id: 'global:deepseek-v4.1-flash' }, { id: 'cn:deepseek-v4.1-flash' },
+            // qoder
+            { id: 'Qwen3.8-Flash', reasoning: false, }, { id: 'GLM-5.3-Flash' },
             // zcode
             { id: 'glm-5.3' }, { id: 'glm-5.3-flash' },
-            // qoder
-            { id: 'Qwen3.8-Flash', reasoning: false, }, { id: 'GLM-5.3-Flash' }
+            // 妙手
+            { id: 'LongCat-2.0', reasoning: false, }, { id: 'MiniMax-M3', reasoning: false, }, { id: 'deepseek-v4-flash' }, { id: 'glm-5.3-flashx' },
         ],
     },
 ];
@@ -122,9 +109,6 @@ export const getModelPresets = (baseUrl: string): AiModelPreset[] =>
 /*                                配置读写                                    */
 /* -------------------------------------------------------------------------- */
 
-/** 浏览器降级模式下的存储键 */
-const AI_CONFIG_STORAGE_KEY = 'play_ai_config';
-
 /** 合法档位：界面、AiService、主进程三处一致；档位可选，缺省即「不思考」 */
 const REASONING_EFFORTS: ReasoningEffort[] = ['low', 'high', 'max'];
 
@@ -143,51 +127,40 @@ const normalizeConfig = (input: Partial<AiConfig> | null | undefined): AiConfig 
 
 /**
  * 读取当前 AI 配置。
- * 优先问主进程；IPC 失败时回落到 localStorage。
+ *
+ * **配置只有一个所有者：应用主进程的 settings.json。** 这里刻意不留任何
+ * "读不到就用一份本地副本 / 内置默认值"的回落 —— 那正是"设置里改了模型、
+ * Agent 仍旧用旧模型"的成因：插件宿主（offscreen 文档）既没有 electronAPI，
+ * 也从来没有人往扩展的 localStorage 写过这份配置，两级回落依次命中，
+ * 于是每一次调用都拿着内置常量去调模型，且全程不报错。
+ *
+ * 插件宿主因此不在这里读：它的配置由 service worker 经桥从应用取回，
+ * 随请求带进来（见 AiChatOptions.config）。
  */
 export const getAiConfig = async (): Promise<AiConfig> => {
     const settingsApi = getElectronAPI()?.settings;
-    if (settingsApi) {
-        try {
-            const snapshot = await settingsApi.get();
-            if (snapshot?.ai) return normalizeConfig(snapshot.ai);
-        } catch (_error) {
-            // 主进程暂时不可用：继续往下走本地回落，不直接抛错
-        }
-    }
+    // 拿不到 settings API 只意味着一件事：preload 桥没加载（见 getElectronAPI）。
+    // 那不是"另一种合法的运行环境"，所以按故障报出来，而不是换一份配置继续跑
+    if (!settingsApi) throw new Error('读不到 AI 配置：preload 桥未加载（请重启应用）。');
 
-    try {
-        const cached = loadStr(AI_CONFIG_STORAGE_KEY, '', '');
-        if (cached) return normalizeConfig(JSON.parse(cached) as Partial<AiConfig>);
-    } catch (_error) {
-        // 存量配置损坏：按默认值起步
-    }
-
-    return { ...DEFAULT_AI_CONFIG };
+    const snapshot = await settingsApi.get();
+    return normalizeConfig(snapshot?.ai);
 };
 
 /**
- * 保存 AI 配置。返回主进程（或回落存储）给出的结果。
- * 主进程会做字段校验，非法值不会落盘。
+ * 保存 AI 配置。字段校验在持有配置的那一侧（主进程）做，非法值不会落盘。
  */
 export const saveAiConfig = async (config: AiConfig): Promise<{ success: boolean; message?: string; ai?: AiConfig }> => {
     const settingsApi = getElectronAPI()?.settings;
-    if (settingsApi) {
-        try {
-            const res = await settingsApi.setAiConfig(config);
-            if (res?.success && res.ai) return { success: true, message: res.message, ai: res.ai };
-            if (res && !res.success) return { success: false, message: res.message };
-        } catch (error) {
-            return { success: false, message: error instanceof Error ? error.message : '保存失败' };
-        }
-    }
+    if (!settingsApi) return { success: false, message: '读不到设置接口：preload 桥未加载（请重启应用）。' };
 
-    // 浏览器回落：本地没有主进程那套校验，这里自己挡一次非法档位
-    const normalized = normalizeConfig(config);
-    const ok = saveStr(AI_CONFIG_STORAGE_KEY, JSON.stringify(normalized), '');
-    return ok
-        ? { success: true, message: '已保存到浏览器本地存储', ai: normalized }
-        : { success: false, message: '浏览器存储写入失败（可能配额已满）' };
+    try {
+        const res = await settingsApi.setAiConfig(config);
+        if (res?.success && res.ai) return { success: true, message: res.message, ai: res.ai };
+        return { success: false, message: res?.message || '主进程没有返回保存结果' };
+    } catch (error) {
+        return { success: false, message: error instanceof Error ? error.message : '保存失败' };
+    }
 };
 
 /**
@@ -381,7 +354,7 @@ const reportUsage = (
  * 传了 `options.onUsage` 时，无论流式与否都会在成功拿到回复后回调一次用量。
  */
 export const chat = async (options: AiChatOptions): Promise<string> => {
-    const config = await getAiConfig();
+    const config = options.config || await getAiConfig();
     const messages: AiChatMessage[] = options.system
         ? [{ role: 'system', content: options.system }, ...options.messages]
         : options.messages;
@@ -646,7 +619,7 @@ const requestCompletion = async (
  * 返回 Base64 PCM（24kHz 单声道 16bit），无音频时返回 null。
  */
 export const chatForSpeech = async (options: AiChatOptions): Promise<string | null> => {
-    const config = await getAiConfig();
+    const config = options.config || await getAiConfig();
     const messages: AiChatMessage[] = options.system
         ? [{ role: 'system', content: options.system }, ...options.messages]
         : options.messages;
@@ -942,14 +915,18 @@ const KNOWN_TYPES: MediaType[] = ['stream', 'video', 'audio', 'image', 'document
  *
  * 输出不可信：只收录 http(s) 直链、已知媒体类型，ext 去掉 query/hash，上限 50 条。
  * 返回的字段与 FoundLink 对齐，由调用方补齐 pageUrl/referer 等上下文。
+ *
+ * `config` 与 chat 的同名参数同义：插件宿主必须传，见 AiChatOptions.config。
  */
 export const extractMediaLinks = async (
     pageContent: string,
-    fallbackTitle: string
+    fallbackTitle: string,
+    config: AiConfig
 ): Promise<Array<Pick<FoundLink, 'url' | 'title' | 'type' | 'ext'>>> => {
     const preview = pageContent.length > 80000 ? pageContent.slice(0, 80000) : pageContent;
 
     const text = await chat({
+        config,
         messages: [{ role: 'user', content: `${EXTRACT_PROMPT}${preview}` }],
         reasoningEffort: 'low',
     });

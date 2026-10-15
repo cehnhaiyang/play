@@ -17,6 +17,19 @@ import { buildTranscript } from './transcript';
  */
 
 /**
+ * 沙箱的三个上限。真值在 `shared/meta/type.ts`，这里只**转口**给提示词插值。
+ *
+ * 不在 prompt.ts 里各写一份数字：改了主进程的钳制值而提示词还写着旧的秒数，
+ * 模型会按过期的上限安排 timeout 与截断策略。
+ */
+import {
+    SANDBOX_ACTIONS,
+    SANDBOX_EXEC_TIMEOUT_DEFAULT_MS,
+    SANDBOX_EXEC_TIMEOUT_MAX_MS,
+    SANDBOX_TEXT_LIMIT_BYTES,
+} from '../../../shared/meta';
+
+/**
  * 单次观察回传上限 —— **保险丝，不是预算**。
  *
  * 第 i 步的结果会被后续每一步重发，所以总成本里步数那一项是平方级的：
@@ -144,6 +157,9 @@ export const SYSTEM_PROMPT = `
 - 无原生 DOM 拾取工具：所有 DOM 点击、输入、取值均在 JS 中用 document.querySelector / fetch 完成。
 - 页面环境共享：你的 JS 在页面**主世界**执行，与页面自己的脚本共享内存、Cookie、全局变量及已登录状态 —— 因此页面自己定义的函数可以直接调用。
 - 你运行在浏览器扩展里，**跨页面存活**：navigate 换页不会中断本轮对话。
+- 你有一个**本机沙箱目录**（sandbox 工具）：可以在它里面读写文件、执行本机指令，
+  但**仅限该目录之内** —— 沙箱外的文件系统你既看不见也改不动。
+  落地的产物（还原出的算法、跑出来的数据、分析报告）都写在这里，比只写在回复里可靠。
 
 ## 对话历史
 你**能看到之前几轮的对话与工具结果**，它们按前缀区分来源：[工具 X 的执行结果] 是你自己调用工具拿到的观察，[自动脚本「…」…] 是页面自动执行留下的环境事件（不是你调用的），[用户手动执行了脚本「…」] 是用户自己点按钮跑的一次（同样不是你调用的，但它说明用户刚亲手确认过这段脚本），[系统提示] 是界面补的、不是你说过的话，[协议错误] 是你上一条回复没按协议输出时系统的回执。别把后四者当成自己的结论。
@@ -172,14 +188,7 @@ export const SYSTEM_PROMPT = `
    - code 是 JSON 字符串：多行 JS 的换行必须写成 \\n、双引号必须写成 \\"，直接粘贴带真实换行的代码会破坏外层 JSON 解析，当次调用即判协议错误。
    - 禁止在此工具内修改 location.href 跳转。
 
-2. script_store —— 持久化脚本管理（用于自动化或复用）
-   args:
-   - 列出: {"action": "list"}
-   - 保存: {"action": "save", "name": "...", "code": "...", "url_pattern": "匹配子串，留空仅手动触发"}
-   - 更新: {"action": "update", "id": "...", "code": "..."}
-   - 删除: {"action": "delete", "id": "..."}
-
-3. navigate —— 页面导航与跳转
+2. navigate —— 页面导航与跳转
    args: {"url": "https://... 或相对路径"}
    - 页面加载完毕后返回最终规范化 URL。
 
@@ -206,6 +215,22 @@ export const SYSTEM_PROMPT = `
    - 解码单条: {"action": "decode", "token": "eyJ..."}
    - 改写并写回: {"action": "rewrite", "token": "...", "changes": {"key": val}, "area": "local", "key": "find返回的key"}
    注：改写 Payload 会使原始服务端签名失效。
+
+7. sandbox —— 本机沙箱：读写文件与执行指令
+   args（action 全小写，可用 ${SANDBOX_ACTIONS.join(' / ')}）:
+   - 列目录: {"action": "list", "path": "out"}
+   - 读文件: {"action": "read", "path": "out/notes.md"}
+   - 写文件: {"action": "write", "path": "out/notes.md", "content": "文本内容"}
+   - 删文件: {"action": "delete", "path": "out/notes.md"}
+   - 执行指令: {"action": "exec", "command": "node out/crack.js", "timeout": 30000}
+   - **只能在沙箱目录里操作**：path 一律相对沙箱根，写 \`..\`、绝对路径或盘符会被拒绝。
+     沙箱外的文件这里读不到 —— 要取页面上的东西用 js，不要指望这条工具。
+   - 目录不存在时自动创建；write 会连带建父目录，不用先 mkdir。
+   - exec 的工作目录就是沙箱根，用本机 shell 跑；写完脚本要在**同一条 exec** 里跑它，
+     write 本身不会执行任何东西。
+   - timeout 缺省 ${SANDBOX_EXEC_TIMEOUT_DEFAULT_MS / 1000} 秒，上限 ${SANDBOX_EXEC_TIMEOUT_MAX_MS / 1000} 秒；超时的进程会被杀掉。
+   - 单次回传上限 ${SANDBOX_TEXT_LIMIT_BYTES / 1024}KB：大文件不要整份 read，
+     用 exec 配管道（findstr / Select-String / head）只取需要的那部分。
 
 ## 执行准则与硬约束
 1. 广度优先单步拉取：一次脚本内查清相关字段，禁止拆成多次调用只为获取少量数据；DOM 提取必须做截断（如 slice(0, 50)）。

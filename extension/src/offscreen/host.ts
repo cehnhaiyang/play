@@ -52,6 +52,7 @@ const runChat = async (request: HostChatRequest): Promise<void> => {
     try {
         let usage: AiUsage | undefined;
         const reply = await chat({
+            config: request.aiConfig,
             system: request.system,
             messages: request.messages as AiChatMessage[],
             temperature: request.temperature,
@@ -152,7 +153,7 @@ chrome.runtime.onMessage.addListener(
             case 'ai-extract-links': {
                 void (async () => {
                     try {
-                        const links = await extractMediaLinks(request.html, request.title);
+                        const links = await extractMediaLinks(request.html, request.title, request.aiConfig);
                         sendResponse({ ok: true, result: { links } });
                     } catch (e) {
                         sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) });

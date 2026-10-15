@@ -42,6 +42,7 @@ import {
 } from '../shared/protocol';
 import type { MediaType } from '../../../shared/meta';
 import { agentBridge } from './agent-bridge';
+import { readAiConfig } from './chat-port';
 import { emitBridgeEvent, ensureBridge, setDispatcher } from './bridge-port';
 import { pageHost } from '../offscreen/page-host';
 import { applyRules, loadRules, injectRules } from './tamper';
@@ -938,11 +939,15 @@ const aiSniffTab = async (tabId: number): Promise<{ added: number }> => {
      * `test/extsniffer.test.js` 有一条沙箱断言正是盯着这类问题。
      */
     await agentBridge.ensureOffscreen();
+    // 配置与 Agent 走同一条读取路径：它是唯一来源（应用 settings.json），
+    // 直接调 offscreen 会拿到一份谁也没配过的内置默认值
+    const aiConfig = await readAiConfig();
     const response = (await chrome.runtime.sendMessage({
         target: 'host',
         kind: 'ai-extract-links',
         html,
         title: pageTitle,
+        aiConfig,
     })) as ExtensionResponse<{ links: Array<Pick<SniffedMedia, 'url' | 'title' | 'type' | 'ext'>> }> | undefined;
 
     if (!response) throw new Error('offscreen 宿主无响应（可能创建失败）');

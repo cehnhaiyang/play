@@ -62,6 +62,16 @@ const pending = new Map();
 /** 插件推来的事件订阅者 */
 const eventListeners = new Set();
 
+/**
+ * 插件发来的请求的处理者。
+ *
+ * 方向在这里**反过来**：应用向插件要东西走 `request()`，插件向应用要东西
+ * （读设置就是一条）走这里。两条方向共用同一套信封 `{ id, method, params }`，
+ * 但没有就"谁处理"这一问题共享任何一份表 —— 端点归属在
+ * `shared/meta/bridge.ts`，由 `test/bridge.test.js` 逐条比对主进程真实的注册。
+ */
+let requestHandler = null;
+
 /** 状态变化订阅者（球要知道"插件连上没有"） */
 const statusListeners = new Set();
 
@@ -168,7 +178,40 @@ const handleLine = (line) => {
                 // 同上：单个订阅者出错不影响其他
             }
         }
+        return;
     }
+
+    /* 插件发来的请求 */
+    if (message.id && message.method) {
+        handleExtensionRequest(message);
+    }
+};
+
+/**
+ * 处理一条插件发来的请求。
+ *
+ * **每一条都要回包，包括失败的那些。** 不回的话插件侧会一直等满自己的超时 ——
+ * 而真正的原因可能只是一条没注册的 method，那本该当场说清楚。
+ */
+const handleExtensionRequest = (message) => {
+    const reply = (payload) => {
+        if (!writeLine({ id: message.id, ...payload })) {
+            // 插件恰好在这一刻断开：没有别的补救办法，记一行以免静默丢失
+            console.error('回包失败（插件连接已断开）：', message.method);
+        }
+    };
+
+    if (!requestHandler) {
+        reply({ ok: false, error: '应用尚未就绪（请求分派器未注册）' });
+        return;
+    }
+
+    Promise.resolve()
+        .then(() => requestHandler(message.method, message.params))
+        .then(
+            (result) => reply({ ok: true, result }),
+            (error) => reply({ ok: false, error: error && error.message ? error.message : String(error) }),
+        );
 };
 
 /* ========================================================================== */
@@ -277,6 +320,14 @@ module.exports = {
     start,
     stop,
     request,
+    /**
+     * 注册插件请求的分派器。主进程在启动时调一次。
+     *
+     * 与 `request` 是一对反向的入口：那边应用问插件，这边插件问应用。
+     */
+    setRequestHandler: (fn) => {
+        requestHandler = fn;
+    },
     /** 插件推来的事件。返回取消订阅的函数 */
     onEvent: (listener) => {
         eventListeners.add(listener);

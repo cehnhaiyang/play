@@ -40,12 +40,96 @@ interface AppRequest {
     params?: unknown;
 }
 
+/** 应用对插件请求的应答 */
+interface AppResponse {
+    id: string;
+    ok: boolean;
+    result?: unknown;
+    error?: string;
+}
+
 /** 处理应用请求的分派函数。由 service-worker 注入，避免这里认识所有端点 */
 type Dispatcher = (method: string, params: unknown) => Promise<unknown>;
 
 let dispatcher: Dispatcher | null = null;
 
 let port: chrome.runtime.Port | null = null;
+
+/**
+ * 在途的插件→应用请求：id → 等待者。
+ *
+ * 与 `dispatcher` 是**两个方向**，不要混：那个是应用问插件，这个是插件问应用。
+ * 插件要读应用的设置（模型配置的所有者是应用）就得有这条路。
+ */
+const outgoing = new Map<string, {
+    resolve: (value: unknown) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+}>();
+
+let nextRequestId = 1;
+
+/**
+ * 一条请求等多久算超时。
+ *
+ * 默认值只管"读一份配置"这一类：本来就是本机来回，给太长会让"应用没在跑"
+ * 表现为模型调用一直转圈。
+ *
+ * **但它管不了沙箱的 exec**：那一条允许跑到十分钟（见
+ * `shared/meta/type.ts` 的 `SANDBOX_EXEC_TIMEOUT_MAX_MS`），用默认值的话
+ * 表现是"命令明明还在执行，插件却报了应用没回应"。所以超时改成逐条传入，
+ * 默认值只兜住没有传的那些。
+ */
+const REQUEST_TIMEOUT_MS = 5000;
+
+/**
+ * 向应用发一条请求。
+ *
+ * 连接不在时**立刻失败**，不排队。理由同应用侧那句：配置是所有后续动作的前提，
+ * 排队只会把"应用没开"延迟成一次莫名其妙的模型调用失败。
+ *
+ * `timeoutMs` 只放宽**等待**，不改变"应用必须自己收摊"这件事 —— 应用侧该有它
+ * 自己的执行超时（沙箱的 exec 就有），不能靠调用方等多久它就跑多久。
+ */
+export const requestApp = <T,>(method: string, params?: unknown, timeoutMs?: number): Promise<T> => {
+    if (!port) return Promise.reject(new Error('本机应用未连接，读不到设置。'));
+
+    const wait = timeoutMs ?? REQUEST_TIMEOUT_MS;
+    const id = `ext-${Date.now().toString(36)}-${(nextRequestId += 1).toString(36)}`;
+    return new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(() => {
+            outgoing.delete(id);
+            reject(new Error(`应用在 ${Math.round(wait / 1000)} 秒内没有回应：${method}`));
+        }, wait);
+
+        outgoing.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });
+        if (!post({ id, method, params })) {
+            outgoing.delete(id);
+            clearTimeout(timer);
+            reject(new Error('写入应用失败（连接已断开）'));
+        }
+    });
+};
+
+/** 把一条应答交回等待者 */
+const settleOutgoing = (message: AppResponse): boolean => {
+    const entry = outgoing.get(message.id);
+    if (!entry) return false;
+    outgoing.delete(message.id);
+    clearTimeout(entry.timer);
+    if (message.ok) entry.resolve(message.result);
+    else entry.reject(new Error(message.error || '应用返回了失败'));
+    return true;
+};
+
+/** 连接断开时让在途请求当场失败，否则每一条都要等满超时 */
+const failOutgoing = (reason: string): void => {
+    for (const [, entry] of outgoing) {
+        clearTimeout(entry.timer);
+        entry.reject(new Error(reason));
+    }
+    outgoing.clear();
+};
 
 /** 连上之后要通知的订阅者（球要知道"插件已就绪"） */
 const readyListeners = new Set<(connected: boolean) => void>();
@@ -121,12 +205,25 @@ const connect = (): chrome.runtime.Port => {
             return;
         }
 
+        /*
+         * 三个方向在这一条 Port 上，按形状分辨，顺序不能换：
+         *   · 握手行（hello）
+         *   · 应用发来的请求（id + method）→ 我们回包
+         *   · 应用对**我们**请求的应答（id，没有 method）→ 交给等待者
+         *
+         * 应答要放在请求之前判：应答没有 method，所以两者本不会撞；
+         * 但若先用 `message.id && message.method` 兜底，一旦将来给应答也带上了
+         * 形状相近的字段，它就会被当成请求再回一次包，等待者却永远等不到。
+         */
+        if (message.id && settleOutgoing(message as unknown as AppResponse)) return;
         if (message.id && message.method) handleAppRequest(message);
     });
 
     created.onDisconnect.addListener(() => {
         if (port === created) port = null;
         notifyReady(false);
+        // 在途请求跟着这条连接一起作废：不回包的话每一条都要等满自己的超时
+        failOutgoing('与应用连接已断开');
         /*
          * 断开就重连，**但带退避**。
          *

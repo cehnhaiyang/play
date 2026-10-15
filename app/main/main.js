@@ -1,8 +1,9 @@
 const { app, BrowserWindow, ipcMain, shell, webContents, dialog } = require('electron');
 const { probeGallery, downloadGallery, saveGalleryImages, fetchGalleryPages, normalizeGid, galleryTaskKey, galleryKeyMatches, GALLERY_CHANNELS, fetchChannelList, buildChannelListResult, channelListUrl, deriveListPageUrl, isCloudflareChallengePage, isCloudflareErrorPage, setUserAgent: pushUserAgentToSite } = require('./acgmhoService');
-const { getSettings, saveProxyPort, saveAiConfig, testAiConnection } = require('./settings');
+const { getSettings, getPluginSettings, saveProxyPort, saveAiConfig, testAiConnection } = require('./settings');
 const bridge = require('./bridge');
 const orbs = require('./orbs');
+const sandbox = require('./sandbox');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
@@ -2044,6 +2045,30 @@ async function handleSpgPick(event) {
     }
 }
 
+/**
+ * Agent 的本地沙箱。**实现与越界判据在 `./sandbox.js`**，这里只做两件事：
+ * 定沙箱根、把它接到插件的请求分派上。
+ *
+ * 判据放在能独立 require 的模块里：main.js 依赖 electron，测试加载不动它，
+ * 留在原地就只能对源码做字符串断言，而那证明不了"越界真会被拦"。
+ *
+ * ## 根用 app.getAppPath()
+ *
+ * 与 `handleSpgSave` 的 `.spg` 同一取法：开发时就是项目根（D:\the-play），
+ * 因此沙箱里的产物是用户能直接在编辑器里看见的文件，而不是某个临时目录。
+ * ⚠ 打包后 getAppPath() 落在只读的 app.asar 内，写入必然失败 —— 与 .spg 是
+ * 同一个已知限制，不是这里新增的。
+ *
+ * ## 只开插件这一条口，不注册 ipcMain 通道
+ *
+ * 调用方是扩展的 Agent，落点在下面的 `bridge.setRequestHandler`。主进程每注册
+ * 一个通道就是渲染层多一个可调用的口，而"写文件 + 跑本机命令"在渲染层没有任何
+ * 调用方 —— 白开一个口等于把执行面摊给用不上的地方。
+ * `test/bridge.test.js` 的 `BRIDGE_ONLY_APP_ENDPOINTS` 记下了这个例外并反查它
+ * 确实有分派。
+ */
+const sandboxRoot = () => path.join(app.getAppPath(), 'sandbox');
+
 function setupDownloadHandlers() {
     if (downloadHandlersReady) return;
     downloadHandlersReady = true;
@@ -3346,6 +3371,36 @@ function setupSettingsHandlers() {
     // 传 null 表示这次不下发思考参数（服务商不需要思考，或用户选了「不思考」）
     ipcMain.handle('settings-test-ai-config', async (_event, value, reasoningEffort) => {
         return testAiConnection(value, reasoningEffort);
+    });
+
+    /*
+     * 插件经桥读设置。
+     *
+     * 存在的理由写在 shared/meta/bridge.ts 的 `settings-get` 上：AI 配置被应用
+     * 的 AI 绘本与插件的 Agent **共用**，而所有者只能有一个（settings.json）。
+     * 插件侧的 Agent 每次调用模型都要拿这一份，否则它只能拿着自己那份内置默认值
+     * 去调 —— 用户在设置里换了模型也不会生效。
+     *
+     * 与上面的 `settings-get` 是**同一个真值来源**（都走 getSettings），
+     * 只是出口不同：一个给渲染层，一个给插件。这里不额外拼 applied /
+     * proxyProtocol —— 那两项是"应用自己的代理生效在哪"的界面显示，
+     * 与插件要用模型配置无关。
+     */
+    bridge.setRequestHandler(async (method, params) => {
+        switch (method) {
+            case 'settings-get':
+                return getPluginSettings();
+            /**
+             * Agent 的本地沙箱。**只有插件这一条口**，所以没有对应的
+             * ipcMain 通道（理由见上面 sandboxRoot 的文件头）。
+             */
+            case 'sandbox':
+                return sandbox.handle(params, sandboxRoot());
+            default:
+                // 不认识的端点必须报错：静默回 undefined 会让插件侧拿到一个
+                // "成功了但什么都没有"的结果，症状是界面上一切正常、配置却始终是默认值
+                throw new Error(`应用不认识的桥端点：${method}`);
+        }
     });
 
     registerOrbChannels();

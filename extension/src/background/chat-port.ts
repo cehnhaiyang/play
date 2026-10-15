@@ -1,6 +1,7 @@
-import type { AiChatMessage, AiUsage } from '../../../shared/meta';
+import type { AiChatMessage, AiConfig, AiUsage } from '../../../shared/meta';
 import type { ChatPort } from '../agent/engine';
 import type { ExtensionResponse, HostChatRequest, HostEvent } from '../shared/protocol';
+import { requestApp } from './bridge-port';
 
 /**
  * 模型调用端口：把引擎的 `chat()` 转到 offscreen 文档。
@@ -79,8 +80,36 @@ chrome.runtime.onMessage.addListener((message: { target?: string; kind?: string 
 const newRequestId = (): string =>
     `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
+/**
+ * 读当前 AI 配置。
+ *
+ * **每次调用都读一次，不缓存。** 缓存意味着用户在设置面板改完模型之后，
+ * 插件侧还拿着上一份去调 —— 那正是这次要修的症状，只是把窗口从"永远"
+ * 缩到"直到 SW 被回收"。而它只是一次本机来回（应用在同一台机器上），
+ * 相对一次模型调用可以忽略。
+ *
+ * 读不到就抛，不回落。回落成一份内置默认值会让"应用没开"表现成
+ * "Agent 用了别的模型"，那比直接报错难查得多。
+ */
+const loadAiConfig = async (): Promise<AiConfig> => {
+    const snapshot = await requestApp<{ ai?: AiConfig }>('settings-get');
+    if (!snapshot || !snapshot.ai) throw new Error('应用没有返回 AI 配置。');
+    return snapshot.ai;
+};
+
+/**
+ * 读配置的入口，供同样要发起模型调用的路径使用（AI 深度嗅探）。
+ *
+ * 与 `ChatPort.chat` 共用同一份实现：配置只有一个来源，谁也不能自己拼一份
+ * 或绕开它 —— 两条路径各读一次是**有意的**（每次调用都要拿最新的），
+ * 但"怎么读"只能有一处。
+ */
+export const readAiConfig = (): Promise<AiConfig> => loadAiConfig();
+
 export const createChatPort = (ensureOffscreen: () => Promise<void>): ChatPort => ({
     chat: async (options) => {
+        // 先取配置再起 offscreen：拿不到配置就没有必要把这次调用发出去
+        const aiConfig = await loadAiConfig();
         await ensureOffscreen();
 
         const requestId = newRequestId();
@@ -88,6 +117,7 @@ export const createChatPort = (ensureOffscreen: () => Promise<void>): ChatPort =
             target: 'host',
             kind: 'ai-chat',
             requestId,
+            aiConfig,
             ...(options.system ? { system: options.system } : {}),
             messages: options.messages as AiChatMessage[],
             ...(typeof options.temperature === 'number' ? { temperature: options.temperature } : {}),

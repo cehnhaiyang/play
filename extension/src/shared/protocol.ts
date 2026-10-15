@@ -30,7 +30,7 @@
  * 会让"这个字段能不能放"变成看运气 —— 在这里随手塞一张 base64 图片没问题，
  * 同样的代码走桥就会静默失败。
  */
-import type { AiChatMessage, AiUsage, CookieItem, HeaderRule, MediaSourceChannel, MediaType, TamperRule } from '../../../shared/meta';
+import type { AiChatMessage, AiConfig, AiUsage, CookieItem, HeaderRule, MediaSourceChannel, MediaType, TamperRule } from '../../../shared/meta';
 
 /* ========================================================================== */
 /* 0. 公共                                                                     */
@@ -269,6 +269,15 @@ export interface HostChatRequest {
     kind: 'ai-chat';
     /** 用于把流式增量与最终结果对回这一次请求 */
     requestId: string;
+    /**
+     * 本次调用使用的模型配置。
+     *
+     * **必须随请求带进来，不能由 offscreen 自己读。** 配置的所有者是应用主进程
+     * （settings.json），offscreen 文档既没有 electronAPI，扩展的 localStorage
+     * 也不是它存放的地方 —— 让它自己读的结果是每一级回落依次命中、最终拿着
+     * 内置默认值去调模型，且全程不报错。SW 能过桥拿到真值，所以由 SW 填。
+     */
+    aiConfig: AiConfig;
     system?: string;
     messages: AiChatMessage[];
     temperature?: number;
@@ -291,7 +300,7 @@ export type HostRequest =
      * 而一次提取可能要十几秒。SW 侧不 import AiService —— 那个模块会拖进
      * 整个服务商预设表与 fetch 封装，而 SW 里连 `localStorage` 都没有。
      */
-    | { target: 'host'; kind: 'ai-extract-links'; html: string; title: string };
+    | { target: 'host'; kind: 'ai-extract-links'; html: string; title: string; aiConfig: AiConfig };
 
 /** 宿主文档推给悬浮球的流式增量与终局 */
 export type HostEvent =

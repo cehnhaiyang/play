@@ -7,7 +7,8 @@
 # 真正被困住的是那个不动的。两种读法都成立，这正是曲名要的歧义。
 #
 # 骨架：三全音长音 + 次低频压力 + 心跳 + 神经质刺音 + 丧钟。
-# tempo 50 下 1 小节 = 4.8 秒，全曲 12 小节 = 57.6 秒。
+# tempo 50 下 1 拍 = 1.2 秒，1 小节 = 4.8 秒，全曲 12 小节 = 57.6 秒
+# （加上全局 9.0 秒混响留尾，导出总长约 66.6 秒）。
 #
 # 地基是一条逐小节下沉半音的三全音，十二小节走十一个半音：
 #   1: C–Gb    2: B–F     3: Bb–E    4: A–Eb
@@ -19,25 +20,28 @@
 #
 # 另有一处不显眼的结构：第 7 小节（Gb2–C3）与第 1 小节（C3–Gb3）的音级完全相同，
 # 都是 C 与 Gb —— 因为三全音对称，把 C3–Gb3 整体降一个三全音就得到 Gb2–C3。
-# 所以第 7 小节听上去像"回到了开头"，其实比开头低了整整一个三全音：
-# 同一个东西又沉了一层，而它自己听起来没变 —— 这是"原地"的第二种写法。
+# 更关键的是它与丧钟的对位：
+#   - 第 5 小节丧钟敲下第一记 C4 时，长音在 Ab2–D3，两者斜着相撞；
+#   - 第 7 小节丧钟敲下第二记 C4 时，长音恰好沉到 Gb2–C3 —— 钟的 C4 与长音顶部的 C3
+#     锁成纯八度，全曲唯一一次"钟与地面合拢"，听上去像回到了开头，实则已沉下一层；
+#   - 第 12 小节丧钟敲下最后一记 C4 时，长音沉到 Db2–G2 —— 同一个 C4 此刻悬在低音 Db2
+#     上方复合大七度（差一个半音满两个八度），彻底失去落点。
 #
-# 四个阶段（声部有交叠，不是严格分段）：
-#   第 1–4 小节   地基：长音、次低频压力、呼吸噪声、慢心跳
+# 四个阶段（声部有交叠，全部音序在 mix 中均以 loop=1 走完，无机械重复）：
+#   第 1–4 小节   地基：长音、次低频压力、呼吸噪声、慢心跳；第 4 小节末心跳受惊早搏
 #   第 3–6 小节   刺音插入 —— 刻意不落在段落边界上，惊吓感来自"没准备好"
-#   第 5–8 小节   升级：丧钟进入，心跳换成每小节三组的快心率
+#   第 5–8 小节   升级：丧钟进入，心跳在第 5–6 小节冲上每小节三组，第 7–8 小节透支回落
 #   第 9–12 小节  崩塌：次低频压力撤掉（重量卸下去，只剩空的长音），
 #                 心跳降回每小节一组、并逐小节往后挪，末小节只剩单独一记；
 #                 第 11 小节丧钟的应答消失，末小节一记 C4 独自衰减 ——
 #                 钟始终只敲 C4 与 Gb3，是它下面的世界沉了十一个半音
 #
-# 三套心跳是替换关系，不是叠加：heartbeat 只跑前 4 小节，第 5 小节起交给
-# heartbeat_fast，第 9 小节起交给 heartbeat_failing。三者都是底鼓、音高只差
-# 几个半音，同时响只会把低频搅成一片，而且"心率变快"这个意思会被自己的
-# 慢速版本抵消掉。
+# 三段心跳（heartbeat_1 / heartbeat_2 / heartbeat_failing）是替换关系而非叠加，
+# 且每段都是完整的 4 小节音序（loop=1）：第 1–3 小节平稳，第 3 小节末刺音扎入后，
+# 第 4 小节立刻多出一次惊跳（早搏）接进第 5 小节的快心率；第 7–8 小节快心率开始漏拍、
+# 掉音高，自然滑进第 9–12 小节的衰竭移位。十二小节是一条连续的生理曲线。
 #
-# 音序长度都是整小节数（1 / 4 / 8 / 12），这样 mix 的 time 才能落在小节线上，
-# 各声部的进出点也不会累积漂移。
+# 全部音序长度都是整小节数（4 / 8 / 12），mix 的 time 严格落在小节线上。
 
 config {
   tempo: 50          # 慢到能听见"等待"，恐怖感主要来自这个速度
@@ -49,19 +53,20 @@ config {
 
 # 深渊长音：振幅 / 滤波 / 慢速 LFO 三层包络叠出"呼吸"的错觉。
 # 每个和弦只有 1 小节（4.8 秒），所以 A+D 必须短于 4.8 秒 —— 否则引擎会按
-# 比例压缩起音与衰减（见 applyAdsr），写 3.5 秒的起音实际只有 3.0 秒。
-# 这里取 2.0+2.5 = 4.5 < 4.8，包络按原值走，注释里的数字才对得上听感。
+# 比例压缩起音与衰减（见 applyAdsr）。这里取 2.0+2.5 = 4.5 < 4.8，包络按原值走。
 # release 6.0 秒远长于一小节，相邻和弦因此始终交叠，中间不会出现断口。
+#
+# 加 velocity_to_filter: 160 是为了解决一个声学问题：当长音从 C3–Gb3 沉到 Db2–G2 时，
+# 锯齿波基频降了近一个八度，它的二、三次谐波也会跟着落进 240Hz 低通带内；
+# 若截止频率锁死，末段反而会比开头更亮、更毛躁。配合 drone_3 逐小节递减的 velocity，
+# 滤波截止会随音高下沉同步收暗（第 12 小节压到约 195Hz），崩塌段才真正发空。
 define_instrument(name="abyss_drone") {
   wave: "sawtooth"
   envelope: "adsr(2.0, 2.5, 0.85, 6.0, curve=linear)"
-  # 截止频率取 240Hz：三全音最高那个音是 Gb3 = 185Hz，必须在通带内，
-  # 否则每一小节的两个音一个响一个闷，三全音就听不出是"两个音在打"了。
-  # 锯齿波的谐波（C3 的 261 / 392 / 523Hz…）都在 240 之上，会被削掉，
-  # 所以音色依然是闷的 —— 暗来自谐波被砍，不来自把基频也砍掉。
   filter: "lowpass(240, 2.0)"
   filter_envelope: "adsr(2.5, 2.0, 0.7, 5.0, curve=linear)"
   filter_env_amount: 180        # 加在 240Hz 基线上：2.5 秒开到 420Hz，再收到约 366Hz
+  velocity_to_filter: 160       # 弱奏更暗：末段降低 velocity 时同步压低截止频率
   lfo: "sine(freq=0.13, amount=55, target=filter, ramp=4.0)"
   detune: 14
   voices: 3                     # 三层失谐锯齿：音墙而非单音
@@ -72,14 +77,16 @@ define_instrument(name="abyss_drone") {
 
 # 次低频压力：每个音都从下方五度滑上来，像胸腔被慢慢压住。
 # glide_from 是相对目标音的半音数，-7 即"从纯五度下方滑入"。
-# 这条音色只走第 1–8 小节，崩塌段刻意撤掉它 —— 重量卸下去，只剩空的长音。
+# 每个音时值 2n = 2.4 秒：A+D = 1.2+1.0 = 2.2 < 2.4 秒，不触发压缩；
+# LFO 的 ramp 设为 1.5 秒（< 2.4 秒），确保在单音时值内就能走完淡入。
+# 这条音色只走第 1–8 小节，崩塌段撤掉它 —— 重量卸下去，只剩空的长音。
 define_instrument(name="pressure") {
   wave: "sine"
   envelope: "adsr(1.2, 1.0, 0.85, 3.0, curve=linear)"
   glide: 0.9
   glide_from: -7
   gain: 0.6
-  lfo: "sine(freq=0.09, amount=0.3, target=gain, ramp=3.0)"
+  lfo: "sine(freq=0.22, amount=0.28, target=gain, ramp=1.5)"
 }
 
 # 神经质刺音：极短的 perc 包络 + 高 Q 带通 + 快速颤音，专做"抽气"式的惊吓
@@ -100,23 +107,29 @@ define_instrument(name="nerve_stab") {
   }
 }
 
-# 呼吸：粉噪声本身无音高，带通中心由音符决定，再用极慢的 LFO 改音量。
-# 只留低通、把混响交给全局链：房间只有一个，不该每件乐器各写一份。
+# 呼吸：粉噪声本身无音高，引擎对噪声波形挂带通（中心频率 = 音符频率，Q=1.2），
+# 再叠加这里的 1200Hz 低通，让气流声随着音高逐小节下沉而变闷。
+# breath_bed 中最短的音是 4n（1.2 秒），所以 A+D 设为 0.65+0.45 = 1.1 < 1.2 秒，
+# LFO 的 ramp 设为 1.0 秒，保证最短的呼吸音也不会被引擎按比例压缩包络。
 define_instrument(name="breath") {
   wave: "pink_noise"
-  envelope: "adsr(2.0, 1.5, 0.8, 3.5, curve=linear)"
+  envelope: "adsr(0.65, 0.45, 0.78, 3.2, curve=linear)"
   filter: "lowpass(1200, 0.8)"
-  lfo: "sine(freq=0.07, amount=0.4, target=gain, ramp=2.5)"
+  lfo: "sine(freq=0.28, amount=0.35, target=gain, ramp=1.0)"
   gain: 0.35
   pan: -0.25
 }
 
-# 丧钟：钟体预设 + 低通压暗。它只敲 C4 与 Gb3 这两个音 —— 全曲的三全音，
-# 所以钟声本身也没有落点。它是全曲唯一不动的声部，曲名指的就是它。
-# 只留延迟、混响交给全局链 —— 房间只有一个。
+# 丧钟：钟体预设 + 显式长衰减包络 + 低通压暗。
+# 为什么要显式写 envelope：preset "bell" 默认衰减较短且 sustain=0，
+# 在 tempo 50 下 2n（2.4 秒）与末小节 1n（4.8 秒）听起来会一样长；
+# 改用 3.6 秒衰减 + 0.08 持续电平 + 4.5 秒释音，末小节那一记 1n 才能真正把钟体余振拖满。
+# 加 velocity_to_filter: 900 让应答音（Gb3，力度更轻）比主击（C4）更闷、更远。
 define_instrument(name="toll") {
   preset: "bell"
+  envelope: "adsr(0.003, 3.6, 0.08, 4.5)"
   filter: "lowpass(2400, 0.7)"
+  velocity_to_filter: 900
   gain: 0.42
   pan: 0.3
   effect_chain {
@@ -126,105 +139,169 @@ define_instrument(name="toll") {
 
 # 全局效果链：所有声部共用，顺序 = 信号流经顺序。
 # 各乐器不再各自写混响，房间只有一个。
+# eq 低频段在 250Hz、中频 1200Hz、高频 4000Hz：抬起 250Hz 以下、压暗中高音。
 effect_chain {
   reverb(decay=9.0, mix=0.45, pre_delay=0.05, damping=2600)
-  eq(low=1.5, mid=-1.0, high=-2.0)   # 压掉高频、抬起低频：闷、厚、没有空气感
+  eq(low=1.5, mid=-1.0, high=-2.0)
 }
 
 # 长音分三段，每段 4 小节，接起来是一条连续下沉的三全音（见文件头对照表）。
-# 拆三段而不是写成一条 12 小节的音序：mix 只能按 time 定位整条音序，
-# 拆开才能让"下沉"与其它声部（压力、心跳、丧钟）各自的进出点对齐到小节线。
+# 拆三段是为了让"下沉"与其它声部（压力、心跳、丧钟）各自的进出点在 mix 中对齐小节线。
 #
-# 音区从 C3–Gb3(130.8/185.0Hz) 起，逐小节降半音，到第 12 小节落到 Db2–G2
-# (69.3/98.0Hz)：十二小节共下沉十一个半音，差一个半音不到一个八度 ——
-# 全曲结束时比开始时低了将近一整层。
-# 为什么从 C3 而不是 C2 起：从 C2 起沉十一个半音会落到 Db1(34.6Hz)，
-# 那是多数音箱放不出来的频率，最后四小节会变成没有声音的"静音崩塌"。
+# 第 1–4 小节：从 C3–Gb3(130.8/185.0Hz) 起步，力度逐小节微涨（0.78 → 0.85），
+# 把第 3 小节刺音扎入前后的压迫感慢慢顶起来。
 sequence(name="drone_1", instrument="abyss_drone", gain=0.95) {
-  chord(["C3",  "Gb3"], "1n")
-  chord(["B2",  "F3"],  "1n")
-  chord(["Bb2", "E3"],  "1n")
-  chord(["A2",  "Eb3"], "1n")
+  chord(["C3",  "Gb3"], "1n", velocity=0.78)
+  chord(["B2",  "F3"],  "1n", velocity=0.80)
+  chord(["Bb2", "E3"],  "1n", velocity=0.82)
+  chord(["A2",  "Eb3"], "1n", velocity=0.85)
 }
 
-# 第 5–8 小节：继续下沉。第 7 小节的 Gb2–C3 与第 1 小节的 C3–Gb3 音级相同
-# （C 与 Gb），因为三全音对称 —— 整体降一个三全音之后音级不变。
-# 所以这里听上去像"回到开头"，实际比开头低了一个三全音。
+# 第 5–8 小节：继续下沉。第 5–6 小节与丧钟、刺音正面碰撞，力度推到顶点（0.90）；
+# 第 7 小节 Gb2–C3 与第 1 小节 C3–Gb3 音级完全相同（三全音对称），且顶部 C3 与
+# 丧钟的 C4 锁成纯八度 —— 听上去像"回到开头"，实际比开头低了一个三全音；
+# 第 8 小节力度开始回落（0.80），为第 9 小节抽走压力层做铺垫。
 sequence(name="drone_2", instrument="abyss_drone", gain=0.95) {
-  chord(["Ab2", "D3"],  "1n")
-  chord(["G2",  "Db3"], "1n")
-  chord(["Gb2", "C3"],  "1n")
-  chord(["F2",  "B2"],  "1n")
+  chord(["Ab2", "D3"],  "1n", velocity=0.88)
+  chord(["G2",  "Db3"], "1n", velocity=0.90)
+  chord(["Gb2", "C3"],  "1n", velocity=0.86)
+  chord(["F2",  "B2"],  "1n", velocity=0.80)
 }
 
-# 第 9–12 小节：沉到 Db2–G2。这一段没有压力层托底，同一个音区听起来比前面空 ——
-# 不是变轻了，是脚下那块地板被抽走了。
+# 第 9–12 小节：沉到 Db2–G2(69.3/98.0Hz)。这一段没有压力层托底，且 velocity
+# 从 0.72 一路降到 0.52 —— 配合 abyss_drone 的 velocity_to_filter，滤波截止同步下压，
+# 听起来不是变轻了，是脚下那块地板被抽走了。末小节 gate=1.35 让低音拖进混响尾音。
 sequence(name="drone_3", instrument="abyss_drone", gain=0.95) {
-  chord(["E2",  "Bb2"], "1n")
-  chord(["Eb2", "A2"],  "1n")
-  chord(["D2",  "Ab2"], "1n")
-  chord(["Db2", "G2"],  "1n")
+  chord(["E2",  "Bb2"], "1n", velocity=0.72)
+  chord(["Eb2", "A2"],  "1n", velocity=0.66)
+  chord(["D2",  "Ab2"], "1n", velocity=0.60)
+  chord(["Db2", "G2"],  "1n", velocity=0.52, gate=1.35)
 }
 
 # 次低频压力：与长音同一组音，但低一个八度，一小节两个音交替走三全音的两端。
-# 为什么还要再低一个八度：长音是三层失谐锯齿，即使被 240Hz 低通削过，
-# 听感重心仍在中低音区；这一层是纯正弦、一个谐波都没有，专门把最底下那一层补厚。
+# 长音是三层失谐锯齿，听感重心在中低音区；这一层是纯正弦，专门把最底下那一层补厚。
+# 最低音是 F1 = 43.7Hz，用耳机能明显感受到胸腔压迫。
 #
-# 最低音是 F1 = 43.7Hz。笔记本与小音箱放不出来，这不是缺陷 —— 听不到的那部分
-# 本来就只该留在胸腔里；要确认它存在，用耳机听，或把这一层整体升八度试。
-#
-# 只写前 8 小节：崩塌段撤掉它，重量卸下去。
+# 第 1–4 小节保持稳定推力；第 5–8 小节的后半段（第 7–8 小节）力度从 0.78 递减到 0.52，
+# 让次低频在第 9 小节彻底消失前先有一个"往下漏空"的过程，而不是生硬切断。
 sequence(name="pressure_1", instrument="pressure", gain=0.8) {
-  note("C2",  "2n")
-  note("Gb2", "2n")
-  note("B1",  "2n")
-  note("F2",  "2n")
-  note("Bb1", "2n")
-  note("E2",  "2n")
-  note("A1",  "2n")
-  note("Eb2", "2n")
+  note("C2",  "2n", velocity=0.80)
+  note("Gb2", "2n", velocity=0.76)
+  note("B1",  "2n", velocity=0.80)
+  note("F2",  "2n", velocity=0.76)
+  note("Bb1", "2n", velocity=0.82)
+  note("E2",  "2n", velocity=0.78)
+  note("A1",  "2n", velocity=0.84)
+  note("Eb2", "2n", velocity=0.80)
 }
 
 sequence(name="pressure_2", instrument="pressure", gain=0.8) {
-  note("Ab1", "2n")
-  note("D2",  "2n")
-  note("G1",  "2n")
-  note("Db2", "2n")
-  note("Gb1", "2n")
-  note("C2",  "2n")
-  note("F1",  "2n")
-  note("B1",  "2n")
+  note("Ab1", "2n", velocity=0.86)
+  note("D2",  "2n", velocity=0.82)
+  note("G1",  "2n", velocity=0.84)
+  note("Db2", "2n", velocity=0.80)
+  note("Gb1", "2n", velocity=0.78)
+  note("C2",  "2n", velocity=0.72)
+  note("F1",  "2n", velocity=0.64)
+  note("B1",  "2n", velocity=0.52)
 }
 
-# 1 小节：真实心音是"咚—哒"两下，第二声更闷更弱。一小节两组，靠 mix 的 loop 重复。
-# 两个音都用底鼓：鼓组不走乐器的滤波/LFO/增益链路，自带 DRUM_SPECS 标定，
-# 所以这里不需要挂乐器 —— 写了也不会改变音色。sequence 不写 instrument 时，
-# 只要块里没有 note/chord/arp/run，解析器也不会去要求一个乐器存在。
-sequence(name="heartbeat") {
+# 第 1–4 小节心跳（4 小节完整写出，不用 1 小节 loop=4）：
+# 真实心音是"咚—哒"两下，第二声更闷更弱。
+#   - 第 1–2 小节：每小节两组，平稳沉重；
+#   - 第 3 小节：第 4 拍 nerve_scares 的第一记 C6 刺音突然扎入；
+#   - 第 4 小节：心脏对刺音做出生理反应 —— 第二组提前半拍（只休止 8n），
+#     并在小节末尾多挣出一记急促的早搏（tune=0），直接把心率顶进第 5 小节的快心率。
+sequence(name="heartbeat_1") {
+  # 第 1 小节：平稳（4 拍）
   hit("kick", "8n", tune=-4, decay=1.2,  snap=0.15, velocity=1.0)
   hit("kick", "8n", tune=-5, decay=0.7,  tone=-400, velocity=0.42)
   rest("4n")
   hit("kick", "8n", tune=-3, decay=1.05, snap=0.1,  velocity=0.8)
   hit("kick", "8n", tune=-6, decay=0.65, tone=-400, velocity=0.35)
   rest("4n")
+
+  # 第 2 小节：微沉（4 拍）
+  hit("kick", "8n", tune=-4, decay=1.2,  snap=0.15, velocity=0.95)
+  hit("kick", "8n", tune=-5, decay=0.7,  tone=-400, velocity=0.40)
+  rest("4n")
+  hit("kick", "8n", tune=-4, decay=1.05, snap=0.1,  velocity=0.78)
+  hit("kick", "8n", tune=-6, decay=0.65, tone=-400, velocity=0.34)
+  rest("4n")
+
+  # 第 3 小节：刺音在第 4 拍扎入，第二组心音略微绷紧（4 拍）
+  hit("kick", "8n", tune=-3, decay=1.15, snap=0.15, velocity=0.95)
+  hit("kick", "8n", tune=-5, decay=0.68, tone=-380, velocity=0.42)
+  rest("4n")
+  hit("kick", "8n", tune=-2, decay=1.0,  snap=0.12, velocity=0.85)
+  hit("kick", "8n", tune=-4, decay=0.6,  tone=-380, velocity=0.38)
+  rest("4n")
+
+  # 第 4 小节：受惊后的早搏 —— 变成三组，末组音高上移，无缝接进第 5 小节（4 拍）
+  hit("kick", "8n",  tune=-1, decay=0.95, snap=0.12, velocity=0.9)
+  hit("kick", "8n",  tune=-4, decay=0.58, tone=-360, velocity=0.40)
+  rest("8n")
+  hit("kick", "8n",  tune=0,  decay=0.9,  snap=0.11, velocity=0.85)
+  hit("kick", "8n",  tune=-3, decay=0.55, tone=-360, velocity=0.36)
+  rest("8n")
+  hit("kick", "8n",  tune=1,  decay=0.85, snap=0.1,  velocity=0.82)
+  hit("kick", "16n", tune=-2, decay=0.5,  tone=-350, velocity=0.35)
+  rest("16n")
 }
 
-# 1 小节：同样的"咚—哒"压成三组，音高上移、力度变小 —— 心率快了，人却没力气了。
-# 每组占 1 拍（8n + 16n + 16n），三组之后补 1 拍休止，整段正好 4 拍。
-sequence(name="heartbeat_fast") {
-  hit("kick", "8n",  tune=2,  decay=0.85, snap=0.1,  velocity=0.8)
-  hit("kick", "16n", tune=-1, decay=0.5,  tone=-350, velocity=0.35)
+# 第 5–8 小节心跳（4 小节完整写出，不用 loop=4）：
+#   - 第 5–6 小节：丧钟进入 + 刺音后半段，每小节紧缩成三组（每组占 1 拍：8n+16n+16n），
+#     音高上移、力度变薄 —— 心率快了，人却没力气了；
+#   - 第 7 小节：刺音撤出，第三组开始体力透支（晚半拍才出来，音高掉回 0）；
+#   - 第 8 小节：撑不住三组，退回两组且间隔拉大、音高转负，自然接进第 9 小节的单组衰竭。
+sequence(name="heartbeat_2") {
+  # 第 5 小节：紧迫三组（4 拍）
+  hit("kick", "8n",  tune=2,  decay=0.85, snap=0.1,  velocity=0.82)
+  hit("kick", "16n", tune=-1, decay=0.5,  tone=-350, velocity=0.36)
   rest("16n")
-  hit("kick", "8n",  tune=2,  decay=0.85, snap=0.1,  velocity=0.75)
-  hit("kick", "16n", tune=-1, decay=0.5,  tone=-350, velocity=0.32)
+  hit("kick", "8n",  tune=2,  decay=0.85, snap=0.1,  velocity=0.76)
+  hit("kick", "16n", tune=-1, decay=0.5,  tone=-350, velocity=0.33)
   rest("16n")
-  hit("kick", "8n",  tune=3,  decay=0.8,  snap=0.08, velocity=0.7)
-  hit("kick", "16n", tune=0,  decay=0.5,  tone=-350, velocity=0.3)
+  hit("kick", "8n",  tune=3,  decay=0.8,  snap=0.08, velocity=0.72)
+  hit("kick", "16n", tune=0,  decay=0.5,  tone=-350, velocity=0.30)
   rest("16n")
   rest("4n")
+
+  # 第 6 小节：顶点三组，第三组已显虚弱（4 拍）
+  hit("kick", "8n",  tune=3,  decay=0.82, snap=0.1,  velocity=0.80)
+  hit("kick", "16n", tune=0,  decay=0.48, tone=-350, velocity=0.34)
+  rest("16n")
+  hit("kick", "8n",  tune=2,  decay=0.82, snap=0.09, velocity=0.74)
+  hit("kick", "16n", tune=-1, decay=0.48, tone=-360, velocity=0.31)
+  rest("16n")
+  hit("kick", "8n",  tune=2,  decay=0.78, snap=0.08, velocity=0.68)
+  hit("kick", "16n", tune=-1, decay=0.46, tone=-370, velocity=0.28)
+  rest("16n")
+  rest("4n")
+
+  # 第 7 小节：第三组漏拍后移（休止 8n 再出），音高开始往下掉（4 拍）
+  hit("kick", "8n",  tune=1,  decay=0.88, snap=0.09, velocity=0.76)
+  hit("kick", "16n", tune=-2, decay=0.52, tone=-370, velocity=0.32)
+  rest("16n")
+  hit("kick", "8n",  tune=1,  decay=0.88, snap=0.08, velocity=0.70)
+  hit("kick", "16n", tune=-2, decay=0.52, tone=-380, velocity=0.29)
+  rest("16n")
+  rest("8n")
+  hit("kick", "8n",  tune=0,  decay=0.92, snap=0.08, velocity=0.64)
+  hit("kick", "8n",  tune=-3, decay=0.55, tone=-390, velocity=0.27)
+  rest("4n")
+  rest("8n")
+
+  # 第 8 小节：透支退回两组，音高落回负值，衔接到第 9 小节的衰竭（4 拍）
+  hit("kick", "8n", tune=-1, decay=1.0,  snap=0.09, velocity=0.74)
+  hit("kick", "8n", tune=-4, decay=0.58, tone=-400, velocity=0.30)
+  rest("4n.")
+  hit("kick", "8n", tune=-2, decay=1.05, snap=0.08, velocity=0.68)
+  hit("kick", "8n", tune=-5, decay=0.58, tone=-410, velocity=0.28)
+  rest("4n.")
 }
 
-# 4 小节：心率衰竭。每组"咚—哒"的形状不变（仍是两下、第二下更弱），
+# 第 9–12 小节：心率衰竭。每小节只剩一组"咚—哒"，
 # 变的是两件事：它在小节里的位置逐小节往后挪，音高继续往下掉。
 #   第 9 小节  第 1 拍起     第 10 小节  第 2 拍起
 #   第 11 小节 第 3 拍起     第 12 小节  第 4 拍才起，第二声没跟上
@@ -254,10 +331,7 @@ sequence(name="heartbeat_failing") {
 # 12 小节：呼吸层铺满全曲，一次写完不靠 loop —— 它的音高决定噪声的带通中心
 # （合成器对噪声波形挂的是 bandpass，中心频率 = 音符频率，Q=1.2），
 # 所以要跟着长音一起往下沉，逐小节对应 drone_1/2/3 的十二个音。
-#
-# 每小节正好 4 拍，一小节一到两个音，其余留给空白。
-# 原稿这里是 1n + 8n + 2n. + 4n = 8.5 拍 —— 不是整小节，
-# loop 之后每一遍都会比上一遍晚半拍，几遍下来就和长音错开了。
+# 每小节严格 4 拍，一小节一到两个音，其余留给空白。
 sequence(name="breath_bed", instrument="breath", gain=0.75) {
   note("C4",  "2n", velocity=0.50)     # 1
   rest("4n")
@@ -313,138 +387,110 @@ sequence(name="breath_bed", instrument="breath", gain=0.75) {
 # 关于 run 的 direction：引擎里 `direction="down"` 会把数组反转，
 # 所以要让音高**下行**，数组必须按上行写。这里写 ["A5","Bb5","B5","C6"]
 # 加 direction="down"，实际发声是 C6→B5→Bb5→A5，与"半音下行"的意图一致。
-# 若直接写下行数组再配 down，会得到一条上行的线 —— 恰好是想要的反面。
 sequence(name="nerve_scares", instrument="nerve_stab", gain=0.6) {
-  rest("2n.")                                   # 第 1 小节：静默 3 拍
+  rest("2n.")                                   # 第 1 小节（对应全曲第 3 小节）：静默 3 拍
   note("C6", "16n", velocity=1.0, accent=true)
   rest("8n")
   rest("16n")
 
-  rest("4n.")                                   # 第 2 小节：偏拍进入
+  rest("4n.")                                   # 第 2 小节（对应全曲第 4 小节）：偏拍进入
   chord(["F5","Gb5"], "16n", velocity=0.9, pan=0.5)
   rest("2n")
   rest("16n")
 
-  rest("2n")                                    # 第 3 小节
+  rest("2n")                                    # 第 3 小节（对应全曲第 5 小节）
   rest("8n")
   run(["A5","Bb5","B5","C6"], "32n", direction="down", velocity=0.75, pan=0.4)
   rest("4n")
 
-  rest("2n")                                    # 第 4 小节：先一声，再一簇
+  rest("2n")                                    # 第 4 小节（对应全曲第 6 小节）：先一声，再一簇
   note("Bb5", "8n", velocity=0.8, gate=0.6)
   rest("4n")
   chord(["C6","Db6"], "8n", velocity=1.0, accent=true, strum=0.15)
 }
 
 # 8 小节，每小节严格 4 拍。钟从头到尾只敲两个音：C4 与 Gb3 —— 正是全曲的
-# 那个三全音。它自己不动，动的是它下面那条长音：从 C3–Gb3 沉到 Db2–G2，
-# 十一个半音。所以听感上不是钟在升，是钟在原地而世界在往下掉。
+# 那个三全音。它自己不动，动的是它下面那条长音：从 Ab2–D3（第 5 小节）一路沉到
+# Db2–G2（第 12 小节）。所以听感上不是钟在升，是钟在原地而世界在往下掉。
 #
 # 钟与刮擦是**先后**关系不是同时：音序内部的指令严格串行，每条把时间轴往后
 # 推自己的时值，所以 hit() 出现在前一条 note() 之后，不会叠上去。
 # 这里正好利用这一点做"一击一答"：C4 敲下（占 2 拍）→ 空 2 拍 → 刮擦 → Gb3 应答。
 #
-# 为什么钟用 C4 而不是与长音同八度的 C3：C3 = 130.8Hz，会和长音第 1 小节的
-# C3 撞在同一个音高上（钟体是 FM 非谐分音，叠上去只会变浑）；C4 = 261.6Hz，
-# 与长音整个音域都不重叠，钟声才立得出来。
+# 为什么钟用 C4 而不是与长音同八度的 C3：C4 = 261.6Hz，与长音整个音域都不重叠，
+# 钟声才立得出来；而且在第 7 小节（长音 Gb2–C3）会与长音顶部的 C3 形成全曲唯一一次
+# 纯八度对齐，到第 12 小节（长音 Db2–G2）则变成对低音 Db2 的复合大七度悬置。
 sequence(name="bell_toll", instrument="toll", gain=0.85) {
-  note("C4", "2n", velocity=0.9)        # 第 5 小节：第一记
+  note("C4", "2n", velocity=0.9)        # 第 5 小节：第一记（底下是 Ab2–D3）
   rest("2n")
 
   hit("crash", "2n", decay=1.4, tone=-1800, velocity=0.2, pan=-0.6)
-  note("Gb3", "2n", velocity=0.6)       # 第 6 小节：刮擦 + 应答
+  note("Gb3", "2n", velocity=0.6)       # 第 6 小节：刮擦 + 应答（底下是 G2–Db3）
 
-  note("C4", "2n", velocity=0.85)       # 第 7 小节：第二记
+  note("C4", "2n", velocity=0.85)       # 第 7 小节：第二记（底下是 Gb2–C3，八度重合）
   rest("2n")
 
   hit("ride", "2n", decay=1.6, tone=-900, velocity=0.16, pan=0.5)
-  note("Gb3", "2n", velocity=0.55)      # 第 8 小节
+  note("Gb3", "2n", velocity=0.55)      # 第 8 小节（底下是 F2–B2）
 
-  note("C4", "2n", velocity=0.8)        # 第 9 小节：第三记
+  note("C4", "2n", velocity=0.8)        # 第 9 小节：第三记（底下是 E2–Bb2）
   rest("2n")
 
   hit("crash", "2n", decay=1.4, tone=-1800, velocity=0.18, pan=-0.5)
-  note("Gb3", "2n", velocity=0.5)       # 第 10 小节
+  note("Gb3", "2n", velocity=0.5)       # 第 10 小节（底下是 Eb2–A2）
 
   # 第 11 小节整小节留白 —— 前三次都是"一击一答"，到这里应答停了。
-  # 这一小节的空是全曲最响的地方：长音还在沉，心跳已经乱了，什么都没有发生。
+  # 此时底下长音是 D2–Ab2，与钟的 C–Gb 恰好拼成完整的减七和弦，钟却偏偏不响。
   rest("1n")
 
-  # 第 12 小节：最后一记，没有应答，让它自己衰减进混响
-  note("C4", "1n", velocity=0.75)
+  # 第 12 小节：最后一记 C4（底下是 Db2–G2，悬在大七度上），没有应答，拖满整小节衰减进混响
+  note("C4", "1n", velocity=0.75, gate=1.2)
 }
 
 # ===========================================================================
 # 编排
-# time 是进入时刻，loop 从上一遍结束处继续排（不是每遍都回到 time）。
-# 每条 track 的 time + 音序长度 × loop 都落在 12 小节之内，全曲正好 57.6 秒。
-#
-# 注意 bell_toll 只出现一次、从第 5 小节起 loop=1 —— 一条 8 小节的音序正好
-# 覆盖第 5–12 小节，不重复也不留空。这是曲名的落点所在：别的声部都在变
-# （长音下沉、心跳衰竭、呼吸减少），只有这条钟的旋律从进来到结束一个音没改。
+# 全部 track 均为 loop=1 —— 全曲没有任何一段靠机械循环充数，
+# 每个 4 小节阶段（包括心跳）都有自己独立的形态演变。
+# 每条 track 的 time + 音序长度都落在 12 小节之内，全曲正好 57.6 秒。
 # ===========================================================================
 mix {
-  # 第 1–4 小节：地基
-  track(source="drone_1",         time=0,    loop=1, gain=0.9)
-  track(source="pressure_1",      time=0,    loop=1, gain=0.85)
-  track(source="heartbeat",       time=0,    loop=4, gain=0.95)
+  # 第 1–4 小节：地基（第 4 小节心跳受第 3 小节刺音惊吓出现早搏）
+  track(source="drone_1",           time=0,    loop=1, gain=0.9)
+  track(source="pressure_1",        time=0,    loop=1, gain=0.85)
+  track(source="heartbeat_1",       time=0,    loop=1, gain=0.95)
 
-  # 第 3–6 小节：刺音刻意从第 3 小节插入，不等段落边界
-  track(source="nerve_scares",    time="2m", loop=1, gain=0.9)
+  # 第 3–6 小节：刺音刻意从第 3 小节插入，跨过第 4/5 小节边界
+  track(source="nerve_scares",      time="2m", loop=1, gain=0.9)
 
-  # 第 5–8 小节：升级
-  track(source="drone_2",         time="4m", loop=1, gain=0.9)
-  track(source="pressure_2",      time="4m", loop=1, gain=0.85)
-  track(source="heartbeat_fast",  time="4m", loop=4, gain=0.85)
-  track(source="bell_toll",       time="4m", loop=1, gain=0.85)
+  # 第 5–8 小节：升级（心率冲上三组后在第 7–8 小节透支回落，次低频压力在末两小节渐弱）
+  track(source="drone_2",           time="4m", loop=1, gain=0.9)
+  track(source="pressure_2",        time="4m", loop=1, gain=0.85)
+  track(source="heartbeat_2",       time="4m", loop=1, gain=0.85)
+  track(source="bell_toll",         time="4m", loop=1, gain=0.85)
 
-  # 第 9–12 小节：崩塌。压力层不在这里出现，心跳换成衰竭版
-  track(source="drone_3",         time="8m", loop=1, gain=0.9)
+  # 第 9–12 小节：崩塌。压力层撤掉，心跳换成逐小节后移的衰竭版
+  track(source="drone_3",           time="8m", loop=1, gain=0.9)
   track(source="heartbeat_failing", time="8m", loop=1, gain=0.9)
 
-  # 呼吸层铺满全曲，写一条 12 小节的音序而不是 loop —— 它的音高要跟着长音下沉
-  track(source="breath_bed",      time=0,    loop=1, gain=0.75, pan=-0.2)
+  # 呼吸层铺满全曲，12 小节音高跟着长音逐小节下沉
+  track(source="breath_bed",        time=0,    loop=1, gain=0.75, pan=-0.2)
 }
 
 # ---------------------------------------------------------------- 调参笔记
-# 1. 恐怖音乐最忌讳声部同时换音。这里靠三件事错开：呼吸层的音符都落在小节
-#    第 2 拍之后（长音换和弦之后才起），心跳的第二声用更短的时值，
-#    以及刺音全部落在非重拍上。想让它更整齐反而会变得平淡。
+# 1. 恐怖音乐最忌讳声部同时换音。这里靠三件事错开：呼吸层的音符落在拍后或空拍，
+#    心跳的第二声用更短的时值，以及刺音全部落在非重拍上。想让它更整齐反而会变得平淡。
 #
-# 2. mix 的 loop 是"再演一遍"：第 n 遍从上一遍的终点接续，不是每次都回到 time。
-#    所以 drone_1 写 loop=1 只覆盖 4 小节，想让它铺满 12 小节就写 loop=3 ——
-#    但那会让同一条下沉线重复三次，与"持续下沉"的设计相反，所以这里拆成了三段。
-#    另注意：写了 mix 之后，没被任何 track 引用的音序一律不发声，
-#    解析器只会给一句警告。改动时记得两边同步。
+# 2. 全曲所有 track 都是 loop=1：原稿中 heartbeat 与 heartbeat_fast 用 1 小节音序
+#    配 loop=4，导致第 3 小节刺音扎进来时心跳毫无反应、第 8 小节到第 9 小节又从
+#    三组直接断崖跳成一组。展开成 4 小节音序（heartbeat_1 / heartbeat_2）后，
+#    第 4 小节末的早搏与第 7–8 小节的漏拍把十二小节串成了一条连续的生理曲线。
 #
-# 3. 逐音符参数（velocity / pan / tune / decay / tone / snap / accent / gate）
-#    写在括号里，是 note()、hit()、chord()、run() 的具名参数，不是独立指令。
-#    hit() 的 tune 单位是半音、decay 是倍数、tone 是 Hz 偏移、snap 取 0~1；
-#    accent 是 velocity=1 的简写，hit() 同样认（本谱的心跳直接用 velocity 写）。
+# 3. 包络与 LFO 时值核对：
+#    - breath_bed 中最短的音是 4n（1.2 秒），因此 breath 的 A+D 设为 0.65+0.45 = 1.1 秒
+#      （< 1.2 秒），LFO ramp 设为 1.0 秒，避免触发引擎的 A+D 按比例压缩。
+#    - pressure 每个音是 2n（2.4 秒），A+D = 2.2 秒、LFO ramp = 1.5 秒，均在单音时值内完成。
+#    - toll 显式声明 envelope: "adsr(0.003, 3.6, 0.08, 4.5)"，避免默认 bell 预设过早衰减，
+#      让第 12 小节的 1n 长钟声真正拖满整小节并溢入 9 秒混响。
 #
-# 4. 音量是三级相乘：乐器 gain × 音序 gain × track gain，最后再乘 master_gain。
-#    整体发闷或过载时先动 master_gain（上限 2），再动 track，最后才动乐器。
-#
-# 5. 鼓组（hit）不走乐器的滤波 / LFO / 增益 / 声像链路，自带 DRUM_SPECS 标定，
-#    只认逐音符的 velocity / pan（以及 mix 轨道的 pan）。所以 heartbeat 不挂乐器
-#    是正常的，给它写 instrument 也不会改变音色。
-#
-# 6. 想让压迫感再重一层：abyss_drone 的 filter 降到 200、master_gain 降到 0.6；
-#    想让崩塌段更空：把 drone_3 的 gain 降到 0.7、breath_bed 末四小节再删两个音。
-#
-# 7. 曲名的落点在 bell_toll：钟只敲 C4 与 Gb3，八小节一次没改。
-#    想强化"原地"这层意思，就加大反差 —— 要么让钟更固执（在 bell_toll 里
-#    把每小节的休止换成又一记 C4，变成整点报时一样的等距敲击），
-#    要么让长音沉得更快（每小节降两个半音，十二小节降近两个八度）。
-#    两者离得越远，"钟不动而世界在掉"越清楚。
-#
-# 8. 低频提醒：pressure 层最低 F1 = 43.7Hz，drone_3 最低 Db2 = 69.3Hz。
-#    笔记本与小音箱放不出 F1，用耳机听才有完整效果。
-#
-# 9. 易错点备忘：
-#    - run 的 direction="down" 反转数组，要下行就得按上行写（见 nerve_scares）。
-#    - 音序里的指令严格串行，每条把时间轴推自己的时值；不存在"同时发两个音"，
-#      要同时发声只能用 chord()。
-#    - 包络的 A+D 超过音符时值时会被按比例压缩，写下的秒数不再是听到的秒数。
-#    - 每个音序的时长最好是整小节数，否则 mix 的 time 会逐遍累积偏移。
-#    - config 的 key / scale 只做格式校验，不参与发声。
+# 4. 声学补偿：abyss_drone 挂了 velocity_to_filter: 160，配合 drone_3 从 0.72 降到 0.52
+#    的 velocity，在基频沉入 Db2–G2 时同步压低低通截止频率，防止高次谐波落入通带后反而变亮。

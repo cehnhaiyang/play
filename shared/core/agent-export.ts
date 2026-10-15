@@ -83,8 +83,7 @@ const sectionHeading = (message: AgentMessage, index: number): string => {
 const usageLine = (usage: AiUsage | undefined): string | null => {
     if (!usage) return null;
     const approx = usage.estimated ? '~' : '';
-    return `token：${approx}${usage.promptTokens} 输入 + ${approx}${usage.completionTokens} 输出 = ${approx}${usage.totalTokens}`
-        + `${usage.estimated ? '（本地估算）' : '（服务端实测）'}`;
+    return `token：${approx}${usage.promptTokens} 输入 + ${approx}${usage.completionTokens} 输出 = ${approx}${usage.totalTokens}`;
 };
 
 /** 压缩记录的一行摘要说明 */

@@ -1,8 +1,10 @@
 import { AgentEngine, memoryStorage } from '../agent/engine';
 import type { ChatPort, EngineSnapshot, EngineStorage } from '../agent/engine';
+import type { SandboxRequest, SandboxResult } from '../../../shared/meta';
+import { SANDBOX_EXEC_TIMEOUT_MAX_MS } from '../../../shared/meta';
 import { pageHost } from '../offscreen/page-host';
 import { createChatPort } from './chat-port';
-import { emitBridgeEvent } from './bridge-port';
+import { emitBridgeEvent, requestApp } from './bridge-port';
 
 /**
  * Agent 在 service worker 里的接线。
@@ -50,6 +52,22 @@ const chromeStorage: EngineStorage = {
 /* ========================================================================== */
 /* 2. 引擎实例                                                                */
 /* ========================================================================== */
+
+/**
+ * 本机沙箱端口。
+ *
+ * 单独一个函数而不是塞进 `pageHost`：那一层是"页面宿主"，而沙箱与页面无关，
+ * 它的对端是桌面应用的 Node 能力（见 bridge.ts 的 `sandbox` 归属）。
+ *
+ * 等待时长必须显式放宽到 exec 的最长超时：默认 5 秒是给"读一份配置"那种用的，
+ * 而一条命令跑到第十分钟时，5 秒的等待会先报"应用没回应" —— 命令其实还在跑，
+ * 模型却以为失败了，接着再发一遍同一个命令。
+ */
+const sandboxPort = (request: SandboxRequest): Promise<SandboxResult> => requestApp<SandboxResult>(
+    'sandbox',
+    request,
+    SANDBOX_EXEC_TIMEOUT_MAX_MS + 10000,
+);
 
 /**
  * 全局单例。
@@ -121,6 +139,7 @@ const getEngine = async (): Promise<AgentEngine> => {
         host: pageHost,
         storage: chromeStorage,
         chat: createChatPort(ensureOffscreen),
+        sandbox: sandboxPort,
         onDelta: (delta) => {
             void chrome.runtime.sendMessage({ target: 'ball', kind: 'agent-delta', delta })
                 .catch(() => undefined);
@@ -211,6 +230,13 @@ export const createMemoryEngine = (chat: ChatPort): AgentEngine => new AgentEngi
     host: pageHost,
     storage: memoryStorage(),
     chat,
+    /**
+     * 内存引擎不接本机沙箱，如实报"未接通"。
+     *
+     * 不能回 `{bytes:0}` 之类的成功值 —— 那会把一个没接的功能伪装成合法状态，
+     * 模型收到成功就照着往下走（`host.ts` 里 `tamper` 可选化踩过同一坑）。
+     */
+    sandbox: async () => ({ error: '这个引擎实例没有接通本机沙箱。' }),
     onDelta: () => undefined,
     onSnapshot: () => undefined,
 });

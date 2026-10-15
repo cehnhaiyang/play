@@ -62,6 +62,9 @@ const main = async () => {
   console.log('\n=== 桥契约 ===');
   const bridgeOk = require('./bridge.test.js').run();
 
+  console.log('\n=== 桥·插件请求方向 ===');
+  const bridgeAppOk = await require('./bridgeapp.test.js').runAsync();
+
   console.log('\n=== 插件嗅探分类 ===');
   const extSnifferOk = require('./extsniffer.test.js').run();
 
@@ -73,7 +76,7 @@ const main = async () => {
 
   if (!engineOk || !compatOk || !aibookOk || !aiproviderOk || !searchSyncOk || !searchAsyncOk
     || !mainStaticOk || !agentToolsOk
-    || !logsOk || !bridgeOk || !extSnifferOk || !manifestOk || !scriptsOk) {
+    || !logsOk || !bridgeOk || !bridgeAppOk || !extSnifferOk || !manifestOk || !scriptsOk) {
     process.exitCode = 1;
     console.log('\n存在失败用例。');
   } else {

@@ -41,8 +41,7 @@ import type {
     LogLevel,
 } from '../../../shared/meta';
 import { getElectronAPI } from '../../../shared/meta';
-import { loadJSON, requiresFfmpeg, saveJSON } from '../../../shared/core';
-import { formatBytes } from '../services/SearchService';
+import { loadJSON, saveJSON } from '../../../shared/core';
 import {
     AI_PROVIDERS,
     DEFAULT_AI_CONFIG,

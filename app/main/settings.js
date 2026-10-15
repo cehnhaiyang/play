@@ -216,6 +216,21 @@ function normalizeAiInput(input) {
     };
 }
 
+/**
+ * 交给**插件**的设置快照。
+ *
+ * 与渲染层那条 `settings-get` 是同一份真值（都走 getSettings），只是出口不同：
+ * 插件侧的 Agent 每次调用模型都要拿 AI 配置，而"应用自己的代理生效在哪"
+ * 那两项是给界面看的，插件用不上，所以不在这里拼。
+ *
+ * 单独成函数而不是在 main.js 的分派器里现拼：那是跨进程的线格式，
+ * 插件侧读的是 `snapshot.ai`（见 extension/src/background/chat-port.ts），
+ * 形状必须能**被直接调用验证**，而不是两个人各抄一份。
+ */
+function getPluginSettings() {
+    return { ai: getSettings().ai };
+}
+
 function getSettings() {
     return { ...readSettings() };
 }
@@ -321,6 +336,7 @@ async function testAiConnection(input, wireEffort) {
 
 module.exports = {
     getSettings,
+    getPluginSettings,
     saveProxyPort,
     normalizeProxyInput,
     saveAiConfig,
