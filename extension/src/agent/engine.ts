@@ -528,7 +528,7 @@ export class AgentEngine {
                 protocolErrors = 0;
 
                 // 日志只写工具名会分不清模型做的是哪件事
-                // （读写删跑命令都是 "sandbox"）。
+                // （读写删改查语法都是 "sandbox"）。
                 const rawAction = asString(args.action);
                 const label = tool === 'sandbox' && rawAction ? `${tool}·${rawAction}` : tool;
 
@@ -546,7 +546,7 @@ export class AgentEngine {
                     reasoning: keepReasoning(liveReasoning),
                     tool,
                     // 显示文案会被 thought 顶掉，而 label 是**稳定**的那一份：重建上下文时
-                    // 若只按 tool 写回，模型在历史里看不出这一步做的是读文件还是跑命令。
+                    // 若只按 tool 写回，模型在历史里看不出这一步做的是读文件还是改文件。
                     label,
                     // js 跑的源码存下来供界面展开查看；其它工具没有源码。
                     script: tool === 'js' ? asString(args.code) : undefined,

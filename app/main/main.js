@@ -2062,7 +2062,7 @@ async function handleSpgPick(event) {
  * ## 只开插件这一条口，不注册 ipcMain 通道
  *
  * 调用方是扩展的 Agent，落点在下面的 `bridge.setRequestHandler`。主进程每注册
- * 一个通道就是渲染层多一个可调用的口，而"写文件 + 跑本机命令"在渲染层没有任何
+ * 一个通道就是渲染层多一个可调用的口，而"读写沙箱里的文件"在渲染层没有任何
  * 调用方 —— 白开一个口等于把执行面摊给用不上的地方。
  * `test/bridge.test.js` 的 `BRIDGE_ONLY_APP_ENDPOINTS` 记下了这个例外并反查它
  * 确实有分派。

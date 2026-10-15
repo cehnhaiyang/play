@@ -1,7 +1,6 @@
 import { AgentEngine, memoryStorage } from '../agent/engine';
 import type { ChatPort, EngineSnapshot, EngineStorage } from '../agent/engine';
 import type { SandboxRequest, SandboxResult } from '../../../shared/meta';
-import { SANDBOX_EXEC_TIMEOUT_MAX_MS } from '../../../shared/meta';
 import { pageHost } from '../offscreen/page-host';
 import { createChatPort } from './chat-port';
 import { emitBridgeEvent, requestApp } from './bridge-port';
@@ -59,14 +58,12 @@ const chromeStorage: EngineStorage = {
  * 单独一个函数而不是塞进 `pageHost`：那一层是"页面宿主"，而沙箱与页面无关，
  * 它的对端是桌面应用的 Node 能力（见 bridge.ts 的 `sandbox` 归属）。
  *
- * 等待时长必须显式放宽到 exec 的最长超时：默认 5 秒是给"读一份配置"那种用的，
- * 而一条命令跑到第十分钟时，5 秒的等待会先报"应用没回应" —— 命令其实还在跑，
- * 模型却以为失败了，接着再发一遍同一个命令。
+ * 不再放宽等待时长：exec 删掉之后，剩下的都是本机文件读写，毫秒级 ——
+ * 默认 5 秒足够，给太长只会让"应用没在跑"表现为一直转圈。
  */
 const sandboxPort = (request: SandboxRequest): Promise<SandboxResult> => requestApp<SandboxResult>(
     'sandbox',
     request,
-    SANDBOX_EXEC_TIMEOUT_MAX_MS + 10000,
 );
 
 /**

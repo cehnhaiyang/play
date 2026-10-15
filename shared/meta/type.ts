@@ -480,60 +480,78 @@ export type AgentToolName =
 /**
  * 沙箱的动作白名单。**唯一权威**：类型由它推出来，工具层拿它回错误文案，
  * 提示词的断言拿它核对模型看得见的那份清单。
+ *
+ * ## 为什么没有 exec
+ *
+ * 曾经有。删掉的理由是**能力重叠且不可控**：`edit` / `lines` / `checkjs` 三条
+ * 覆盖了"改文件 + 验语法"的全部实际用法，而 exec 是整条本机 shell —— 模型可以
+ * 拿它做任何事（包括绕过沙箱边界的命令），代价却是每一条命令都要配套超时、
+ * 进程树清理、输出截断三套机制，且失败模式（超时、孙子进程占着目录）
+ * 全都不可预期。工具面小一圈，边界才守得住。
  */
-export const SANDBOX_ACTIONS = ['list', 'read', 'write', 'delete', 'exec'] as const;
+export const SANDBOX_ACTIONS = ['list', 'read', 'write', 'delete', 'edit', 'lines', 'checkjs'] as const;
 
 export type SandboxAction = typeof SANDBOX_ACTIONS[number];
 
 /**
- * 沙箱的三条上限。**这里是唯一权威**，主进程 `app/main/sandbox.js` 按同值钳制
- * （那边是 CommonJS，与 `extension/host/host.js` 抄 `BRIDGE_PROTOCOL_VERSION`
- * 同一处境）。两处漂移的表现是"插件以为还能等、应用已经杀了"，
- * 由 `test/bridge.test.js` 钉住。
- */
-export const SANDBOX_TEXT_LIMIT_BYTES = 32768;
-export const SANDBOX_EXEC_TIMEOUT_DEFAULT_MS = 120000;
-export const SANDBOX_EXEC_TIMEOUT_MAX_MS = 600000;
-
-/**
- * `sandbox` 工具：本机项目根 `sandbox/` 目录里的文件与命令操作。
+ * `sandbox` 工具：本机项目根 `sandbox/` 目录里的文件操作。
  *
  * ## 形状
  *
- * 一次调用只做一件事：`action` 二选一 —— 文件动作或执行命令。
- * 合并成一个请求而不是两条端点，是因为"作用范围恒为沙箱根"这一条对两者都成立：
- * 分开写就要在两个地方各自钉一次根目录，而漏掉一处的表现是那一半能越界。
+ * 一次调用只做一件事，`action` 决定用哪几个字段。合并成一个请求而不是七个端点，
+ * 是因为"作用范围恒为沙箱根"这一条对所有动作都成立：分开写就要在七处各自钉
+ * 一次根目录，而漏掉一处的表现是那一半能越界。
+ *
+ * ## 为什么没有上限字段
+ *
+ * 读文件不截断、写文件不限长 —— 上限全部取消了。原先 read 按 32KB 截断，
+ * 后果是**超过 32KB 的文件模型读不全，因此根本无法安全地全量重写它**：
+ * 截断回传 + 全量写回 = 静默丢掉后半篇。要精确改就必须先看得全。
  */
 export interface SandboxRequest {
     action: SandboxAction;
     /** 相对沙箱根的 POSIX 风格路径。`..`、绝对路径、盘符一律拒绝 */
     path?: string;
-    /** write 的内容（UTF-8） */
+    /** write / edit / lines 要写入的文本（UTF-8） */
     content?: string;
-    /** exec 的命令行 */
-    command?: string;
-    /** exec 的等待毫秒。缺省用 SANDBOX_EXEC_TIMEOUT_DEFAULT_MS，超过上限被钳制 */
-    timeout?: number;
+    /**
+     * edit：要被替换掉的原文，必须**逐字**一致且在全文中唯一命中。
+     * 0 命中或多次命中都拒绝落盘，回错误让模型自己收窄。
+     */
+    old?: string;
+    /** edit：替换成的新文本。空串即删除该段 */
+    new?: string;
+    /** lines：起始行号，1 起、含该行 */
+    start?: number;
+    /** lines：结束行号，1 起、含该行。省略即只替换 start 这一行 */
+    end?: number;
 }
 
 /**
  * `sandbox` 的返回。
  *
  * `error` 是**失败的唯一标记**：非空即失败，工具层据此让引擎把这一步标红。
- * 成功时按动作带 `entries` / `content` / `bytes` / `output` 之一。
+ * 成功时按动作带 `entries` / `content` / `bytes` 之一。
  *
  * `bytes` 是写入的字节数（不是字符数）：模型拿它核对"内容有没有被改短"。
  */
 export interface SandboxResult {
     error?: string;
     entries?: { name: string; dir: boolean; size: number }[];
+    /** read：文件全文，不截断 */
     content?: string;
     bytes?: number;
     deleted?: string;
-    exitCode?: number;
-    /** exec 的 stdout+stderr（主进程侧已截断）。超限的部分以末行说明 */
-    output?: string;
-    timedOut?: boolean;
+    /**
+     * edit / lines：替换掉了几处。
+     *
+     * edit 恒为 1（多处命中会被拒），lines 是区间内的行数 —— 模型拿它核对
+     * "改的是不是它想改的那一段"。缺了它，一次成功的替换与一次改错位置的替换
+     * 在回执上长得一样。
+     */
+    replaced?: number;
+    /** checkjs：语法通过为 true。失败时 error 里带行号与原因 */
+    valid?: boolean;
 }
 
 /**
@@ -577,14 +595,19 @@ export interface AgentMessage {
      * 工具消息：工具名 + 动作（如 sandbox·write）。
      *
      * 重建模型上下文时要用它：只写 "sandbox" 的话，「列目录 / 读文件 / 写文件 /
-     * 跑命令」在历史里长得一模一样，模型看不出自己上一轮到底做过哪一件。
+     * 精确替换 / 改行区间 / 查语法」在历史里长得一模一样，模型看不出自己上一轮
+     * 到底做过哪一件。
      */
     label?: string;
     /** 工具消息：执行的脚本源码（供界面展开查看） */
     script?: string;
     /** 工具消息：是否执行成功 */
     ok?: boolean;
-    /** 工具消息：回传给模型的完整观察结果（已截断） */
+    /**
+     * 工具消息：回传给模型的完整观察结果。
+     *
+     * js 那一条按 RESULT_LIMIT_BYTES 截断（页面返回可能上兆）；沙箱不截断。
+     */
     result?: string;
     /**
      * 这条消息对应的那次模型调用的 token 用量。

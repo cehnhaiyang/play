@@ -72,13 +72,11 @@ let nextRequestId = 1;
 /**
  * 一条请求等多久算超时。
  *
- * 默认值只管"读一份配置"这一类：本来就是本机来回，给太长会让"应用没在跑"
- * 表现为模型调用一直转圈。
+ * 本机来回，给太长会让"应用没在跑"表现为模型调用一直转圈。
  *
- * **但它管不了沙箱的 exec**：那一条允许跑到十分钟（见
- * `shared/meta/type.ts` 的 `SANDBOX_EXEC_TIMEOUT_MAX_MS`），用默认值的话
- * 表现是"命令明明还在执行，插件却报了应用没回应"。所以超时改成逐条传入，
- * 默认值只兜住没有传的那些。
+ * 沙箱曾因为允许跑十分钟的命令而逐条放宽过这个值（`requestApp` 的第三个参数
+ * 就是那时加的）。exec 删掉之后，剩下的都是毫秒级的文件读写，用默认值即可 ——
+ * 但那个参数留着：它是"逐条请求各有各的合理等待"这条能力的出口。
  */
 const REQUEST_TIMEOUT_MS = 5000;
 
@@ -89,7 +87,7 @@ const REQUEST_TIMEOUT_MS = 5000;
  * 排队只会把"应用没开"延迟成一次莫名其妙的模型调用失败。
  *
  * `timeoutMs` 只放宽**等待**，不改变"应用必须自己收摊"这件事 —— 应用侧该有它
- * 自己的执行超时（沙箱的 exec 就有），不能靠调用方等多久它就跑多久。
+ * 自己的执行超时，不能靠调用方等多久它就跑多久。
  */
 export const requestApp = <T,>(method: string, params?: unknown, timeoutMs?: number): Promise<T> => {
     if (!port) return Promise.reject(new Error('本机应用未连接，读不到设置。'));

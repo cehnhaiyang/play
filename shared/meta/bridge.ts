@@ -225,7 +225,7 @@ export const BRIDGE_ENDPOINTS = {
     },
     'sandbox': {
         route: 'app',
-        reason: 'Agent 的本地沙箱：写文件要 fs、执行指令要子进程，两者都只有主进程能做；'
+        reason: 'Agent 的本地沙箱：读写与改文件要 fs，只有主进程能做；'
             + '而"路径必须落在项目根的 sandbox 目录内"这条边界必须由执行者自己守 —— '
             + '放进插件就等于由发起方自行声明它没有越界。',
     },

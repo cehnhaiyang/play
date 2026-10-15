@@ -1222,43 +1222,82 @@ const run = async () => {
         eq(out.bytes, 1);
     });
 
-    await check('sandbox exec 不带 path，只带 command 与 timeout', async () => {
+    await check('sandbox edit 把 old/new 原样转给应用（new 允许空串）', async () => {
         const { dispatchTool, calls } = buildDispatch(EMPTY);
-        await dispatchTool('sandbox', { action: 'exec', command: 'node out/a.js', timeout: 30000 });
+        await dispatchTool('sandbox', { action: 'edit', path: 'a.md', old: '旧', new: '新' });
         const sent = calls.sandbox[0];
-        eq(sent.command, 'node out/a.js');
-        eq(sent.timeout, 30000);
-        assert(!('path' in sent), 'exec 不该带 path（带了会被应用侧的判据误当成文件动作）');
+        eq(sent.old, '旧');
+        eq(sent.new, '新');
+
+        // 空串是合法入参（删掉这一段），不能被 `...(next ? {} : {})` 那类写法吞掉
+        await dispatchTool('sandbox', { action: 'edit', path: 'a.md', old: '旧', new: '' });
+        eq(calls.sandbox[1].new, '', 'new 为空串时必须照样传下去');
+    });
+
+    await check('sandbox lines 传行号区间，checkjs 只传 content 不传 path', async () => {
+        const { dispatchTool, calls } = buildDispatch(EMPTY);
+        await dispatchTool('sandbox', { action: 'lines', path: 'a.md', start: 3, end: 5, content: 'x' });
+        const sent = calls.sandbox[0];
+        eq(sent.start, 3);
+        eq(sent.end, 5);
+        eq(sent.content, 'x');
+
+        await dispatchTool('sandbox', { action: 'checkjs', content: 'const a = 1;' });
+        const js = calls.sandbox[1];
+        eq(js.action, 'checkjs');
+        eq(js.content, 'const a = 1;');
+        assert(!('path' in js), 'checkjs 不碰文件系统，不该带 path');
     });
 
     await check('sandbox 未知 action 列出全部可用值', async () => {
         const { dispatchTool, calls } = buildDispatch(EMPTY);
         const out = j(await dispatchTool('sandbox', { action: 'WRITE', path: 'a' }));
         assert(typeof out.error === 'string', '大写 WRITE 必须失败（全小写严格匹配）');
-        assert(out.error.includes('list / read / write / delete / exec'),
+        assert(out.error.includes('list / read / write / delete / edit / lines / checkjs'),
             `错误里必须列全可用动作，实际：${out.error}`);
         assert(calls.sandbox.length === 0, '动作写错时不得惊动应用');
     });
 
     /**
-     * write 缺 content 必须报错，而不是当成空串写下去。
+     * exec 已经删掉了，而模型的历史里可能还留着旧写法。
+     *
+     * 这条钉的是"旧动作名必须被明确拒绝"，不是"恰好不在白名单里" ——
+     * 后者在有人把 exec 加回来时不会报红。
+     */
+    await check('sandbox 不再有 exec：调它会被当作未知 action 拒掉', async () => {
+        const { dispatchTool, calls } = buildDispatch(EMPTY);
+        const out = j(await dispatchTool('sandbox', { action: 'exec', command: 'ls' }));
+        assert(typeof out.error === 'string', 'exec 必须失败');
+        assert(out.error.includes('未知 action'), `应是未知 action，实际：${out.error}`);
+        assert(calls.sandbox.length === 0, '不能把 exec 请求发给应用');
+    });
+
+    /**
+     * write / lines 缺 content 必须报错，而不是当成空串写下去。
      *
      * 当成空串的话，模型少打一个字段就**清空了一个它本来想保留的文件**，
      * 而回执是 {bytes:0} —— 看起来像是"写了个空文件"，不像出了事。
      */
-    await check('sandbox write 缺 content 报错而不是清空文件', async () => {
+    await check('sandbox write / lines 缺 content 报错而不是清空文件', async () => {
         const { dispatchTool, calls } = buildDispatch(EMPTY);
-        const out = j(await dispatchTool('sandbox', { action: 'write', path: 'out/keep.md' }));
-        assert(typeof out.error === 'string', '应报错');
+        const w = j(await dispatchTool('sandbox', { action: 'write', path: 'out/keep.md' }));
+        assert(typeof w.error === 'string', 'write 缺 content 应报错');
+        const l = j(await dispatchTool('sandbox', { action: 'lines', path: 'out/keep.md', start: 1 }));
+        assert(typeof l.error === 'string', 'lines 缺 content 应报错');
         assert(calls.sandbox.length === 0, '绝不能把清空文件的请求发出去');
     });
 
-    await check('sandbox 文件动作缺 path 报错，exec 缺 command 报错', async () => {
-        const { dispatchTool } = buildDispatch(EMPTY);
+    await check('sandbox edit 缺 old、lines 缺 start、文件动作缺 path 都报错', async () => {
+        const { dispatchTool, calls } = buildDispatch(EMPTY);
+        assert(typeof j(await dispatchTool('sandbox', { action: 'edit', path: 'a.md', new: 'x' })).error === 'string',
+            'edit 缺 old 应报错');
+        assert(typeof j(await dispatchTool('sandbox', { action: 'lines', path: 'a.md', content: 'x' })).error === 'string',
+            'lines 缺 start 应报错');
         assert(typeof j(await dispatchTool('sandbox', { action: 'read' })).error === 'string',
             'read 缺 path 应报错');
-        assert(typeof j(await dispatchTool('sandbox', { action: 'exec', command: '  ' })).error === 'string',
-            'exec 的空白 command 应报错');
+        assert(typeof j(await dispatchTool('sandbox', { action: 'checkjs' })).error === 'string',
+            'checkjs 缺 content 应报错');
+        assert(calls.sandbox.length === 0, '参数不全时不该惊动应用');
     });
 
     /**
@@ -1326,105 +1365,207 @@ const run = async () => {
         assert(!okPath('C:\\Windows'), '盘符必须被拒');
     });
 
-    await check('clipToBytes 不切断多字节字符', async () => {
-        const text = '中文'.repeat(10);
-        const clipped = SBX.clipToBytes(text, 5);
-        assert(clipped.truncated, '应标记截断');
-        assert(!clipped.text.includes('\uFFFD'), `不得留下替换字符，实际：${JSON.stringify(clipped.text)}`);
-        assert(Buffer.byteLength(clipped.text, 'utf8') <= 5, '不得超限');
-        assert(SBX.clipToBytes('short', 50).truncated === false, '未超限不应标记');
+    /**
+     * 替换判据直接求值，不 grep 源码。
+     *
+     * 这三条是"改文件"的全部安全性所在：判错一处就是把用户的文件改坏，
+     * 而回执说成功。所以每一类失败写法都要有一条用例。
+     */
+    await check('replaceOnce 唯一命中才替换', async () => {
+        const ok = SBX.replaceOnce('a\nb\nc\n', 'b', 'B');
+        eq(ok.text, 'a\nB\nc\n');
+        eq(ok.replaced, 1, '成功时要说清替换了几处');
     });
 
-    /* -------------------- sandbox：读写删跑命令的真实往返 -------------------- */
+    await check('replaceOnce 0 命中拒绝落盘', async () => {
+        const miss = SBX.replaceOnce('a\nb\n', 'zzz', 'X');
+        assert(typeof miss.error === 'string', '找不到就必须报错');
+        assert(miss.text === undefined, '失败时不得给出可写回的文本');
+    });
+
+    await check('replaceOnce 多处命中拒绝落盘（不许猜改哪一处）', async () => {
+        const many = SBX.replaceOnce('x\nx\n', 'x', 'y');
+        assert(typeof many.error === 'string', '命中多次必须报错');
+        assert(many.error.includes('多次'), `错误要说清是"多次命中"，实际：${many.error}`);
+        assert(many.text === undefined, '失败时不得给出可写回的文本');
+    });
 
     /**
-     * 用真实的临时目录跑一遍 handle：写、读、列、跑命令、删。
+     * `$&` / `$1` 这类替换模板只有在用 `String.replace` 时才会被展开。
+     * 判据取"结果与输入逐字相等"：用 replace 实现的版本会把它换成匹配到的原文，
+     * 而模型写下的字面量被静默改写 —— 这是实测踩过的坑。
+     */
+    await check('replaceOnce 不把 $& / $1 当反向引用展开', async () => {
+        const r = SBX.replaceOnce('price = 100\n', '100', '$& + $1');
+        eq(r.text, 'price = $& + $1\n', '替换文本里的 $ 符号必须原样落盘');
+    });
+
+    await check('replaceLines 按闭区间替换，行号 1 起', async () => {
+        const r = SBX.replaceLines('l1\nl2\nl3\nl4\n', 2, 3, 'X');
+        eq(r.text, 'l1\nX\nl4\n');
+        eq(r.replaced, 2, '替换的行数要如实回传');
+    });
+
+    await check('replaceLines 省略 end 只改一行', async () => {
+        eq(SBX.replaceLines('l1\nl2\nl3\n', 2, undefined, 'X').text, 'l1\nX\nl3\n');
+    });
+
+    /**
+     * 越界**不能**静默截断到末尾：那会把"改第 200 行"变成"改到了最后一行"，
+     * 而回执照样成功 —— 文件被改坏且模型不知道。
+     */
+    await check('replaceLines 行号越界报错而不是改到末尾', async () => {
+        const over = SBX.replaceLines('l1\nl2\n', 5, 6, 'X');
+        assert(typeof over.error === 'string', '越界必须报错');
+        assert(over.error.includes('2'), `错误里要带出实际行数，实际：${over.error}`);
+        assert(typeof SBX.replaceLines('l1\nl2\n', 2, 1, 'X').error === 'string', 'end < start 应报错');
+        assert(typeof SBX.replaceLines('l1\n', 0, undefined, 'X').error === 'string', '行号 0 应报错');
+    });
+
+    /**
+     * 行尾风格必须按文件现状保留。
      *
-     * 假 root 只能验判据的形状，验不了"内容真的落盘了""cwd 真的在沙箱里"。
+     * 用 `\n` 拼回去的话，一次编辑就把整个 CRLF 文件变成 LF —— 在 git 里
+     * 表现为"全文件重写"，用户看到的 diff 里没有一行是真正改过的。
+     */
+    await check('replaceLines 保留文件原本的行尾风格', async () => {
+        const crlf = SBX.replaceLines('l1\r\nl2\r\nl3\r\n', 2, 2, 'X');
+        eq(crlf.text, 'l1\r\nX\r\nl3\r\n', 'CRLF 文件改完还得是 CRLF');
+        const lf = SBX.replaceLines('l1\nl2\nl3\n', 2, 2, 'X');
+        eq(lf.text, 'l1\nX\nl3\n', 'LF 文件改完还得是 LF');
+    });
+
+    await check('replaceLines 末行无换行时不会凭空补一个', async () => {
+        eq(SBX.replaceLines('l1\nl2', 2, 2, 'X').text, 'l1\nX', '原本没有结尾换行就别加');
+        eq(SBX.replaceLines('l1\nl2\n', 2, 2, 'X').text, 'l1\nX\n', '原本有结尾换行就保留');
+    });
+
+    await check('checkSyntax 判语法：正常通过、语法错带行号', async () => {
+        const ok = SBX.checkSyntax('const a = 1;\n');
+        eq(ok.valid, true, '合法代码应通过');
+        eq(ok.error, undefined, '通过时不该带 error');
+        const bad = SBX.checkSyntax('const a = 1;\nfunction f( {\n  return a\n}\n');
+        assert(typeof bad.error === 'string', '语法错必须回 error');
+        assert(bad.error.includes('SyntaxError'), `错误类型要带出来，实际：${bad.error}`);
+        assert(/:\d+/.test(bad.error), `要带行号定位，实际：${bad.error}`);
+        eq(bad.valid, undefined, '失败时不得同时说 valid');
+    });
+
+    /**
+     * checkjs 是**语法**检查，不是"能不能跑"。
+     *
+     * 把判据写成"能不能执行"（比如真跑一遍）时，`require` 一个不存在的模块会失败 ——
+     * 而那对"我要写的这段代码对不对"毫无信息量。这条钉住它只做解析。
+     */
+    await check('checkSyntax 不解析依赖：require 不存在的模块照样通过', async () => {
+        eq(SBX.checkSyntax('const x = require("这个模块不存在");\n').valid, true,
+            '只查语法，不查模块是否存在');
+    });
+
+    /**
+     * ESM 写法在 CommonJS 解析下确实是语法错误，如实报出来即可 ——
+     * 这条钉的是"错误文案由 Node 给出、不是我们编的"，以及提示词里那句说明是真的。
+     */
+    await check('checkSyntax 对 ESM 写法如实报语法错（提示词已声明这一点）', async () => {
+        const imp = SBX.checkSyntax('import fs from "fs";\n');
+        assert(typeof imp.error === 'string' && imp.error.includes('import'), `实际：${JSON.stringify(imp)}`);
+        const top = SBX.checkSyntax('const r = await fetch("http://x");\n');
+        assert(typeof top.error === 'string' && top.error.includes('await'), `实际：${JSON.stringify(top)}`);
+    });
+
+    /* -------------------- sandbox：读写改查的真实往返 -------------------- */
+
+    /**
+     * 用真实的临时目录跑一遍 handle：写、读、列、精确改、改行、查语法、删。
+     *
+     * 假 root 只能验判据的形状，验不了"内容真的落盘了""改完还是不是那个文件"。
      */
     const os = require('os');
     const tmpRoot = path.join(os.tmpdir(), `the-play-sbx-${process.pid}`);
-    await check('sandbox 写→读→列→删 真实往返', async () => {
+    await check('sandbox 写→读→列→改→删 真实往返', async () => {
         await fs.promises.rm(tmpRoot, { recursive: true, force: true });
 
-        const w = await SBX.handle({ action: 'write', path: 'out/a.md', content: '# 结论\n' }, tmpRoot);
+        const w = await SBX.handle({ action: 'write', path: 'out/a.md', content: '# 结论\n\n原始段落\n' }, tmpRoot);
         assert(!w.error, `write 应成功，实际 ${w.error}`);
-        eq(w.bytes, Buffer.byteLength('# 结论\n', 'utf8'));
+        eq(w.bytes, Buffer.byteLength('# 结论\n\n原始段落\n', 'utf8'));
         assert(fs.existsSync(path.join(tmpRoot, 'out', 'a.md')), '文件应真的落盘');
 
         const r = await SBX.handle({ action: 'read', path: 'out/a.md' }, tmpRoot);
-        eq(r.content, '# 结论\n');
+        eq(r.content, '# 结论\n\n原始段落\n');
 
         const l = await SBX.handle({ action: 'list', path: 'out' }, tmpRoot);
         assert(l.entries.some((e) => e.name === 'a.md'), '列目录应看到写进去的文件');
+
+        const e = await SBX.handle({
+            action: 'edit', path: 'out/a.md', old: '原始段落', new: '改过的段落',
+        }, tmpRoot);
+        assert(!e.error, `edit 应成功，实际 ${e.error}`);
+        eq(e.replaced, 1);
+        eq((await SBX.handle({ action: 'read', path: 'out/a.md' }, tmpRoot)).content,
+            '# 结论\n\n改过的段落\n', '改完必须只剩这一处变化');
+
+        const ln = await SBX.handle({
+            action: 'lines', path: 'out/a.md', start: 1, end: 1, content: '## 新标题',
+        }, tmpRoot);
+        assert(!ln.error, `lines 应成功，实际 ${ln.error}`);
+        eq((await SBX.handle({ action: 'read', path: 'out/a.md' }, tmpRoot)).content,
+            '## 新标题\n\n改过的段落\n');
 
         const d = await SBX.handle({ action: 'delete', path: 'out/a.md' }, tmpRoot);
         assert(!d.error && d.deleted.replace(/\\/g, '/') === 'out/a.md', `delete 应回相对路径，实际 ${JSON.stringify(d)}`);
         assert(!fs.existsSync(path.join(tmpRoot, 'out', 'a.md')), '文件应真的被删掉');
     });
 
-    await check('sandbox 读不存在的文件回 ENOENT 而不是崩', async () => {
+    /**
+     * 上限取消之后最容易回归的一条：read 必须**整份**回传。
+     *
+     * 造一个明显超过旧 32KB 上限的文件，逐字比对 —— 用"长度大于 32KB"断言的话，
+     * 把截断点从 32KB 改成 64KB 照样全绿。
+     */
+    await check('sandbox read 不截断：超过旧上限的文件整份回传', async () => {
+        const big = `${'长'.repeat(40000)}\n尾行\n`;
+        await SBX.handle({ action: 'write', path: 'big.txt', content: big }, tmpRoot);
+        const r = await SBX.handle({ action: 'read', path: 'big.txt' }, tmpRoot);
+        assert(!r.error, `read 应成功，实际 ${r.error}`);
+        eq(r.content, big, '内容必须与写进去的逐字相同（含末尾标记行）');
+        eq(r.bytes, Buffer.byteLength(big, 'utf8'), 'bytes 应是真实字节数');
+        assert(!r.content.includes('已截断'), '不得再出现截断说明');
+    });
+
+    await check('sandbox write 不设长度上限', async () => {
+        const huge = 'x'.repeat(300000);
+        const w = await SBX.handle({ action: 'write', path: 'huge.txt', content: huge }, tmpRoot);
+        assert(!w.error, `write 应成功，实际 ${w.error}`);
+        eq(w.bytes, 300000);
+        eq((await SBX.handle({ action: 'read', path: 'huge.txt' }, tmpRoot)).content, huge);
+    });
+
+    await check('sandbox edit 对不存在的文件回 ENOENT（改已有文件，不是建新文件）', async () => {
+        const r = await SBX.handle({ action: 'edit', path: 'nope.md', old: 'a', new: 'b' }, tmpRoot);
+        assert(typeof r.error === 'string' && r.error.includes('ENOENT'),
+            `应如实回 ENOENT，实际 ${JSON.stringify(r)}`);
+    });
+
+    await check('sandbox read 不存在的文件回 ENOENT 而不是崩', async () => {
         const r = await SBX.handle({ action: 'read', path: 'nope.md' }, tmpRoot);
         assert(typeof r.error === 'string' && r.error.includes('ENOENT'),
             `应如实回 ENOENT，实际 ${JSON.stringify(r)}`);
     });
 
     await check('sandbox 越界路径根本到不了 fs', async () => {
-        const r = await SBX.handle({ action: 'read', path: '../../../Windows/win.ini' }, tmpRoot);
-        assert(r.error && r.error.includes('路径不合法'), `应先被判据拒掉，实际 ${JSON.stringify(r)}`);
+        for (const action of ['read', 'write', 'edit', 'lines', 'delete']) {
+            const r = await SBX.handle(
+                { action, path: '../../../Windows/win.ini', content: 'x', old: 'x', new: 'y', start: 1 },
+                tmpRoot,
+            );
+            assert(r.error && r.error.includes('路径不合法'),
+                `${action} 应先被判据拒掉，实际 ${JSON.stringify(r)}`);
+        }
     });
 
-    await check('sandbox exec 的工作目录就是沙箱根', async () => {
-        const r = await SBX.handle({ action: 'exec', command: process.platform === 'win32' ? 'cd' : 'pwd' }, tmpRoot);
-        assert(!r.error, `exec 应成功，实际 ${r.error}`);
-        eq(r.exitCode, 0);
-        assert(r.output.replace(/\r/g, '').includes(path.basename(tmpRoot)),
-            `输出应含沙箱根目录名，实际：${JSON.stringify(r.output)}`);
-    });
-
-    await check('sandbox exec 非零退出码不算超时', async () => {
-        const r = await SBX.handle({
-            action: 'exec',
-            command: process.platform === 'win32' ? 'exit /b 3' : 'exit 3',
-        }, tmpRoot);
-        assert(!r.timedOut, '正常失败不能被说成超时（否则模型会加大 timeout 重跑）');
-        assert(typeof r.exitCode === 'number' && r.exitCode !== 0, `应回非零退出码，实际 ${r.exitCode}`);
-    });
-
-    await check('sandbox exec 超时会被杀并如实标注', async () => {
-        const r = await SBX.handle({
-            action: 'exec',
-            command: process.platform === 'win32' ? 'ping -n 30 127.0.0.1' : 'sleep 30',
-            timeout: 500,
-        }, tmpRoot);
-        assert(r.timedOut === true, `应标记超时，实际 ${JSON.stringify(r)}`);
-        assert(typeof r.error === 'string' && r.error.includes('强制终止'), '错误文案要说明是被杀的');
-    });
-
-    /**
-     * 超时要**杀干净整棵树**，不只是"不再等它"。
-     *
-     * 这条是被现场踩出来的：原先用 exec，timeout 只杀它自己拉起的 shell，
-     * shell 起的孙子进程继续在跑 —— 回给模型一句"已强制终止"是假话，而模型
-     * 据此以为机器干净，接着起下一条命令，同时沙箱目录还被上一个进程占着
-     * （连临时目录都 rm 不掉，EBUSY）。
-     *
-     * 判据取"目录现在删得掉"：删不掉就是还有进程占着它，而那正是根因本身，
-     * 不是靠 sleep 一段时间去赌时序。rm 失败会抛，断言也就跟着红。
-     */
-    await check('sandbox exec 超时后不留占着沙箱的进程', async () => {
-        await SBX.handle({ action: 'write', path: 'busy', content: 'x' }, tmpRoot);
-        assert(fs.existsSync(path.join(tmpRoot, 'busy')), '构造前提：文件已在沙箱里');
-
-        await SBX.handle({
-            action: 'exec',
-            command: process.platform === 'win32' ? 'ping -n 20 127.0.0.1 >nul' : 'sleep 20',
-            timeout: 300,
-        }, tmpRoot);
-
-        // 能删掉即没有进程还占着它；删不掉会抛 EBUSY
-        await fs.promises.rm(tmpRoot, { recursive: true, force: true });
-        assert(!fs.existsSync(tmpRoot), '沙箱目录应已释放');
+    await check('sandbox checkjs 不碰文件系统：path 越界也不影响它', async () => {
+        const r = await SBX.handle({ action: 'checkjs', content: 'const a = 1;' }, tmpRoot);
+        eq(r.valid, true);
     });
 
     await check('sandbox 未知 action 由应用侧兜住', async () => {
@@ -1432,21 +1573,52 @@ const run = async () => {
         assert(typeof r.error === 'string' && r.error.includes('未知 action'), `实际 ${JSON.stringify(r)}`);
     });
 
+    await check('sandbox exec 已被删除：应用侧不认这个动作', async () => {
+        const r = await SBX.handle({ action: 'exec', command: 'ls' }, tmpRoot);
+        assert(typeof r.error === 'string' && r.error.includes('未知 action'),
+            `exec 必须走"未知 action"，实际 ${JSON.stringify(r)}`);
+        assert(r.error.includes('edit'), '错误里要列出当前可用动作，模型才知道改用哪个');
+    });
+
     await fs.promises.rm(tmpRoot, { recursive: true, force: true });
 
-    /* -------------------- sandbox：两处数字不许漂移 -------------------- */
+    /* ------------------- sandbox：动作清单与提示词不许漂移 ------------------- */
 
     /**
-     * `shared/meta/type.ts` 是这三个值的**唯一权威**；`app/main/sandbox.js`
-     * 因为只能写 CommonJS 而抄了一份（同 host.js 抄 BRIDGE_PROTOCOL_VERSION）。
-     *
-     * 抄来的那份必须逐个求值比对。写成"源码里有这个数字"就退化成字符串断言了。
+     * 动作清单的真值在 `shared/meta/type.ts`，三处消费它：类型联合、工具层门禁、
+     * 提示词插值。**exec 的删除也要在这里钉住** —— 只在某一处删掉的话，
+     * 模型从提示词里读到 exec、调用却拿到"未知 action"，而代码里没有任何一处是错的。
      */
-    await check('沙箱上限：主进程副本与 shared 权威逐值相等', async () => {
+    await check('沙箱动作清单：exec 已从三处一并移除', async () => {
         const META = require('./build/shared/meta/type.js');
-        eq(SBX.SANDBOX_TEXT_LIMIT_BYTES, META.SANDBOX_TEXT_LIMIT_BYTES, '回传上限漂移');
-        eq(SBX.SANDBOX_EXEC_TIMEOUT_DEFAULT_MS, META.SANDBOX_EXEC_TIMEOUT_DEFAULT_MS, '默认超时漂移');
-        eq(SBX.SANDBOX_EXEC_TIMEOUT_MAX_MS, META.SANDBOX_EXEC_TIMEOUT_MAX_MS, '超时上限漂移');
+        assert(!META.SANDBOX_ACTIONS.includes('exec'), 'exec 必须已从权威清单里删掉');
+        eq(META.SANDBOX_ACTIONS.join(','), 'list,read,write,delete,edit,lines,checkjs',
+            '动作清单是模型看得见的那一份，改动必须是有意的');
+        /**
+         * 主进程那份副本也必须逐值相等。它只用来把"未知动作"和"参数不全"分开，
+         * 但漂移的表现是"插件放行的动作被应用当成未知动作拒掉"。
+         */
+        eq(SBX.SANDBOX_ACTIONS.join(','), META.SANDBOX_ACTIONS.join(','),
+            '主进程的动作副本与 shared 权威漂移');
+
+        const promptSrc = AGENT_SOURCES.find((s) => s.file === 'prompt.ts').text;
+        assert(/"action": "exec"/.test(promptSrc) === false, '提示词里不得再教 exec');
+        assert(/"action": "edit"/.test(promptSrc), '提示词要教 edit');
+        assert(/"action": "lines"/.test(promptSrc), '提示词要教 lines');
+        assert(/"action": "checkjs"/.test(promptSrc), '提示词要教 checkjs');
+    });
+
+    await check('沙箱的三个上限常量已彻底删除（不留死代码）', async () => {
+        const META = require('./build/shared/meta/type.js');
+        for (const name of ['SANDBOX_TEXT_LIMIT_BYTES', 'SANDBOX_EXEC_TIMEOUT_DEFAULT_MS', 'SANDBOX_EXEC_TIMEOUT_MAX_MS']) {
+            eq(META[name], undefined, `${name} 应已从 shared 删除`);
+        }
+        const src = AGENT_SOURCES.map((s) => s.text).join('\n');
+        assert(!/SANDBOX_TEXT_LIMIT_BYTES|SANDBOX_EXEC_TIMEOUT/.test(src),
+            '插件源码里不得再引用已删的上限常量');
+        const mainSrc = fs.readFileSync(path.join(ROOT, 'app', 'main', 'sandbox.js'), 'utf8');
+        assert(!/SANDBOX_TEXT_LIMIT_BYTES|SANDBOX_EXEC_TIMEOUT|clipToBytes/.test(mainSrc),
+            '主进程侧不得留下已删的上限与截断实现');
     });
 
     /* --------------------- 工具名注册表不许留空位 --------------------- */
@@ -1480,15 +1652,20 @@ const run = async () => {
         }
     });
 
-    await check('提示词的沙箱说明带出真实数字，不手抄', async () => {
+    await check('提示词的沙箱说明覆盖新动作与不截断', async () => {
         const src = AGENT_SOURCES.find((s) => s.file === 'prompt.ts').text;
-        assert(/SANDBOX_EXEC_TIMEOUT_MAX_MS/.test(src), '超时上限应插值常量');
-        assert(/SANDBOX_TEXT_LIMIT_BYTES/.test(src), '回传上限应插值常量');
         const at = src.indexOf('6. sandbox');
         assert(at > 0, '提示词应有 sandbox 一条');
         const spec = src.slice(at, src.indexOf('## 执行准则', at));
         assert(/沙箱/.test(spec) && /\.\./.test(spec), '必须写明只能在沙箱内、.. 会被拒');
-        assert(/exec 的工作目录/.test(spec), '要说明 exec 的 cwd 就是沙箱根');
+        /**
+         * "改已有文件用 edit，别全量覆盖"是这次的核心约束：不写的话模型仍会
+         * read + write 全量重写，那正是要修的行为。
+         */
+        assert(/全量覆盖|不要.*write.*覆盖/.test(spec), '必须写明改已有文件用 edit 而不是全量重写');
+        assert(/逐字/.test(spec), 'old 要逐字照抄这一点必须写清（否则模型会随手省略缩进）');
+        assert(/不截断|不限长度/.test(spec), '要说明读写都不截断，否则模型会按旧上限自行拆分');
+        assert(!/exec/.test(spec), '不得再提 exec');
     });
 
     /* --------------------- 推理文本的定稿（本次修复） --------------------- */
@@ -1685,7 +1862,7 @@ const run = async () => {
         assert(at > 0, '应能找到工具消息的构造点');
         const block = src.slice(at, at + 700);
         assert(/^\s*label,$/m.test(block),
-            '工具消息必须带 label 字段：历史里只写工具名分不出 sandbox 五个动作');
+            '工具消息必须带 label 字段：历史里只写工具名分不出 sandbox 七个动作');
     });
 
     await check('推理与脚本源码不进历史', async () => {
@@ -2426,7 +2603,7 @@ const run = async () => {
         assert(at > 0, '应有「可用工具定义」一节');
         const spec = src.slice(at, src.indexOf('## 执行准则', at));
         assert(/全小写/.test(spec), '必须声明全小写严格匹配（写错名字第一步就暴露）');
-        assert(/"action": "exec"/.test(spec), 'sandbox 的 exec 必须写进说明，否则模型只会 write 不会跑');
+        assert(/"action": "edit"/.test(spec), 'sandbox 的 edit 必须写进说明，否则模型仍会 read + write 全量重写');
         assert(/相对路径/.test(spec), 'navigate 的相对路径必须写进说明');
         assert(/子串/.test(spec), 'tamper 的 url_pattern 子串语义必须点明');
         assert(/"op": "set" \| "delete"/.test(spec), 'tamper 的 op 必须写进说明（删字段用 delete，不许猜）');

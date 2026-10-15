@@ -531,20 +531,20 @@ export const dispatchTool = async (
         }
 
         /**
-         * sandbox —— 本机项目根 `sandbox/` 目录里的文件操作与命令执行。
+         * sandbox —— 本机项目根 `sandbox/` 目录里的文件操作。
          *
          * ## 为什么只有这里能碰磁盘
          *
-         * 前五个工具的作用域都在浏览器里（页面、存储、规则、令牌）。本机文件系统与
-         * 子进程两者都不属于扩展的能力范围，必须过桥交给应用（归属见
-         * `shared/meta/bridge.ts` 的 `sandbox`）。工具层因此**不自己拼路径**：
-         * 沙箱根的边界由执行者守，发起方声明"我没越界"不作数。
+         * 前五个工具的作用域都在浏览器里（页面、存储、规则、令牌）。本机文件系统
+         * 不属于扩展的能力范围，必须过桥交给应用（归属见 `shared/meta/bridge.ts`
+         * 的 `sandbox`）。工具层因此**不自己拼路径**：沙箱根的边界由执行者守，
+         * 发起方声明"我没越界"不作数。
          *
          * ## 动作校验在这里做，而不是交给应用
          *
          * 与 storage / tokens 同一取舍：动作写错时模型要看到的是"可用 list / read /
-         * write / delete / exec"，而过桥一趟拿回来的只会是一句应用侧的未知动作。
-         * 参数形状在这里收敛，路径合法性交给应用。
+         * write / delete / edit / lines / checkjs"，而过桥一趟拿回来的只会是一句
+         * 应用侧的未知动作。参数形状在这里收敛，路径合法性与替换判据交给应用。
          */
         case 'sandbox': {
             const rawAction = asString(args.action) || 'list';
@@ -561,23 +561,47 @@ export const dispatchTool = async (
             }
 
             const relPath = asString(args.path);
-            const command = asString(args.command);
-            if (action !== 'exec' && !relPath) {
+            const content = typeof args.content === 'string' ? args.content : undefined;
+            /**
+             * checkjs 没有 path：它查的是传进来的源码，不碰文件。其余动作一律要 path
+             * —— 报错要**指名缺哪个**，模型才知道补什么。
+             */
+            if (action !== 'checkjs' && !relPath) {
                 return JSON.stringify({ error: '缺少 path（相对 sandbox 的路径，如 out/notes.md）' });
             }
-            if (action === 'exec' && !command.trim()) {
-                return JSON.stringify({ error: '缺少 command（action 为 exec 时必须给；运行沙箱内的脚本也用这里）' });
+            if (action === 'checkjs' && content === undefined) {
+                return JSON.stringify({ error: '缺少 content（checkjs 要检查的 JS 源码）' });
             }
-            if (action === 'write' && typeof args.content !== 'string') {
-                return JSON.stringify({ error: '缺少 content（write 必须给要写入的文本；不给会当成空内容把文件清空）' });
+            /**
+             * write / lines 缺 content 必须报错，而不是当成空串写下去。
+             *
+             * 当成空串的话，模型少打一个字段就**清空了一个它本来想保留的文件**，
+             * 而回执是 {bytes:0} —— 看起来像是"写了个空文件"，不像出了事。
+             * edit 的 `new` 空串是**合法**的（就是删掉这一段），所以只查存在性。
+             */
+            if ((action === 'write' || action === 'lines') && content === undefined) {
+                return JSON.stringify({
+                    error: `缺少 content（${action} 必须给要写入的文本；不给会当成空内容把文件清空）`,
+                });
+            }
+            if (action === 'edit' && typeof args.old !== 'string') {
+                return JSON.stringify({
+                    error: '缺少 old（要被替换掉的原文，必须与文件里逐字一致）。要整份覆盖请用 write。',
+                });
+            }
+            if (action === 'lines' && args.start === undefined) {
+                return JSON.stringify({ error: '缺少 start（起始行号，1 起）' });
             }
 
             const request: SandboxRequest = {
                 action,
                 ...(relPath ? { path: relPath } : {}),
-                ...(command ? { command } : {}),
-                ...(typeof args.content === 'string' ? { content: args.content } : {}),
-                ...(typeof args.timeout === 'number' ? { timeout: args.timeout } : {}),
+                ...(content !== undefined ? { content } : {}),
+                ...(typeof args.old === 'string' ? { old: args.old } : {}),
+                // edit 的 new 可以是空串（删掉这一段），所以判据是"给了没有"而不是真假
+                ...(typeof args.new === 'string' ? { new: args.new } : {}),
+                ...(typeof args.start === 'number' ? { start: args.start } : {}),
+                ...(typeof args.end === 'number' ? { end: args.end } : {}),
             };
 
             let result: SandboxResult;
