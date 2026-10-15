@@ -17,10 +17,10 @@ import {
     SlidersHorizontal,
     X,
 } from 'lucide-react';
-import { SORT_OPTIONS, useMagnetSearch } from '../hooks';
-import { SITE_GROUP_LABELS } from '../../../shared/meta';
-import type { SearchHit, SearchSiteStatus, TorrentPanelProps, TorrentTaskSnapshot } from '../../../shared/meta';
-import { formatBytes } from '../services/SearchService';
+import { SORT_OPTIONS, useMagnetSearch } from '../renderer/hooks';
+import { SITE_GROUP_LABELS } from '../../shared/meta';
+import type { SearchHit, SearchSiteStatus, TorrentPanelProps, TorrentTaskSnapshot } from '../../shared/meta';
+import { formatBytes } from '../renderer/services/SearchService';
 
 /**
  * ============================================================================
@@ -384,13 +384,12 @@ export const TorrentPanel: React.FC<TorrentPanelProps> = ({ onBack }) => {
                                         key={g}
                                         onClick={() => setGroup(g)}
                                         aria-pressed={on}
-                                        className={`rounded-md px-2.5 py-1 text-xs font-semibold transition ${FOCUS_RING} ${
-                                            on
+                                        className={`rounded-md px-2.5 py-1 text-xs font-semibold transition ${FOCUS_RING} ${on
                                                 ? g === 'nsfw'
                                                     ? 'bg-rose-500/20 text-rose-200'
                                                     : 'bg-cyan-500/20 text-cyan-200'
                                                 : 'text-slate-400 hover:text-slate-200'
-                                        }`}
+                                            }`}
                                     >
                                         {SITE_GROUP_LABELS[g]} {groupCounts[g]}
                                     </button>
@@ -459,9 +458,8 @@ export const TorrentPanel: React.FC<TorrentPanelProps> = ({ onBack }) => {
                                 return (
                                     <div key={s.id} className="flex items-center gap-2 text-[11px]">
                                         <span
-                                            className={`w-3 shrink-0 ${
-                                                st ? (st.ok ? 'text-emerald-400' : 'text-rose-400') : 'text-slate-600'
-                                            }`}
+                                            className={`w-3 shrink-0 ${st ? (st.ok ? 'text-emerald-400' : 'text-rose-400') : 'text-slate-600'
+                                                }`}
                                         >
                                             {st ? (st.ok ? '●' : '×') : '·'}
                                         </span>

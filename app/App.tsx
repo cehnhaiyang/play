@@ -1,8 +1,8 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { usePlay } from './hooks';
 import { PlayPanel, Floating, AudioPanel, GalleryPanel, TorrentPanel } from './components';
-import { MediaType } from '../../shared/meta';
-import { getMediaType, isPlayableMedia } from '../../shared/core';
+import { MediaType } from '../shared/meta';
+import { getMediaType, isPlayableMedia } from '../shared/core';
 
 /**
  * 应用主视图。

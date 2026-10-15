@@ -31,8 +31,8 @@ import {
     ChartBarIcon,
     WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline';
-import { AppState, ParserError, Project } from '../../../shared/meta';
-import { useAudio } from '../hooks';
+import { AppState, ParserError, Project } from '../../shared/meta';
+import { useAudio } from '../renderer/hooks';
 
 /**
  * 音频工坊（Sound Particle Studio）。
@@ -1290,7 +1290,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ onBack }) => {
         const { autoFix = false } = options;
         let code = sourceCode;
 
-        for (;;) {
+        for (; ;) {
             const result = await audioActions.compileAndPlay(code);
 
             if (result.success) {

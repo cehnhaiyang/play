@@ -39,9 +39,9 @@ import type {
     AiConfig,
     AiProviderPreset,
     LogLevel,
-} from '../../../shared/meta';
-import { getElectronAPI } from '../../../shared/meta';
-import { loadJSON, saveJSON } from '../../../shared/core';
+} from '../../shared/meta';
+import { getElectronAPI } from '../../shared/meta';
+import { loadJSON, saveJSON } from '../../shared/core';
 import {
     AI_PROVIDERS,
     DEFAULT_AI_CONFIG,
@@ -52,7 +52,7 @@ import {
     resolveReasoningEffort,
     saveAiConfig,
     testAiConnection,
-} from '../../../shared/ai/AiService';
+} from '../../shared/ai/AiService';
 import {
     LOG_BUFFER_CAP,
     LOG_PERSIST_CAP,
@@ -60,7 +60,7 @@ import {
     getLogEntries,
     getLogVersion,
     subscribeLogs,
-} from '../services/LogService';
+} from '../renderer/services/LogService';
 
 /**
  * 悬浮球与它的两个面板。

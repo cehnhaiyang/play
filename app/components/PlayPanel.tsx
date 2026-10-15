@@ -7,7 +7,7 @@ import {
     Radio, Archive, Search, GripVertical, ListMusic, Inbox, AlertTriangle, Keyboard, Upload,
     Loader2, Wand2, Images, BookOpen, Magnet,
 } from 'lucide-react';
-import { PlaybackMode, ObjectFitMode, VideoFile, MediaType, UsePlayReturn, getElectronAPI, type AiStory } from '../../../shared/meta';
+import { PlaybackMode, ObjectFitMode, VideoFile, MediaType, UsePlayReturn, getElectronAPI, type AiStory } from '../../shared/meta';
 import {
     buildAiBookBlob,
     canPlayback,
@@ -25,15 +25,15 @@ import {
     sanitizePackName,
     saveStr,
     toDataUrl,
-} from '../../../shared/core';
+} from '../../shared/core';
 // gallery 刻意不在 shared/core 的索引里导出（它拖着 JSZip），按具体路径引
 import {
     collectPackSources,
     isGalleryPackFile,
     packToGalleryBlob,
     unpackGalleryPack,
-} from '../../../shared/core/gallery';
-import { generateStoryFromImages, toImageInput, AIBOOK_MAX_SOURCE_IMAGES, generateSpeech } from '../../../shared/ai/AiService';
+} from '../../shared/core/gallery';
+import { generateStoryFromImages, toImageInput, AIBOOK_MAX_SOURCE_IMAGES, generateSpeech } from '../../shared/ai/AiService';
 
 interface PlayPanelProps {
     player: UsePlayReturn;

@@ -29,14 +29,14 @@ import {
     useAcgDownloads,
     bindSaveFileSync,
     acgTaskKeyOf,
-} from '../hooks';
+} from '../renderer/hooks';
 import type {
     AcgSaveTask,
     AcgmhoGalleryItem,
     GalleryPageItem,
     GalleryPanelProps,
-} from '../../../shared/meta';
-import { isAcgUrl, resolveProbeMedia } from '../../../shared/core';
+} from '../../shared/meta';
+import { isAcgUrl, resolveProbeMedia } from '../../shared/core';
 
 /* -------------------------------------------------------------------------- */
 /*                              Constants & Meta                              */
