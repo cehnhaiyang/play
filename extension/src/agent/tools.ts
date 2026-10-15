@@ -531,20 +531,20 @@ export const dispatchTool = async (
         }
 
         /**
-         * sandbox —— 本机项目根 `sandbox/` 目录里的文件操作。
+         * sandbox —— 本机项目根 `sandbox/` 目录里的文件操作与脚本执行。
          *
          * ## 为什么只有这里能碰磁盘
          *
          * 前五个工具的作用域都在浏览器里（页面、存储、规则、令牌）。本机文件系统
-         * 不属于扩展的能力范围，必须过桥交给应用（归属见 `shared/meta/bridge.ts`
-         * 的 `sandbox`）。工具层因此**不自己拼路径**：沙箱根的边界由执行者守，
-         * 发起方声明"我没越界"不作数。
+         * 与子进程两者都不属于扩展的能力范围，必须过桥交给应用（归属见
+         * `shared/meta/bridge.ts` 的 `sandbox`）。工具层因此**不自己拼路径**：
+         * 沙箱根的边界由执行者守，发起方声明"我没越界"不作数。
          *
          * ## 动作校验在这里做，而不是交给应用
          *
          * 与 storage / tokens 同一取舍：动作写错时模型要看到的是"可用 list / read /
-         * write / delete / edit / lines / checkjs"，而过桥一趟拿回来的只会是一句
-         * 应用侧的未知动作。参数形状在这里收敛，路径合法性与替换判据交给应用。
+         * write / delete / edit / lines / checkjs / node"，而过桥一趟拿回来的只会是
+         * 一句应用侧的未知动作。参数形状在这里收敛，路径合法性与替换判据交给应用。
          */
         case 'sandbox': {
             const rawAction = asString(args.action) || 'list';
@@ -602,6 +602,7 @@ export const dispatchTool = async (
                 ...(typeof args.new === 'string' ? { new: args.new } : {}),
                 ...(typeof args.start === 'number' ? { start: args.start } : {}),
                 ...(typeof args.end === 'number' ? { end: args.end } : {}),
+                ...(typeof args.timeout === 'number' ? { timeout: args.timeout } : {}),
             };
 
             let result: SandboxResult;

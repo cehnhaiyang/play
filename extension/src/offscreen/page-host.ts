@@ -133,20 +133,37 @@ const evaluateInPage = async (tabId: number, code: string): Promise<EvaluateResu
 
         const result = raw as {
             result?: { value?: unknown };
-            exceptionDetails?: { exception?: { description?: string }; text?: string };
+            exceptionDetails?: {
+                exception?: { description?: string };
+                text?: string;
+                /** 出错位置。CDP 用的是**包装后**源码的行号，消费方负责换算 */
+                lineNumber?: number;
+                columnNumber?: number;
+            };
         };
 
         /*
          * 页面抛错时协议**不 reject**，而是在 exceptionDetails 里报 ——
          * 不显式读它的话，脚本抛错会被当成"返回了 undefined"，
          * 模型看到 null 会以为页面真的没数据。
+         *
+         * 行列号一并带上：语法错误只报一句 `Unexpected token ')'` 时模型无从下手，
+         * 而它自己重读整段代码往往读不出漏掉的那个括号（实测连撞多次）。
+         * 换算与抄行由 `locateScriptError` 做 —— 那是纯函数，位置信息必须原样
+         * 传上去，不能在这里就丢掉。
          */
         if (result.exceptionDetails) {
             const detail = result.exceptionDetails.exception?.description
                 || result.exceptionDetails.text
                 || '页面脚本抛出异常';
+            const { lineNumber, columnNumber } = result.exceptionDetails;
             return {
-                value: JSON.stringify({ __agentError: detail }),
+                value: JSON.stringify({
+                    __agentError: detail,
+                    ...(typeof lineNumber === 'number'
+                        ? { __agentAt: { line: lineNumber + 1, column: columnNumber ?? 0 } }
+                        : {}),
+                }),
                 failed: true,
             };
         }

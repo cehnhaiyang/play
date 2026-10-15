@@ -1253,7 +1253,7 @@ const run = async () => {
         const { dispatchTool, calls } = buildDispatch(EMPTY);
         const out = j(await dispatchTool('sandbox', { action: 'WRITE', path: 'a' }));
         assert(typeof out.error === 'string', '大写 WRITE 必须失败（全小写严格匹配）');
-        assert(out.error.includes('list / read / write / delete / edit / lines / checkjs'),
+        assert(out.error.includes('list / read / write / delete / edit / lines / checkjs / node'),
             `错误里必须列全可用动作，实际：${out.error}`);
         assert(calls.sandbox.length === 0, '动作写错时不得惊动应用');
     });
@@ -1270,6 +1270,22 @@ const run = async () => {
         assert(typeof out.error === 'string', 'exec 必须失败');
         assert(out.error.includes('未知 action'), `应是未知 action，实际：${out.error}`);
         assert(calls.sandbox.length === 0, '不能把 exec 请求发给应用');
+    });
+
+    /**
+     * `node` 不是 exec 的回归：它只接受 path（跑哪个文件）+ timeout，
+     * **不接受 command**。把 command 透传过去就等于把 shell 又开了回来。
+     */
+    await check('sandbox node 只带 path 与 timeout，绝不透传 command', async () => {
+        const { dispatchTool, calls } = buildDispatch(EMPTY);
+        await dispatchTool('sandbox', {
+            action: 'node', path: 'out/crack.js', timeout: 120000, command: 'rm -rf /',
+        });
+        const sent = calls.sandbox[0];
+        eq(sent.action, 'node');
+        eq(sent.path, 'out/crack.js');
+        eq(sent.timeout, 120000);
+        assert(!('command' in sent), 'command 字段绝不能过桥 —— 那等于把 shell 加回来');
     });
 
     /**
@@ -1295,6 +1311,8 @@ const run = async () => {
             'lines 缺 start 应报错');
         assert(typeof j(await dispatchTool('sandbox', { action: 'read' })).error === 'string',
             'read 缺 path 应报错');
+        assert(typeof j(await dispatchTool('sandbox', { action: 'node' })).error === 'string',
+            'node 缺 path 应报错（跑哪个文件是必填）');
         assert(typeof j(await dispatchTool('sandbox', { action: 'checkjs' })).error === 'string',
             'checkjs 缺 content 应报错');
         assert(calls.sandbox.length === 0, '参数不全时不该惊动应用');
@@ -1568,6 +1586,117 @@ const run = async () => {
         eq(r.valid, true);
     });
 
+    /* ----------------------- sandbox：node 跑脚本 ----------------------- */
+
+    /**
+     * `node` 的判据要用**真的跑一次**来验，不能只验参数转发：
+     * "能不能跑起来""退出码怎么回""cwd 在哪"全都只有真起进程才看得见。
+     */
+    await check('sandbox node 真的执行脚本，回 exitCode 与 output', async () => {
+        await SBX.handle({
+            action: 'write',
+            path: 'run/hello.js',
+            content: 'console.log("hello-from-script");\nconsole.error("to-stderr");\n',
+        }, tmpRoot);
+        const r = await SBX.handle({ action: 'node', path: 'run/hello.js' }, tmpRoot);
+        assert(!r.error, `应跑成功，实际 ${r.error}`);
+        eq(r.exitCode, 0);
+        assert(r.output.includes('hello-from-script'), `stdout 要回传，实际 ${JSON.stringify(r.output)}`);
+        assert(r.output.includes('to-stderr'), 'stderr 必须合并进来（分开回等于丢掉报错原因）');
+    });
+
+    /**
+     * 脚本的 cwd 必须是沙箱根。
+     *
+     * 模型写的脚本按提示词用相对路径读写自己的数据文件（`out/data.json`）——
+     * cwd 落在别处时那些相对路径全部指到沙箱外面，而脚本不会报错，只会读写错地方。
+     */
+    await check('sandbox node 的工作目录就是沙箱根', async () => {
+        await SBX.handle({
+            action: 'write',
+            path: 'run/cwd.js',
+            content: 'console.log("CWD=" + process.cwd());\n',
+        }, tmpRoot);
+        const r = await SBX.handle({ action: 'node', path: 'run/cwd.js' }, tmpRoot);
+        assert(!r.error, `应跑成功，实际 ${r.error}`);
+        assert(r.output.includes(tmpRoot), `cwd 应是沙箱根 ${tmpRoot}，实际 ${JSON.stringify(r.output)}`);
+    });
+
+    /**
+     * **非零退出码不是 error。**
+     *
+     * 脚本自己 `process.exit(1)` 是它的正常结论（"没爆破出来"就是这种形状）。
+     * 把它标成 error 会让引擎把这一步染红，模型据此以为工具坏了、去改参数 ——
+     * 而真正的原因就在 output 里，它没读。
+     */
+    await check('sandbox node 非零退出码不算工具失败，只回 exitCode', async () => {
+        await SBX.handle({
+            action: 'write',
+            path: 'run/fail.js',
+            content: 'console.log("no-hit");\nprocess.exit(3);\n',
+        }, tmpRoot);
+        const r = await SBX.handle({ action: 'node', path: 'run/fail.js' }, tmpRoot);
+        eq(r.error, undefined, '非零退出码不得被当成工具失败');
+        eq(r.exitCode, 3, '退出码要如实回传');
+        assert(r.output.includes('no-hit'), '输出照样要带回来');
+    });
+
+    await check('sandbox node 跑不存在的脚本回 ENOENT，不把解释器的栈甩给模型', async () => {
+        const r = await SBX.handle({ action: 'node', path: 'run/nope.js' }, tmpRoot);
+        assert(typeof r.error === 'string' && r.error.includes('ENOENT'),
+            `应先自己 stat 出来回 ENOENT，实际 ${JSON.stringify(r)}`);
+    });
+
+    await check('sandbox node 拒绝目录（只能跑文件）', async () => {
+        await SBX.handle({ action: 'write', path: 'run/keep.txt', content: 'x' }, tmpRoot);
+        const r = await SBX.handle({ action: 'node', path: 'run' }, tmpRoot);
+        assert(typeof r.error === 'string' && r.error.includes('目录'),
+            `应明确说不能跑目录，实际 ${JSON.stringify(r)}`);
+    });
+
+    await check('sandbox node 的越界路径根本到不了 spawn', async () => {
+        const r = await SBX.handle({ action: 'node', path: '../../../Windows/System32/calc.exe' }, tmpRoot);
+        assert(r.error && r.error.includes('路径不合法'), `应先被判据拒掉，实际 ${JSON.stringify(r)}`);
+    });
+
+    /**
+     * 超时要把**整棵进程树**杀掉，不能只停止等待。
+     *
+     * 判据取"目录现在删得掉"：删不掉就是还有进程占着它，而那正是根因本身，
+     * 不是靠 sleep 一段时间去赌时序。rm 失败会抛，断言也就跟着红。
+     */
+    await check('sandbox node 超时会被杀并如实标注，且不留占着沙箱的进程', async () => {
+        await SBX.handle({
+            action: 'write',
+            path: 'run/spin.js',
+            content: 'setInterval(() => {}, 1000);\nconsole.log("started");\n',
+        }, tmpRoot);
+        const started = Date.now();
+        const r = await SBX.handle({ action: 'node', path: 'run/spin.js', timeout: 1500 }, tmpRoot);
+        const elapsed = Date.now() - started;
+        assert(r.timedOut === true, `应标记超时，实际 ${JSON.stringify(r)}`);
+        assert(typeof r.error === 'string' && r.error.includes('杀掉'),
+            `错误文案要说明进程已被杀（不是"不再等它"），实际 ${r.error}`);
+        assert(r.output.includes('started'), '被杀之前已经打出来的输出不能丢');
+        assert(elapsed < 15000, `应尽快返回，实际 ${elapsed}ms`);
+
+        // 能删掉即没有进程还占着它；删不掉会抛 EBUSY
+        await fs.promises.rm(tmpRoot, { recursive: true, force: true });
+        assert(!fs.existsSync(tmpRoot), '沙箱目录应已释放');
+    });
+
+    await check('sandbox node 的 timeout 被钳到上限，不接受任意长', async () => {
+        // 只验钳制逻辑本身：传一个荒谬的大值，它必须被压到上限（否则一个死循环能挂住整轮）
+        await SBX.handle({
+            action: 'write', path: 'run/quick.js', content: 'console.log("ok");\n',
+        }, tmpRoot);
+        const r = await SBX.handle({
+            action: 'node', path: 'run/quick.js', timeout: 99_999_999,
+        }, tmpRoot);
+        assert(!r.error, `正常脚本仍应跑完，实际 ${r.error}`);
+        eq(r.exitCode, 0);
+    });
+
     await check('sandbox 未知 action 由应用侧兜住', async () => {
         const r = await SBX.handle({ action: 'stat', path: 'a' }, tmpRoot);
         assert(typeof r.error === 'string' && r.error.includes('未知 action'), `实际 ${JSON.stringify(r)}`);
@@ -1592,7 +1721,7 @@ const run = async () => {
     await check('沙箱动作清单：exec 已从三处一并移除', async () => {
         const META = require('./build/shared/meta/type.js');
         assert(!META.SANDBOX_ACTIONS.includes('exec'), 'exec 必须已从权威清单里删掉');
-        eq(META.SANDBOX_ACTIONS.join(','), 'list,read,write,delete,edit,lines,checkjs',
+        eq(META.SANDBOX_ACTIONS.join(','), 'list,read,write,delete,edit,lines,checkjs,node',
             '动作清单是模型看得见的那一份，改动必须是有意的');
         /**
          * 主进程那份副本也必须逐值相等。它只用来把"未知动作"和"参数不全"分开，
@@ -1606,6 +1735,15 @@ const run = async () => {
         assert(/"action": "edit"/.test(promptSrc), '提示词要教 edit');
         assert(/"action": "lines"/.test(promptSrc), '提示词要教 lines');
         assert(/"action": "checkjs"/.test(promptSrc), '提示词要教 checkjs');
+        assert(/"action": "node"/.test(promptSrc), '提示词要教 node');
+    });
+
+    await check('node 的两条超时：主进程副本与 shared 权威逐值相等', async () => {
+        const META = require('./build/shared/meta/type.js');
+        eq(SBX.SANDBOX_NODE_TIMEOUT_DEFAULT_MS, META.SANDBOX_NODE_TIMEOUT_DEFAULT_MS, '默认超时漂移');
+        eq(SBX.SANDBOX_NODE_TIMEOUT_MAX_MS, META.SANDBOX_NODE_TIMEOUT_MAX_MS, '超时上限漂移');
+        // 插件侧等得必须比应用侧杀得久，否则超时文案会由错的一方给出
+        assert(META.SANDBOX_NODE_TIMEOUT_MAX_MS > 0, '上限必须为正');
     });
 
     await check('沙箱的三个上限常量已彻底删除（不留死代码）', async () => {
@@ -1619,6 +1757,20 @@ const run = async () => {
         const mainSrc = fs.readFileSync(path.join(ROOT, 'app', 'main', 'sandbox.js'), 'utf8');
         assert(!/SANDBOX_TEXT_LIMIT_BYTES|SANDBOX_EXEC_TIMEOUT|clipToBytes/.test(mainSrc),
             '主进程侧不得留下已删的上限与截断实现');
+    });
+
+    /**
+     * `node` 与 exec 的区别必须落在**代码**上，不只是注释里：
+     * 它不能有 shell、不能接受模型给的命令。
+     *
+     * 这条是防回归的：把 spawn 改成 `shell: true`、或把 path 拼进一个命令字符串，
+     * 功能测试照样全绿（脚本还是能跑），而注入面已经回来了。
+     */
+    await check('node 的实现不得引入 shell（spawn 必须带参数数组）', async () => {
+        const mainSrc = fs.readFileSync(path.join(ROOT, 'app', 'main', 'sandbox.js'), 'utf8');
+        assert(!/shell:\s*true/.test(mainSrc), 'node 绝不能开 shell');
+        assert(/spawn\(nodeBinary\(\), \[scriptPath\]/.test(mainSrc),
+            '必须是 spawn(解释器, [脚本路径]) 的参数数组形式，不能是命令字符串');
     });
 
     /* --------------------- 工具名注册表不许留空位 --------------------- */
@@ -1666,6 +1818,14 @@ const run = async () => {
         assert(/逐字/.test(spec), 'old 要逐字照抄这一点必须写清（否则模型会随手省略缩进）');
         assert(/不截断|不限长度/.test(spec), '要说明读写都不截断，否则模型会按旧上限自行拆分');
         assert(!/exec/.test(spec), '不得再提 exec');
+        /**
+         * node 的三条约束缺一不可：**先写再跑**（它不接收源码）、**不是 shell**
+         * （模型最容易顺手传 command）、**非零退出不是失败**（否则它会去改参数）。
+         */
+        assert(/先用 write|先.*写好/.test(spec), '必须写明脚本要先 write 再 node');
+        assert(/不是 shell|不接受命令行/.test(spec), '必须写明它不是 shell，免得模型传命令');
+        assert(/不算工具失败|非零退出/.test(spec), '必须说明脚本非零退出不是工具失败');
+        assert(/\$\{SANDBOX_NODE_TIMEOUT_MAX_MS/.test(src), '超时上限要插值常量，不手抄秒数');
     });
 
     /* --------------------- 推理文本的定稿（本次修复） --------------------- */
@@ -1862,7 +2022,7 @@ const run = async () => {
         assert(at > 0, '应能找到工具消息的构造点');
         const block = src.slice(at, at + 700);
         assert(/^\s*label,$/m.test(block),
-            '工具消息必须带 label 字段：历史里只写工具名分不出 sandbox 七个动作');
+            '工具消息必须带 label 字段：历史里只写工具名分不出 sandbox 八个动作');
     });
 
     await check('推理与脚本源码不进历史', async () => {
@@ -2457,6 +2617,94 @@ const run = async () => {
         const literals = (src.match(/'协议错误'/g) || []).length;
         assert(literals === 1,
             `'协议错误' 字面量只应出现在常量声明里，实际 ${literals} 处（多一处就是两个来源）`);
+    });
+
+    /**
+     * 协议错误的**诊断分型**。
+     *
+     * 这一组是本次修复的核心：原先四种完全不同的错法（写成散文 / 被输出长度截断 /
+     * JSON 语法坏 / 少了 tool 字段）共用一句"没有工具调用也没有 final"，
+     * 模型只能靠猜 —— 实测连续三次都猜错，把整轮撞停。
+     *
+     * 直接调用判据而不是扫源码：源码里写着 `case 'truncated'` 并不能证明
+     * 一条被截断的回复真会落到那一支（那正是变异测试里存活下来的写法）。
+     */
+    await check('协议错误：四种错法被分开诊断', async () => {
+        eq(PARSE.diagnoseReply('我忘了写 JSON，直接说了句话').kind, 'noJson',
+            '整条回复没有 { 时应判 noJson');
+
+        // 在字符串中间断掉 —— 与导出件里那三次失败逐字同形
+        eq(PARSE.diagnoseReply('{"thought":"x","tool":"js","args":{"code":"return 1').kind, 'truncated',
+            'JSON 没闭合时应判 truncated');
+        // 括号闭合了但语法坏：少一个逗号
+        eq(PARSE.diagnoseReply('{"thought":"a" "tool":"js"}').kind, 'badJson',
+            '括号闭合但解析失败时应判 badJson');
+        // 合法 JSON，但没有 tool 也没有 final
+        const noTool = PARSE.diagnoseReply('{"thought":"我打算这么做"}');
+        eq(noTool.kind, 'noTool', '缺少 tool / final 时应判 noTool');
+        assert(noTool.keys.includes('thought'), `应报出顶层实际有哪些键，实际 ${noTool.keys}`);
+
+        // 语法错的诊断必须带**位置**，否则模型只能重读整段代码
+        const bad = PARSE.diagnoseReply('{"thought":"a" "tool":"js"}');
+        assert(/position \d+/.test(bad.detail), `语法错要带出错位置，实际 ${bad.detail}`);
+    });
+
+    /** 四种错法的回灌文案必须互不相同，且截断那一路要明说"拆小" */
+    await check('协议错误：回灌文案按错法分岔', async () => {
+        const truncated = protocolErrorObservation('{"thought":"x","code":"return 1');
+        const prose = protocolErrorObservation('我直接说了一句话');
+        const missing = protocolErrorObservation('{"thought":"x"}');
+
+        assert(truncated !== prose && prose !== missing && truncated !== missing,
+            '不同错法的回灌文案不得相同 —— 相同等于没诊断');
+        assert(truncated.includes('截断'), `截断那一路要明说是截断，实际 ${truncated.slice(0, 120)}`);
+        assert(truncated.includes('拆'), '截断那一路要给出"把这一步拆小"的动作');
+        assert(prose.includes('没有') && prose.includes('{'), '散文那一路要点明没有 JSON 对象');
+        assert(missing.includes('tool') && missing.includes('final'), '缺字段那一路要点名缺的是哪两个');
+        // 三路都必须仍带原文：模型自查靠它
+        assert(truncated.includes('你上一条回复的原文'), '回灌必须附原文');
+    });
+
+    /** 界面上那条记录只给一行结论，不贴原文（原文动辄几千字，会把对话流冲垮） */
+    await check('协议错误：界面摘要是单行且不含原文', async () => {
+        const reply = `{"thought":"x","tool":"js","args":{"code":"${'a'.repeat(3000)}`;
+        const summary = TRANSCRIPT.protocolErrorSummary(reply);
+        assert(!summary.includes('\n'), '界面摘要必须是一行');
+        assert(summary.length < 200, `界面摘要要短，实际 ${summary.length} 字符`);
+        assert(summary.includes('协议错误'), `摘要要点明是协议错误，实际 ${summary}`);
+        assert(summary.includes('截断'), `摘要要带上诊断结论，实际 ${summary}`);
+    });
+
+    /**
+     * 页面执行失败的位置换算。
+     *
+     * 宿主（CDP）报的行号是**包装后**源码的行号，而模型只认得自己写的那几行。
+     * 这里直接调用换算函数，并把包装偏移**从真实包装结果里量出来** ——
+     * 写死一个数字的话，包装模板一改就整体偏一行，而那种偏没有任何症状。
+     */
+    await check('js 语法错：行号换算回模型自己的代码', async () => {
+        const code = 'const a = 1;\nreturn a +;\nconst b = 2;';
+        const wrapped = PARSE.buildScriptSource(code);
+        // 模型第一行在包装后源码里的行号（1 起）
+        const first = wrapped.split('\n').indexOf('const a = 1;') + 1;
+        assert(first > 1, '模型代码不应从第 1 行开始（否则这个用例证明不了换算）');
+
+        const raw = JSON.stringify({
+            __agentError: "SyntaxError: Unexpected token ';'",
+            __agentAt: { line: first + 1, column: 12 },
+        });
+        const out = PARSE.locateScriptError(raw, code);
+        assert(out.includes('第 2 行'), `应换算成模型自己的第 2 行，实际 ${out}`);
+        assert(out.includes('return a +;'), '要把出错那一行原文抄出来');
+        assert(out.includes('^'), '要给出定位符');
+        assert(!out.includes('__agentAt'), '内部的位置字段不该回传给模型');
+        assert(out.includes('Unexpected token'), 'V8 的原话要保留');
+
+        // 拿不到位置时原样返回：宁可少说，也不能报一个错的坐标
+        const noPos = JSON.stringify({ __agentError: 'TypeError: x is not a function' });
+        eq(PARSE.locateScriptError(noPos, code), noPos, '没有位置信息时不得改写');
+        // 不是失败结果的（正常返回值）一律不动
+        eq(PARSE.locateScriptError('{"a":1}', code), '{"a":1}', '正常返回值不得被改写');
     });
 
     /**

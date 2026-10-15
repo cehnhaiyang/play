@@ -6,54 +6,130 @@
  * 成败判据写错 → 一次成功的数据探测被标成失败，模型对着成功结果修 bug。
  */
 
+import { errorText } from './text';
+
+/**
+ * 回复不合协议时的**具体**原因。
+ *
+ * 只说一句"没有工具调用也没有 final"，模型无从下手 —— 它自认为写的是合法
+ * JSON，于是下一次原样再来一遍，实测连撞三次就把整个会话撞停了（见
+ * MAX_PROTOCOL_ERRORS）。判据必须细到能回答"错在哪一步"：通篇没写 JSON、
+ * 被输出长度截断、JSON 语法坏了、还是 JSON 合法但少了 tool / final。
+ *
+ * 只依赖回复原文这一个输入（纯函数）：回灌文案在"当场"与"下一轮重建"
+ * 两处必须逐字一致，而重建时手上只有存下来的那条原文。
+ */
+export type ReplyProblem =
+    /** 整条回复里连一个 `{` 都没有 —— 写成了散文 */
+    | { kind: 'noJson' }
+    /** JSON 没闭合。绝大多数是回复被输出长度截断 */
+    | { kind: 'truncated'; detail: string }
+    /** 括号闭合了但 JSON.parse 报错 */
+    | { kind: 'badJson'; detail: string }
+    /** JSON 合法，但顶级字段里没有 tool 也没有 final */
+    | { kind: 'noTool'; keys: string };
+
+/**
+ * 诊断一条不合协议的回复。
+ *
+ * 与 extractJsonObject 共用同一套扫描（`scanObject`），只在"切不出来之后"分岔：
+ * 那边返回 null 就结束了，这里要把**为什么**切不出来说清楚 —— 前者要它把这一步
+ * 拆小，后者要它去检查转义，两件事对模型的动作完全不同。
+ */
+export const diagnoseReply = (text: string): ReplyProblem => {
+    const start = text.indexOf('{');
+    if (start < 0) return { kind: 'noJson' };
+
+    const { end, inString, depth } = scanObject(text, start);
+
+    if (end < 0) {
+        return {
+            kind: 'truncated',
+            detail: inString
+                ? `写到第 ${text.length} 个字符时停在一个字符串中间，JSON 从未闭合`
+                : `JSON 的括号没有闭合，还差 ${depth} 个 }`,
+        };
+    }
+
+    try {
+        const parsed = JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>;
+        const keys = parsed && typeof parsed === 'object' ? Object.keys(parsed) : [];
+        return { kind: 'noTool', keys: keys.length ? keys.join('、') : '(空对象)' };
+    } catch (e) {
+        /*
+         * V8 的报错里带 "at position N"，那是**相对这个对象**的偏移。
+         * 换算回整条回复的偏移并把出错位置附近的原文抄出来 —— 只报一句
+         * "JSON 解析失败"，模型还是得自己逐字找那个引号。
+         */
+        const message = errorText(e);
+        const at = /position (\d+)/.exec(message);
+        if (!at) return { kind: 'badJson', detail: message };
+        const offset = start + Number(at[1]);
+        const near = text.slice(Math.max(0, offset - 30), offset + 30).replace(/\n/g, '\\n');
+        return {
+            kind: 'badJson',
+            detail: `${message}（整条回复的第 ${offset} 个字符附近。原文：…${near}…）`,
+        };
+    }
+};
+
+/**
+ * 从 `start` 起做字符串感知的括号扫描。
+ *
+ * 不能用正则匹配花括号 —— 脚本源码里必然含 `{ }` 与字符串，只有字符串感知的
+ * 括号计数才能切准边界。返回对象闭合处的下标；**没闭合返回 -1**，并顺带报出
+ * 停下时的状态（还在字符串里 / 还差几层），供诊断文案区分"截断"与"括号不配对"。
+ */
+const scanObject = (
+    text: string,
+    start: number,
+): { end: number; inString: boolean; depth: number } => {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let i = start; i < text.length; i += 1) {
+        const ch = text[i];
+
+        if (inString) {
+            if (escaped) escaped = false;
+            else if (ch === '\\') escaped = true;
+            else if (ch === '"') inString = false;
+            continue;
+        }
+
+        if (ch === '"') inString = true;
+        else if (ch === '{') depth += 1;
+        else if (ch === '}') {
+            depth -= 1;
+            if (depth === 0) return { end: i, inString: false, depth: 0 };
+        }
+    }
+
+    return { end: -1, inString, depth };
+};
+
 /**
  * 从模型回复里抠出第一个能解析的**平衡** JSON 对象。
  *
- * 不能用正则匹配花括号 —— 脚本源码里必然含 `{ }` 与字符串，只有字符串感知的
- * 括号计数才能切准边界。也不能只看第一个 `{` —— 模型常在 JSON 前写一句
- * "我的计划是…"，那个花括号不是起点，因此逐个 `{` 当起点试，解析成功即返回。
+ * 不能只看第一个 `{` —— 模型常在 JSON 前写一句"我的计划是…"，那个花括号不是
+ * 起点，因此逐个 `{` 当起点试，解析成功即返回。
  */
 export const extractJsonObject = (text: string): Record<string, unknown> | null => {
     if (!text) return null;
 
     // 起点全部收集：thought 里花括号再多也不能让外层 JSON 的起点被截掉。
     // 曾经限制过起点数量，后果是"thought 里示例代码多写几个 { }，真正的调用就解析不到"。
-    const starts: number[] = [];
-    for (let i = 0; i < text.length; i += 1) {
-        if (text[i] === '{') starts.push(i);
-    }
-
-    for (const start of starts) {
-        let depth = 0;
-        let inString = false;
-        let escaped = false;
-
-        for (let i = start; i < text.length; i += 1) {
-            const ch = text[i];
-
-            if (inString) {
-                if (escaped) escaped = false;
-                else if (ch === '\\') escaped = true;
-                else if (ch === '"') inString = false;
-                continue;
+    for (let start = text.indexOf('{'); start >= 0; start = text.indexOf('{', start + 1)) {
+        const { end } = scanObject(text, start);
+        if (end < 0) continue;
+        try {
+            const parsed = JSON.parse(text.slice(start, end + 1));
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                return parsed as Record<string, unknown>;
             }
-
-            if (ch === '"') inString = true;
-            else if (ch === '{') depth += 1;
-            else if (ch === '}') {
-                depth -= 1;
-                if (depth === 0) {
-                    try {
-                        const parsed = JSON.parse(text.slice(start, i + 1));
-                        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-                            return parsed as Record<string, unknown>;
-                        }
-                    } catch {
-                        /* 这个起点不是合法 JSON，换下一个 */
-                    }
-                    break;
-                }
-            }
+        } catch {
+            /* 这个起点不是合法 JSON，换下一个 */
         }
     }
     return null;
@@ -135,11 +211,71 @@ export const safeParseObject = (raw: string): Record<string, unknown> => {
  * 语法错误；同时返回值必须自己序列化 —— `Runtime.evaluate` 对 DOM 节点、
  * 循环引用这类不可序列化的值会直接抛错或回传空对象。
  */
-export const buildScriptSource = (code: string): string => `(async () => {
+const PREFIX = `(async () => {
   let __v;
   try {
     __v = await (async () => {
-${code}
+`;
+
+/**
+ * 模型代码在包装后的源码里从第几行开始（1 起）。
+ *
+ * 由 PREFIX 现算而不是写死 5：模板哪怕只多一行注释，换算出的行号就整体偏了，
+ * 而它正是模型用来定位自己代码的唯一依据。
+ */
+const CODE_LINE_OFFSET = PREFIX.split('\n').length - 1;
+
+/**
+ * 把执行器回的失败结果换成一句**带位置**的说明。
+ *
+ * V8 给的 `Unexpected token ')'` 不带任何位置，模型只能自己重读整段代码，
+ * 而它往往读不出来（实测：漏一个闭合大括号，连撞多次都以为问题在别处）。
+ * CDP 的 `exceptionDetails` 里其实带着行列号，但那是**包装后**的行号，
+ * 直接给模型只会让它去数包装层。这里换算回模型自己写的行，并把那一行抄出来。
+ *
+ * 只处理语法错误：运行时异常的位置信息对模型没有额外价值（它知道自己在哪一步抛的），
+ * 而语法错误没有位置就完全无法自查。
+ *
+ * 拿不到位置时原样返回 —— 宁可少说，也不要报一个错的坐标。
+ */
+export const locateScriptError = (result: string, code: string): string => {
+    let parsed: Record<string, unknown>;
+    try {
+        const value = JSON.parse(result) as unknown;
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return result;
+        parsed = value as Record<string, unknown>;
+    } catch {
+        return result;
+    }
+
+    const detail = parsed.__agentError;
+    const at = parsed.__agentAt as { line?: unknown; column?: unknown } | undefined;
+    if (typeof detail !== 'string' || !at || typeof at.line !== 'number') return result;
+
+    const line = at.line - CODE_LINE_OFFSET;
+    const lines = code.split('\n');
+    const source = line >= 1 && line <= lines.length ? lines[line - 1] : '';
+    const column = typeof at.column === 'number' ? at.column : 0;
+
+    const where = source
+        ? `\n出错在你写的第 ${line} 行：\n${source}\n${' '.repeat(Math.max(0, column))}^`
+        : `\n位置换算后落在你的代码之外（第 ${line} 行，共 ${lines.length} 行），`
+            + '多半是某个括号或引号没有配对。';
+
+    // 只改 __agentError 这一条，其余字段（__agentAt）不再回传给模型
+    const next: Record<string, unknown> = { ...parsed, __agentError: `${detail}${where}` };
+    delete next.__agentAt;
+    return JSON.stringify(next);
+};
+
+/**
+ * 把模型给的代码包成可返回值的异步 IIFE。
+ *
+ * 包一层的必要性：模型写的是脚本片段（含 `return`），裸求值里顶层 `return` 是
+ * 语法错误；同时返回值必须自己序列化 —— `Runtime.evaluate` 对 DOM 节点、
+ * 循环引用这类不可序列化的值会直接抛错或回传空对象。
+ */
+export const buildScriptSource = (code: string): string => `${PREFIX}${code}
     })();
   } catch (__err) {
     // 基础设施失败走专属通道 __agentError：页面接口正常返回 {error:"..."}

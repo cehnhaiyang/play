@@ -5,6 +5,7 @@ import type {
     AiChatMessage,
 } from '../../../shared/meta';
 import { COMPACT_PREFIX } from './prompt';
+import { diagnoseReply } from './parse';
 
 /**
  * 摘要消息的前缀，**从这里再导出一次**。
@@ -68,24 +69,80 @@ export const splitRounds = (messages: AgentMessage[]): AgentMessage[][] => {
 export const PROTOCOL_ERROR_LABEL = '协议错误';
 
 /**
+ * 界面上那条协议错误记录的**一行摘要**。
+ *
+ * 与回灌文案（protocolErrorObservation）共用同一个诊断，但**不贴原文**：
+ * 回灌要带全文让模型自查，而这条是给人看的 —— 原文动辄几千字，贴上去会把
+ * 对话流冲得没法读，用户也判断不出错在哪。诊断结论才是他要的那一句。
+ */
+export const protocolErrorSummary = (reply: string): string => {
+    const problem = diagnoseReply(reply);
+    switch (problem.kind) {
+        case 'noJson':
+            return '协议错误：整条回复里没有 JSON，写成了说明文字';
+        case 'truncated':
+            return `协议错误：JSON 被截断（${problem.detail}）`;
+        case 'badJson':
+            return `协议错误：JSON 语法不合法（${problem.detail}）`;
+        default:
+            return `协议错误：JSON 里既没有 tool 也没有 final（顶层只有 ${problem.keys}）`;
+    }
+};
+
+/**
  * 协议错误的回灌文案。
  *
  * **只能由这一个函数产出。** 同一段历史在"本轮循环里"与"下一轮重建时"长得不一样
  * 的话，模型对"这一步到底错在哪"的判断会随轮次漂移：当场读到的是"你的 JSON 不合法"，
  * 下一轮却变成"执行失败，请修正参数"——而那次调用压根没有参数可改。
  *
+ * ## 为什么要分四种错法
+ *
+ * 一律回一句"没有工具调用也没有 final"时，模型**只能靠猜**：它自认为写的是合法
+ * JSON，于是原样再来一遍。实测连撞三次（MAX_PROTOCOL_ERRORS）就把整轮撞停，
+ * 而三次的失败原因其实是同一个"回复被输出长度截断"，模型每次都读不出这件事。
+ * 所以这里按 diagnoseReply 的判据分开说，并给出各自**唯一有效的动作**。
+ *
+ * 诊断只看正文，不看时序，因此当场与重建必然得到同一句 —— 不需要额外记状态。
+ *
  * 刻意不写"第 N 次"：那个计数只服务于 MAX_PROTOCOL_ERRORS 这道闸门，
  * 进了文案就没法从消息本身重建（重建时无从知道当时是第几次），
  * 而这正是两处措辞开始分叉的起点。
  */
-export const protocolErrorObservation = (reply: string): string =>
-    '[协议错误] 你的回复里没有可执行的工具调用，也没有 final 字段。'
-    + '必须严格按协议只回一个 JSON 对象：'
-    + '{"thought":"...","tool":"js","args":{...}} 或 {"thought":"...","final":"..."}。'
-    + '不要输出解释文字，不要用 ```json 围栏。'
-    + 'args.code 是 JSON 字符串：里面的换行必须写成 \\n、引号必须写成 \\"，'
-    + '直接粘多行 JS 会破坏 JSON 解析。'
-    + `\n\n你上一条回复的原文：\n${reply}`;
+export const protocolErrorObservation = (reply: string): string => {
+    const problem = diagnoseReply(reply);
+
+    let what: string;
+    let fix: string;
+    switch (problem.kind) {
+        case 'noJson':
+            what = '整条回复里没有任何 `{`，写成了散文/说明文字。';
+            fix = '只输出那一个 JSON 对象本身，前面后面都不要加解释。';
+            break;
+        case 'truncated':
+            what = `JSON 没写完就被截断了：${problem.detail}。`
+                + '最常见的原因是这条回复太长，撞上了输出长度上限 —— 不是你把标点写错了。';
+            fix = '把这一步拆小：args 里只放**必需**的那段代码，能分两次做的就分两次。'
+                + '尤其不要把整份脚本、整篇文档塞进一次回复。';
+            break;
+        case 'badJson':
+            what = `大括号是闭上的，但 JSON 语法不合法：${problem.detail}`;
+            fix = '检查 args 里的字符串：换行必须写成 \\n、双引号必须写成 \\"、反斜杠写成 \\\\。';
+            break;
+        default:
+            what = `JSON 本身合法，但没有 tool 也没有 final 字段（顶层只有：${problem.keys}）。`;
+            fix = '补上其中一个：要执行工具就写 tool + args，要收尾就写 final。';
+            break;
+    }
+
+    return '[协议错误] 你上一条回复没有按协议输出。'
+        + `具体是：${what}`
+        + `改法：${fix}`
+        + ' 协议要求只回一个 JSON 对象：'
+        + '{"thought":"...","tool":"js","args":{...}} 或 {"thought":"...","final":"..."}，'
+        + '不要用 ```json 围栏。'
+        + `\n\n你上一条回复的原文：\n${reply}`;
+};
 
 /**
  * 工具观察的回灌文案：**只由这一个函数产出**。

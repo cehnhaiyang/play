@@ -17,12 +17,17 @@ import { buildTranscript } from './transcript';
  */
 
 /**
- * 沙箱的动作白名单。真值在 `shared/meta/type.ts`，这里只**转口**给提示词插值。
+ * 沙箱的动作清单与 node 的两条超时。真值在 `shared/meta/type.ts`，
+ * 这里只**转口**给提示词插值。
  *
- * 不在 prompt.ts 里各写一份清单：改了白名单而提示词还写着旧的动作名，
- * 模型会照着调用一个已经不存在的动作。
+ * 不在 prompt.ts 里各写一份：改了白名单而提示词还写着旧的动作名，
+ * 模型会照着调用一个已经不存在的动作；手抄超时秒数则会在钳制值改动后过期。
  */
-import { SANDBOX_ACTIONS } from '../../../shared/meta';
+import {
+   SANDBOX_ACTIONS,
+   SANDBOX_NODE_TIMEOUT_DEFAULT_MS,
+   SANDBOX_NODE_TIMEOUT_MAX_MS,
+} from '../../../shared/meta';
 
 /**
  * 单次观察回传上限 —— **保险丝，不是预算**。
@@ -207,7 +212,7 @@ export const SYSTEM_PROMPT = `
    - 改写并写回: {"action": "rewrite", "token": "...", "changes": {"key": val}, "area": "local", "key": "find返回的key"}
    注：改写 Payload 会使原始服务端签名失效。
 
-6. sandbox —— 本机沙箱：读写与精确修改本机文件
+6. sandbox —— 本机沙箱：读写、精确修改文件与执行脚本
    args（action 全小写，可用 ${SANDBOX_ACTIONS.join(' / ')}）:
    - 列目录: {"action": "list", "path": "..."}
    - 读文件: {"action": "read", "path": "..."}
@@ -216,26 +221,20 @@ export const SYSTEM_PROMPT = `
    - 精确替换: {"action": "edit", "path": "...", "old": "要替换掉的原文", "new": "替换成的新文本"}
    - 改行区间: {"action": "lines", "path": "...", "start": 10, "end": 20, "content": "新的这几行"}
    - 查 JS 语法: {"action": "checkjs", "content": "要检查的 JS 源码"}
+   - 跑 JS 脚本: {"action": "node", "path": "out/crack.js", "timeout": 60000}
    - **改已有文件一律用 edit，不要 read 完再 write 全量覆盖**：全量重写会把没读到的
      部分一起丢掉，而回执照样说成功。edit 的 old 必须**逐字**照抄（含缩进），
      且在全文里唯一 —— 不唯一时把 old 写长一点（带上前后各一行），它会报错而不是猜。
    - lines 行号 1 起、闭区间；省略 end 就只改 start 那一行。行尾风格按文件现状保留。
    - checkjs 只查语法，不执行、不解析依赖（require 一个不存在的模块照样通过）。
      它按 CommonJS 解析：import / export / 顶层 await 会被判为语法错误。
-   - **只能在沙箱目录里操作**：path 一律相对沙箱根，写 \`..\`、绝对路径或盘符会被拒绝。
-     沙箱外的文件这里读不到 —— 要取页面上的东西用 js，不要指望这条工具。
-   - 目录不存在时自动创建；write 会连带建父目录，不用先 mkdir。
-   - 读写都不截断、不限长度：文件多大都能整份读回来改。
-
-## 执行准则与硬约束
-1. 广度优先单步拉取：一次脚本内查清相关字段，禁止拆成多次调用只为获取少量数据；DOM 提取必须做截断（如 slice(0, 50)）。
-2. 试错熔断：相同思路/错误连续失败 2 次必须更换策略（检查选择器 -> 换用网络拦截 -> 换用 storage 直读底层数据）。
-3. 失败只是这一步的结果，不是任务的终点：工具返回以「[工具 X 执行失败]」开头时读错误信息修正参数或换路继续，不要原样重试，更不要把它当成结论收尾；除非已穷尽可行路径，否则继续调用工具。
-4. 结论必须由证据支撑：提出任何鉴权机制、加密方式、字段逻辑的推断，必须伴随工具返回的具体物理证据（字段值/响应码/堆栈）。
-5. 交付标准：
-   - 提取数据：必须给出实际采样值与总量，而非“可以读取”。
-   - 验证绕过/逻辑：必须给出篡改前后系统行为的对比判定。
-   - 遇到阻碍：清晰说明已尝试的路径、卡点证据与所需的前置条件。`;
+   - node 只能跑**沙箱里已经存在的 .js 文件**：先用 write 把脚本写好，再 node 跑它。
+     它不接受命令行、不接受参数、不是 shell —— 只能选哪个文件。
+     脚本的工作目录就是沙箱根，所以文件路径写相对路径。
+     回执带 exitCode 与 output（stdout + stderr 合并，不截断）：**脚本自己非零退出不算工具失败**，那是它的结论，去读 output 里的原因。只有超时才是 error。
+     timeout 缺省 ${SANDBOX_NODE_TIMEOUT_DEFAULT_MS / 1000} 秒，上限 ${SANDBOX_NODE_TIMEOUT_MAX_MS / 1000} 秒；超时会连子进程一起杀掉。
+   - 目录不存在时自动创建；write 会连带建父目录。
+   - 读写都不截断、不限长度：文件多大都能整份读回来改。`;
 
 /**
  * 一次请求的输入 token：**系统提示词 + 待发消息**。

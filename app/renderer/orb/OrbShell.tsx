@@ -231,7 +231,18 @@ export const OrbShell = ({ icon, accent, label, hint, toolbar, children }: OrbSh
          * 把手是**边框级**的东西，不该被表面裁。
          */
         <div className="animate-orb-unfold relative h-full w-full font-sans text-slate-200 select-none">
-            <div className="flex h-full w-full flex-col overflow-hidden rounded-2xl border border-white/12 bg-slate-950/95 shadow-[0_24px_80px_rgba(0,0,0,0.7)] backdrop-blur-2xl">
+            {/*
+              面板底色：**不用 `backdrop-blur`**。
+
+              底色本来就写到了 95% 不透明，模糊层剩给用户看的只有那 5% ——
+              视觉上几乎为零，代价却是真的：透明窗口的 backdrop-filter 要求
+              合成器每帧重新抓取并模糊窗口**背后的桌面内容**，而面板展开时
+              一直在动（流式输出、滚动、拖拽）。换成实色之后画面几乎一样，
+              每帧省下一次全窗模糊。
+
+              不透明度从 95% 提到 97%：文字压在深底上更实，读数更清楚。
+            */}
+            <div className="flex h-full w-full flex-col overflow-hidden rounded-2xl border border-white/12 bg-slate-950/[0.97] shadow-[0_24px_80px_rgba(0,0,0,0.7)]">
                 {/*
                  * 只有 header 是拖动区。面板本体挂着滚动列表和输入框，
                  * 整块都可拖的话选不中文字、点不到按钮。
@@ -262,7 +273,15 @@ export const OrbShell = ({ icon, accent, label, hint, toolbar, children }: OrbSh
                         </svg>
                     </button>
                 </header>
-                <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{children}</div>
+                {/*
+                 * `select-text` 是**必要的覆盖**，不是冗余。
+                 *
+                 * 面板根节点带 `select-none`（拖动与点按钮时不该选中文字），
+                 * 而那个属性会被子元素继承 —— 于是内容区里的工具返回值、
+                 * 脚本、对话正文全都选不中，用户想复制一段报错去查都做不到。
+                 * 内容区自己声明可选，选择范围不会越出这里。
+                 */}
+                <div className="flex min-h-0 flex-1 flex-col overflow-hidden select-text">{children}</div>
             </div>
             {/*
               右下角的缩放把手。

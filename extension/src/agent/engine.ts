@@ -35,12 +35,13 @@ import {
     buildTranscript,
     insertAfterId,
     protocolErrorObservation,
+    protocolErrorSummary,
     splitByCompaction,
     sumUsage,
     toolObservation,
 } from './transcript';
 import { asString, errorText, keepReasoning, trimToBudget } from './text';
-import { buildScriptSource, extractJsonObject, isJsErrorResult } from './parse';
+import { buildScriptSource, extractJsonObject, isJsErrorResult, locateScriptError } from './parse';
 import { dispatchTool } from './tools';
 
 /**
@@ -254,7 +255,8 @@ export class AgentEngine {
              * 推进下去 —— 后返回的结果会被丢弃，队列不会因此卡住。
              */
             const result = await this.options.host.evaluate(tabId, buildScriptSource(code));
-            return result.value;
+            // 宿主拿到的是**包装后**源码的行号，这里换算回模型自己写的行
+            return locateScriptError(result.value, code);
         };
 
         const queued: Promise<string> = this.execChain.then(task, task);
@@ -457,10 +459,18 @@ export class AgentEngine {
                     if (reply.trim()) {
                         protocolErrors += 1;
 
+                        /*
+                         * 界面上那条记录只说"哪儿错了"，不贴整条原文。
+                         *
+                         * 回灌给模型的观察里带全文（protocolErrorObservation），
+                         * 那是它自查的依据；而这条记录是给**人**看的，原文动辄
+                         * 几千字，贴上去会把对话流冲得没法读。两处用途不同，
+                         * 所以取的内容也不同 —— 但都出自同一个诊断函数。
+                         */
                         this.appendMessage({
                             id: generateId(),
                             role: 'tool',
-                            content: '协议错误：回复里没有工具调用也没有 final',
+                            content: protocolErrorSummary(reply),
                             reasoning: keepReasoning(liveReasoning),
                             label: PROTOCOL_ERROR_LABEL,
                             ok: false,
@@ -475,8 +485,16 @@ export class AgentEngine {
                             this.appendMessage({
                                 id: generateId(),
                                 role: 'assistant',
+                                /*
+                                 * 收尾必须**同时**说清"发生了什么事"与"你可以怎么办"。
+                                 * 原话只有"换个更明确的说法"，而这里的成因几乎总是
+                                 * 回复超长被截断 —— 那不是用户措辞的问题，
+                                 * 让他去改措辞等于把人支到错的方向上。
+                                 */
                                 content: `连续 ${MAX_PROTOCOL_ERRORS} 次没有按输出协议回复，已停止。`
-                                    + '可以再说一次，或换个更明确的说法。',
+                                    + '常见原因是单步内容太长（一次塞了整份脚本或整篇文档）'
+                                    + '撞上输出长度上限，回复被截断成半个 JSON。'
+                                    + '可以再说一次，或把任务拆成几步让它一次只做一件。',
                                 notice: true,
                                 at: Date.now(),
                             });

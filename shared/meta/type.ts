@@ -488,25 +488,47 @@ export type AgentToolName =
  * 拿它做任何事（包括绕过沙箱边界的命令），代价却是每一条命令都要配套超时、
  * 进程树清理、输出截断三套机制，且失败模式（超时、孙子进程占着目录）
  * 全都不可预期。工具面小一圈，边界才守得住。
+ *
+ * ## `node` 与 exec 的区别（不是把 exec 加回来）
+ *
+ * `node` 只做一件事：**执行沙箱里一个已经写好的 .js 文件**。命令、参数、shell
+ * 全都不由模型给 —— 它只能选哪个文件。所以"跑什么"这件事完全落在沙箱目录里，
+ * 而沙箱目录里的内容同样受 `write` / `edit` 的边界管辖。这是它与 exec 的
+ * 本质差别：exec 能跑任意命令（`del` / `curl` / 任何解释器），node 只能跑一个
+ * 已经摆在沙箱里、模型自己写下的脚本。
  */
-export const SANDBOX_ACTIONS = ['list', 'read', 'write', 'delete', 'edit', 'lines', 'checkjs'] as const;
+export const SANDBOX_ACTIONS = ['list', 'read', 'write', 'delete', 'edit', 'lines', 'checkjs', 'node'] as const;
 
 export type SandboxAction = typeof SANDBOX_ACTIONS[number];
+
+/**
+ * `node` 动作的超时（毫秒）。**这里是唯一权威**，主进程 `app/main/sandbox.js`
+ * 按同值钳制（那边是 CommonJS，与 `extension/host/host.js` 抄
+ * `BRIDGE_PROTOCOL_VERSION` 同一处境）。由 `test/agenttools.test.js` 逐值比对。
+ *
+ * 给 5 分钟：沙箱脚本是模型自己写的还原/爆破代码，跑几十秒是常态；
+ * 但没有上限的话，一个死循环会把这个动作永远挂住，而调用方（插件）在
+ * 桥那一层只有 10 分钟的整体等待。
+ */
+export const SANDBOX_NODE_TIMEOUT_DEFAULT_MS = 60000;
+export const SANDBOX_NODE_TIMEOUT_MAX_MS = 300000;
 
 /**
  * `sandbox` 工具：本机项目根 `sandbox/` 目录里的文件操作。
  *
  * ## 形状
  *
- * 一次调用只做一件事，`action` 决定用哪几个字段。合并成一个请求而不是七个端点，
- * 是因为"作用范围恒为沙箱根"这一条对所有动作都成立：分开写就要在七处各自钉
+ * 一次调用只做一件事，`action` 决定用哪几个字段。合并成一个请求而不是八个端点，
+ * 是因为"作用范围恒为沙箱根"这一条对所有动作都成立：分开写就要在八处各自钉
  * 一次根目录，而漏掉一处的表现是那一半能越界。
  *
- * ## 为什么没有上限字段
+ * ## 为什么没有上限字段（除了 node 的 timeout）
  *
  * 读文件不截断、写文件不限长 —— 上限全部取消了。原先 read 按 32KB 截断，
  * 后果是**超过 32KB 的文件模型读不全，因此根本无法安全地全量重写它**：
  * 截断回传 + 全量写回 = 静默丢掉后半篇。要精确改就必须先看得全。
+ *
+ * node 是唯一的例外：它起的是外部进程，没有超时就会永久挂住。
  */
 export interface SandboxRequest {
     action: SandboxAction;
@@ -525,6 +547,12 @@ export interface SandboxRequest {
     start?: number;
     /** lines：结束行号，1 起、含该行。省略即只替换 start 这一行 */
     end?: number;
+    /**
+     * node：等待毫秒。缺省 SANDBOX_NODE_TIMEOUT_DEFAULT_MS，超过上限被钳制。
+     *
+     * 只能调等待时长，不能改变"跑哪个文件" —— 脚本路径走 `path`。
+     */
+    timeout?: number;
 }
 
 /**
@@ -552,6 +580,19 @@ export interface SandboxResult {
     replaced?: number;
     /** checkjs：语法通过为 true。失败时 error 里带行号与原因 */
     valid?: boolean;
+    /**
+     * node：脚本的 stdout + stderr（不截断）。
+     *
+     * 与 `error` 的分工：**非零退出码不是 `error`**。脚本自己 `process.exit(1)`
+     * 是它的正常结论（比如"没爆破出来"），模型要看到的是 output 里的原因；
+     * 把它标成失败会让引擎把这一步染红，模型据此以为工具坏了。
+     * `error` 只留给"根本没能跑起来"（超时、路径不对、进程起不来）。
+     */
+    output?: string;
+    /** node：进程退出码。被信号杀死时为 null */
+    exitCode?: number | null;
+    /** node：是否因超时被杀 */
+    timedOut?: boolean;
 }
 
 /**
@@ -595,8 +636,8 @@ export interface AgentMessage {
      * 工具消息：工具名 + 动作（如 sandbox·write）。
      *
      * 重建模型上下文时要用它：只写 "sandbox" 的话，「列目录 / 读文件 / 写文件 /
-     * 精确替换 / 改行区间 / 查语法」在历史里长得一模一样，模型看不出自己上一轮
-     * 到底做过哪一件。
+     * 精确替换 / 改行区间 / 查语法 / 跑脚本」在历史里长得一模一样，模型看不出
+     * 自己上一轮到底做过哪一件。
      */
     label?: string;
     /** 工具消息：执行的脚本源码（供界面展开查看） */

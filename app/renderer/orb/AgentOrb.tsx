@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { AgentMessage, AgentUsage, HeaderRule, TamperRule } from '../../../shared/meta';
 import { exportAgentSession } from '../../../shared/core';
 import { OrbShell } from './OrbShell';
@@ -93,6 +93,31 @@ export const AgentOrb = () => {
     /** 当前活动标签页地址。存储页与 JWT 页按它取数据 */
     const [activePage, setActivePage] = useState('');
 
+    /*
+     * 流式增量的按帧合并缓冲。
+     *
+     * 放 ref 而不是 state：它只是"还没提交到画面的那一小段"，读它的人只有
+     * 那个 rAF 回调，进 state 等于每次追加都多一次渲染 —— 正是要避免的事。
+     */
+    const pendingDelta = useRef({ content: '', reasoning: '' });
+    const deltaRaf = useRef<number | null>(null);
+
+    /*
+     * 自动滚到底。
+     *
+     * 必须**先看用户在哪**再决定滚不滚：他一直往上翻着看历史时，新内容一来就
+     * 把他拽回底部，等于在读的过程中被抢走滚动条。判据是"离底 40px 以内"，
+     * 留一点余量给"刚好贴着底但差几像素"的情况。
+     */
+    const scrollRef = useRef<HTMLDivElement | null>(null);
+    const stickToBottom = useRef(true);
+
+    const onScroll = useCallback(() => {
+        const box = scrollRef.current;
+        if (!box) return;
+        stickToBottom.current = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+    }, []);
+
     /* 桥的连接状态：查一次，之后跟着推送走。理由见 SniffOrb 同名那段 */
     useEffect(() => {
         void (async () => setConnected(await bridgeConnected()))();
@@ -127,12 +152,33 @@ export const AgentOrb = () => {
         }
         if (event === 'agent-delta') {
             const delta = payload as { content?: string; reasoning?: string };
-            setStreaming((prev) => ({
-                content: (prev?.content || '') + (delta.content || ''),
-                reasoning: (prev?.reasoning || '') + (delta.reasoning || ''),
-            }));
+            /*
+             * 用 ref 累积、按帧提交，不直接在回调里 setState。
+             *
+             * 增量是按 token 到达的，一次回答能来几百上千条。每条都 setState
+             * 就是每次一个 React 渲染 —— 而渲染的是整块面板。合并到动画帧之后，
+             * 上限变成"每帧一次"，观感完全一样（人眼分辨不出帧内的中间态），
+             * 开销按帧数收敛。
+             */
+            pendingDelta.current.content += delta.content || '';
+            pendingDelta.current.reasoning += delta.reasoning || '';
+            if (deltaRaf.current !== null) return;
+            deltaRaf.current = window.requestAnimationFrame(() => {
+                deltaRaf.current = null;
+                const { content, reasoning } = pendingDelta.current;
+                pendingDelta.current = { content: '', reasoning: '' };
+                setStreaming((prev) => ({
+                    content: (prev?.content || '') + content,
+                    reasoning: (prev?.reasoning || '') + reasoning,
+                }));
+            });
         }
     }), []);
+
+    /* 卸载时把在途的那一帧取消，否则窗口关掉之后还会 setState 一次 */
+    useEffect(() => () => {
+        if (deltaRaf.current !== null) window.cancelAnimationFrame(deltaRaf.current);
+    }, []);
 
     /**
      * 拉一次篡改规则与当前页面。
@@ -246,23 +292,36 @@ export const AgentOrb = () => {
     const canEdit = state?.canEdit !== false && !busy;
 
     /*
+     * 贴底滚动。
+     *
+     * 用 useLayoutEffect 而不是 useEffect：要在**浏览器绘制之前**把位置定好，
+     * 否则会看到内容先出现在下面、再跳一下。
+     *
+     * 依赖是消息条数与流式文本长度 —— 这两样是"内容变高了"的全部来源。
+     */
+    useLayoutEffect(() => {
+        const box = scrollRef.current;
+        if (!box || !stickToBottom.current) return;
+        box.scrollTop = box.scrollHeight;
+    }, [messages.length, streaming?.content, streaming?.reasoning]);
+
+    /*
      * 页签条。
      *
      * 放在**标题栏下面**而不是塞进标题栏：标题栏只有 440px 宽，五个页签加上
      * 停止/清空/收起会全部挤成单字。独立一行还能给每个页签足够的点击面积。
      */
     const tabBar = (
-        <nav className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-white/[0.07] px-1.5 py-1">
+        <nav className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-white/[0.07] px-1.5 py-1 scrollbar-hide">
             {AGENT_TABS.map((entry) => (
                 <button
                     key={entry.id}
                     type="button"
                     onClick={() => setTab(entry.id)}
-                    className={`shrink-0 rounded-lg px-2 py-1 text-[10px] font-medium transition ${
-                        tab === entry.id
-                            ? 'bg-fuchsia-500/20 text-fuchsia-200'
-                            : 'text-slate-500 hover:bg-white/[0.06] hover:text-slate-300'
-                    }`}
+                    className={`shrink-0 rounded-lg px-2.5 py-1.5 text-[11px] font-medium transition ${tab === entry.id
+                        ? 'bg-fuchsia-500/20 text-fuchsia-200'
+                        : 'text-slate-500 hover:bg-white/[0.06] hover:text-slate-300'
+                        }`}
                 >
                     {entry.label}
                 </button>
@@ -378,7 +437,7 @@ export const AgentOrb = () => {
 
             {tab === 'chat' && (
                 <>
-                    <div className="min-h-0 flex-1 overflow-y-auto">
+                    <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
                         {messages.length === 0 && !streaming ? (
                             <p className="p-4 text-[11px] leading-relaxed text-slate-500">
                                 在已登录的页面里执行脚本。模型可以直接调用页面自己的函数、读带凭证的
@@ -387,7 +446,7 @@ export const AgentOrb = () => {
                         ) : (
                             <ul className="divide-y divide-white/5">
                                 {messages.map((message) => (
-                                    <MessageRow
+                                    <MessageRowMemo
                                         key={message.id}
                                         message={message}
                                         canEdit={canEdit}
@@ -399,18 +458,7 @@ export const AgentOrb = () => {
                         )}
 
                         {streaming && (streaming.content || streaming.reasoning) && (
-                            <div className="border-t border-white/5 px-3 py-2">
-                                {streaming.reasoning && (
-                                    <pre className="mb-1 max-h-32 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[9px] leading-relaxed text-slate-500">
-                                        {streaming.reasoning}
-                                    </pre>
-                                )}
-                                {streaming.content && (
-                                    <pre className="whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-slate-300">
-                                        {streaming.content}
-                                    </pre>
-                                )}
-                            </div>
+                            <StreamingBubble content={streaming.content} reasoning={streaming.reasoning} />
                         )}
                     </div>
 
@@ -420,13 +468,13 @@ export const AgentOrb = () => {
                           标题栏只有 440px 宽，塞进「停止 / 压缩 / 导出 /
                           简洁 / 清空 / 收起」六个按钮会把标签挤到看不见。
                         */}
-                        <div className="mb-1.5 flex items-center gap-2 px-0.5">
+                        <div className="mb-1.5 flex items-center gap-1.5 px-0.5">
                             <button
                                 type="button"
                                 onClick={() => void act({ type: 'compact' })}
                                 disabled={busy || state?.compacting || !state?.canCompact}
                                 title="把分界线之后的旧消息压成摘要（不可逆，但比清空保留更多）"
-                                className="text-[10px] text-slate-500 transition hover:text-slate-300 disabled:opacity-30"
+                                className="shrink-0 rounded-lg bg-white/[0.06] px-2 py-1 text-[10px] font-medium text-slate-400 transition hover:bg-white/[0.12] hover:text-white disabled:opacity-30"
                             >
                                 {state?.compacting ? '压缩中…' : '压缩上下文'}
                             </button>
@@ -436,7 +484,7 @@ export const AgentOrb = () => {
                                 onClick={() => exportAgentSession(messages)}
                                 disabled={messages.length === 0}
                                 title="导出完整会话（含推理过程）"
-                                className="text-[10px] text-slate-500 transition hover:text-slate-300 disabled:opacity-30"
+                                className="shrink-0 rounded-lg bg-white/[0.06] px-2 py-1 text-[10px] font-medium text-slate-400 transition hover:bg-white/[0.12] hover:text-white disabled:opacity-30"
                             >
                                 导出
                             </button>
@@ -445,11 +493,14 @@ export const AgentOrb = () => {
                                 onClick={() => exportAgentSession(messages, { includeReasoning: false })}
                                 disabled={messages.length === 0}
                                 title="导出不含推理过程的版本（适合分享）"
-                                className="text-[10px] text-slate-500 transition hover:text-slate-300 disabled:opacity-30"
+                                className="shrink-0 rounded-lg bg-white/[0.06] px-2 py-1 text-[10px] font-medium text-slate-400 transition hover:bg-white/[0.12] hover:text-white disabled:opacity-30"
                             >
                                 简洁版
                             </button>
-                            <span className="ml-auto shrink-0 font-mono text-[9px] text-slate-600">
+                            <span
+                                className="ml-auto shrink-0 text-[9px] font-semibold text-slate-500"
+                                title="压缩档位：决定压缩时保留最近多少（1 为全留）"
+                            >
                                 档位
                             </span>
                             {/*
@@ -463,11 +514,10 @@ export const AgentOrb = () => {
                                     type="button"
                                     onClick={() => void act({ type: 'set-compact-ratio', ratio })}
                                     disabled={busy || state?.compacting}
-                                    className={`shrink-0 rounded px-1 text-[9px] transition disabled:opacity-30 ${
-                                        state?.compactRatio === ratio
-                                            ? 'bg-fuchsia-500/20 text-fuchsia-200'
-                                            : 'text-slate-600 hover:text-slate-300'
-                                    }`}
+                                    className={`shrink-0 rounded-lg px-1.5 py-0.5 text-[9px] font-medium transition disabled:opacity-30 ${state?.compactRatio === ratio
+                                        ? 'bg-fuchsia-500/20 text-fuchsia-200'
+                                        : 'text-slate-600 hover:bg-white/[0.06] hover:text-slate-300'
+                                        }`}
                                 >
                                     {ratio}
                                 </button>
@@ -488,13 +538,13 @@ export const AgentOrb = () => {
                                 rows={2}
                                 placeholder="Enter 发送，Shift+Enter 换行"
                                 disabled={busy || state?.contextFull}
-                                className="min-h-0 flex-1 resize-none rounded-xl border border-white/10 bg-slate-950/60 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-slate-200 outline-none transition placeholder:text-slate-600 focus:border-white/25 disabled:opacity-50"
+                                className="min-h-0 flex-1 resize-none rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 font-mono text-[12px] leading-relaxed text-slate-200 outline-none transition placeholder:text-slate-600 focus:border-white/25 focus:bg-slate-950/80 disabled:opacity-50"
                             />
                             <button
                                 type="button"
                                 onClick={send}
                                 disabled={busy || !input.trim() || state?.contextFull}
-                                className="shrink-0 rounded-xl bg-indigo-500 px-3 py-2 text-[11px] font-semibold text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-40"
+                                className="shrink-0 rounded-xl bg-indigo-500 px-3.5 py-2.5 text-[12px] font-semibold text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-40"
                             >
                                 发送
                             </button>
@@ -575,6 +625,21 @@ const MessageRow = ({
     const long = body.length > 400;
     const shown = expanded || !long ? body : `${body.slice(0, 400)}…`;
 
+    /*
+     * 复制整条。
+     *
+     * 工具返回值动辄几 KB，用鼠标在里面选中再拖过面板边界很容易失手，而
+     * "把这段报错/数据发给别人"恰恰是它最常见的用途。`navigator.clipboard`
+     * 在 file:// 下需要安全上下文，拿不到时静默失败即可 —— 文字本身还能手动选。
+     */
+    const [copied, setCopied] = useState(false);
+    const onCopy = useCallback(() => {
+        void navigator.clipboard?.writeText(body).then(() => {
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 1200);
+        }).catch(() => undefined);
+    }, [body]);
+
     /* 压缩分界线单独画：它既不是模型说的话也不是用户的提问 */
     if (message.compaction) {
         return (
@@ -621,12 +686,28 @@ const MessageRow = ({
                     </button>
                 )}
                 {/*
+                  复制与两条历史编辑操作，都在悬停时出现。
+
+                  复制**不受 canEdit 限制** —— 它只读，运行中照样该能复制。
+                  所以它单独一块，与下面那块（引擎不允许改动时整体消失）分开。
+                */}
+                <span className={`${long ? '' : 'ml-auto'} flex shrink-0 gap-1 opacity-0 transition group-hover:opacity-100`}>
+                    <button
+                        type="button"
+                        onClick={onCopy}
+                        title="复制这条的完整内容"
+                        className="text-[9px] text-slate-500 hover:text-sky-300"
+                    >
+                        {copied ? '已复制' : '复制'}
+                    </button>
+                </span>
+                {/*
                   两条历史编辑操作。只在引擎允许时出现（canEdit）：运行中或
                   压缩中改动 messages 会和主循环抢同一个数组，而那个抢法没有
                   正确答案 —— 界面禁用比让用户点了没反应好。
                 */}
                 {canEdit && (
-                    <span className={`${long ? '' : 'ml-auto'} flex shrink-0 gap-1 opacity-0 transition group-hover:opacity-100`}>
+                    <span className="flex shrink-0 gap-1 opacity-0 transition group-hover:opacity-100">
                         <button
                             type="button"
                             onClick={onRewind}
@@ -648,22 +729,57 @@ const MessageRow = ({
             </div>
 
             {message.reasoning && expanded && (
-                <pre className="mb-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded bg-white/[0.03] p-1.5 font-mono text-[9px] leading-relaxed text-slate-500">
+                <pre className="mb-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded bg-white/[0.03] p-1.5 font-mono text-[10px] leading-relaxed text-slate-500">
                     {message.reasoning}
                 </pre>
             )}
 
-            <pre className={`whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed ${tone}`}>
+            <pre className={`whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed ${tone}`}>
                 {shown}
             </pre>
 
             {message.script && expanded && (
-                <pre className="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded bg-white/[0.03] p-1.5 font-mono text-[9px] leading-relaxed text-slate-500">
+                <pre className="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded bg-white/[0.03] p-1.5 font-mono text-[10px] leading-relaxed text-slate-500">
                     {message.script}
                 </pre>
             )}
         </li>
     );
 };
+
+/*
+ * memo 的比较函数不能省。
+ *
+ * 父组件每次渲染都会新建 onRemove / onRewind 两个箭头函数，默认的浅比较
+ * 因此永远判"变了"，memo 形同虚设 —— 而消息列表是长列表，每步都要整体重渲。
+ * 两个回调的**语义**完全由 message.id 决定，所以比 message 本身与 canEdit
+ * 就够了：这两个没变，回调做的事就没变。
+ */
+const MessageRowMemo = memo(MessageRow, (prev, next) => (
+    prev.message === next.message && prev.canEdit === next.canEdit
+));
+
+/**
+ * 流式气泡。
+ *
+ * 单独成一个 memo 组件，理由是**它是唯一每来一个 token 就变的东西**。
+ * 增量直接挂在 AgentOrb 的 state 上时，每来一个字整棵消息列表（可能上百行、
+ * 每行几 KB 的 pre）都要重新 reconcile 一遍，而画面其实只有这一小块在动。
+ * 隔出来之后，增量只重渲这一个节点。
+ */
+const StreamingBubble = memo(({ content, reasoning }: { content: string; reasoning: string }) => (
+    <div className="border-t border-white/5 px-3 py-2">
+        {reasoning && (
+            <pre className="mb-1 max-h-32 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-slate-500">
+                {reasoning}
+            </pre>
+        )}
+        {content && (
+            <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-slate-300">
+                {content}
+            </pre>
+        )}
+    </div>
+));
 
 export type { AgentUsage };

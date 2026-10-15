@@ -22,10 +22,12 @@
  * 截断回传 + 全量写回 = 静默丢掉后半篇。要精确改文件，前提是先看得全。
  *
  * exec（跑本机命令）已删除，理由见 `shared/meta/type.ts` 的 SANDBOX_ACTIONS。
+ * 它换成了 `node`：只跑沙箱里一个已存在的 .js 文件，命令与参数都不由模型给。
  */
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const { spawn } = require('child_process');
 
 /**
  * 动作清单的副本。
@@ -36,7 +38,13 @@ const vm = require('vm');
  * 漏掉一项的表现是那一项被当成未知动作拒掉（响亮地坏），不是静默放行。
  * 由 `test/agenttools.test.js` 逐值比对两处，漂移即报红。
  */
-const SANDBOX_ACTIONS = ['list', 'read', 'write', 'delete', 'edit', 'lines', 'checkjs'];
+const SANDBOX_ACTIONS = ['list', 'read', 'write', 'delete', 'edit', 'lines', 'checkjs', 'node'];
+
+/**
+ * `node` 的超时。真值在 `shared/meta/type.ts`，同上抄一份，测试逐值比对。
+ */
+const SANDBOX_NODE_TIMEOUT_DEFAULT_MS = 60000;
+const SANDBOX_NODE_TIMEOUT_MAX_MS = 300000;
 
 /**
  * 相对路径 → 沙箱内的绝对路径。越界返回 null。
@@ -177,6 +185,101 @@ const checkSyntax = (code) => {
 };
 
 /**
+ * 杀掉整棵进程树。
+ *
+ * Windows 没有进程组，`child.kill()` 只作用于直接子进程，孙子进程会留下 ——
+ * 只能靠 `taskkill /T` 递归。POSIX 侧配合 `detached` 用**负 pid** 杀整个进程组。
+ *
+ * 这条是现场踩出来的：`timeout` 只杀自己拉起的那个进程时，脚本里 `spawn` 出去的
+ * 孙子继续在跑，而回给模型的文案写着"已强制终止"—— 那是句假话，模型据此以为
+ * 机器干净，接着起下一个，而沙箱目录还被上一个占着。
+ */
+const killTree = (child) => {
+    if (!child.pid) return;
+    try {
+        if (process.platform === 'win32') {
+            spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
+        } else {
+            process.kill(-child.pid, 'SIGKILL');
+        }
+    } catch {
+        // 兜底：至少把直接子进程杀掉。已经消失的进程在这里抛 ESRCH，不用管
+        try { child.kill('SIGKILL'); } catch { /* 已经退了 */ }
+    }
+};
+
+/**
+ * 解释器路径。
+ *
+ * **用 Electron 自己的二进制配 `ELECTRON_RUN_AS_NODE=1`，不用 PATH 上的 `node`。**
+ * 实测（`tools/_nodecheck.js`，Electron 44 / Node 24.21.0）：同一个二进制带这个
+ * 环境变量时就是纯 Node —— stdout/stderr 原样、退出码原样传出、不弹窗口。
+ *
+ * 不依赖系统 node 是必须的：这个应用要打包给用户，而"用户机器上装没装 Node"
+ * 与"沙箱能不能跑脚本"是两件事。用 `process.execPath` 则恒等于当前正在运行
+ * 的那个 Electron，版本与主进程一致。
+ */
+const nodeBinary = () => process.execPath;
+
+/**
+ * 跑一个沙箱里的脚本。
+ *
+ * ## 为什么不是 shell
+ *
+ * 参数是**数组**（`[脚本绝对路径]`），默认不开 shell：模型给不出命令行，只能
+ * 选一个文件。exec 那套"命令由模型拼"的注入面因此根本不存在 —— 这是 `node`
+ * 与 exec 的本质区别，也是它敢留下来的理由。
+ *
+ * ## 输出不截断
+ *
+ * 与 read 一致：截断会让模型拿着半份输出推理。采集上限只防"脚本无限打日志"
+ * 把主进程内存吃光，取值远大于任何合理输出（见 OUTPUT_CAP_BYTES）。
+ */
+const OUTPUT_CAP_BYTES = 8 * 1024 * 1024;
+
+const runScript = (scriptPath, root, timeout) => new Promise((resolve) => {
+    const child = spawn(nodeBinary(), [scriptPath], {
+        cwd: root,
+        // POSIX 下独立成组，超时才能连孙子一起杀（见 killTree）
+        detached: process.platform !== 'win32',
+        windowsHide: true,
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    });
+
+    const out = [];
+    let size = 0;
+    let capped = false;
+    const take = (chunk) => {
+        if (size >= OUTPUT_CAP_BYTES) { capped = true; return; }
+        size += chunk.length;
+        out.push(chunk);
+    };
+    child.stdout.on('data', take);
+    child.stderr.on('data', take);
+
+    let timedOut = false;
+    const timer = setTimeout(() => {
+        timedOut = true;
+        killTree(child);
+    }, timeout);
+
+    const done = (exitCode) => {
+        clearTimeout(timer);
+        resolve({
+            exitCode,
+            timedOut,
+            capped,
+            text: Buffer.concat(out).toString('utf8'),
+        });
+    };
+
+    // 起不来（二进制缺失/权限）只抛 error 事件，不会有 exit
+    child.on('error', () => done(null));
+    // 被信号杀掉时 code 为 null：如实回 null，不猜成 1
+    child.on('close', (code) => done(code));
+});
+
+/**
  * 执行一次沙箱动作。
  *
  * `root` 由调用方（main.js）传入，且只有一个调用口径 —— 这里不自己算项目根，
@@ -284,6 +387,45 @@ const handle = async (request, root) => {
             return { bytes: Buffer.byteLength(done.text, 'utf8'), replaced: done.replaced };
         }
 
+        /**
+         * node —— 跑一个已经写在沙箱里的 .js 文件。
+         *
+         * 与 edit / lines 一样只对**已存在**的文件有意义：路径先过判据（越界一律
+         * 拒），再用 stat 确认它是个文件 —— 目录、不存在的路径都在这里当场报错，
+         * 而不是把错误留给解释器去抛（那样模型要读一段 Node 的加载栈才知道自己
+         * 传错了 path）。
+         */
+        if (action === 'node') {
+            let stat;
+            try {
+                stat = await fs.promises.stat(target);
+            } catch (error) {
+                // ENOENT 正是模型改参数的依据，原样回传（同 read）
+                return { error: error instanceof Error ? error.message : String(error) };
+            }
+            if (!stat.isFile()) return { error: 'node 只能跑文件，不能跑目录' };
+
+            const timeout = Math.min(
+                Number(request?.timeout) || SANDBOX_NODE_TIMEOUT_DEFAULT_MS,
+                SANDBOX_NODE_TIMEOUT_MAX_MS,
+            );
+            const run = await runScript(target, root, timeout);
+
+            if (run.timedOut) {
+                return {
+                    exitCode: run.exitCode,
+                    timedOut: true,
+                    output: run.text,
+                    error: `脚本超过 ${Math.round(timeout / 1000)} 秒未结束，已连子进程一起杀掉。`
+                        + `请把任务拆小，或显式传更长的 timeout（上限 ${SANDBOX_NODE_TIMEOUT_MAX_MS / 1000} 秒）。`,
+                };
+            }
+            return {
+                exitCode: run.exitCode,
+                output: run.text + (run.capped ? '\n…（输出过长，超出部分已丢弃）' : ''),
+            };
+        }
+
         // 上面的分支已穷尽 SANDBOX_ACTIONS；走到这里说明清单加了一项而没人实现
         return { error: `动作 ${action} 已在清单里，但主进程没有实现它` };
     } catch (error) {
@@ -297,6 +439,8 @@ const handle = async (request, root) => {
 
 module.exports = {
     SANDBOX_ACTIONS,
+    SANDBOX_NODE_TIMEOUT_DEFAULT_MS,
+    SANDBOX_NODE_TIMEOUT_MAX_MS,
     resolveSandboxPath,
     replaceOnce,
     replaceLines,
