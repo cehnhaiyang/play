@@ -1896,49 +1896,7 @@ export interface GalleryMarkerManifest {
 
 /**
  * ============================================================================
- * 9. 篡改引擎与 Agent 工作空间
- * ============================================================================
- */
-
-export interface TamperState {
-    state: {
-        interceptRules: TamperRule[];
-        requestRules: TamperRule[];
-        headerRules: HeaderRule[];
-    };
-    actions: {
-        /**
-         * 应用规则：注入全部存活页面，并尝试持久化。
-         *
-         * 返回值是**持久化**结果，不是注入结果 —— 两者会分离（配额爆了规则
-         * 仍对当前页面生效，但重启就没了），调用方必须能说出这个区别。
-         */
-        saveRules: (intercept: TamperRule[], request: TamperRule[], headers: HeaderRule[]) => boolean;
-        /**
-         * 只注入不落盘。
-         *
-         * 给 Agent 工具用：模型改规则可以立刻生效，但不该越过用户把浏览器行为
-         * 永久改掉。面板会显示「未应用」，由用户点「应用更改」才写进本地存储。
-         */
-        applyRules: (intercept: TamperRule[], request: TamperRule[], headers: HeaderRule[]) => void;
-        getLocalStorage: () => Promise<string>;
-        getSessionStorage: () => Promise<string>;
-        setLocalStorage: (key: string, val: string) => Promise<boolean>;
-        removeLocalStorage: (key: string) => Promise<boolean>;
-        setSessionStorage: (key: string, val: string) => Promise<boolean>;
-        removeSessionStorage: (key: string) => Promise<boolean>;
-        /** 读当前页面的 Cookie。地址不可查询时返回空数组 */
-        getCookies: () => Promise<CookieItem[]>;
-        /** 覆盖一条 Cookie（整条覆盖，必须带上原字段） */
-        setCookie: (cookie: CookieItem) => Promise<boolean>;
-        /** 按 name 删除 Cookie；同名不同 path 会被一起删掉（Electron 无按 path 删的入口） */
-        removeCookie: (name: string) => Promise<boolean>;
-    };
-}
-
-/**
- * ============================================================================
- * 10. Agent 工作空间
+ * 9. Agent 工作空间
  * ============================================================================
  *
  * 引擎与它的宿主接口都在 `extension/src/agent/`：Agent 是浏览器侧的能力
@@ -1954,16 +1912,12 @@ export interface AgentState {
     status: AgentRunStatus;
     error: string;
     /**
-     * 正在流式输出的这一轮（尚未定稿）。
-     * 内容实时增长；这一轮结束后它会转成正式的 assistant 消息并清空。
-     */
-    streaming: { content: string; reasoning: string } | null;
-    /**
      * 现在能不能改历史（删除 / 回退 / 清空）。
      *
-     * 运行中或压缩中为 false：前者主循环正拿着 messages 追加，此刻改动会和它的
-     * 下一次 appendMessage 抢同一个数组；后者压缩正拿着 upTo 锚点做落盘，
-     * 此刻改动会让锚点失效。界面据此禁用按钮，而不是让用户点了没反应。
+     * 运行中或压缩中为 false。运行中是因为主循环正拿着 messages 追加，此刻改动会和
+     * 它的下一次 appendMessage 抢同一个数组；压缩中是因为摘要调用的锚点算在开始时
+     * 那一刻，历史一变这次调用就白跑。**快照与三个动作共用同一个判据**（引擎里的
+     * locked），界面据此禁用按钮，而不是让用户点了没反应。
      */
     canEdit: boolean;
     /** 会话累计 token 统计（含当前上下文占用） */
@@ -2018,7 +1972,7 @@ export interface AgentState {
 
 /**
  * ============================================================================
- * 12. 播放列表与 AI 绘本入列
+ * 10. 播放列表与 AI 绘本入列
  * ============================================================================
  */
 
@@ -2130,7 +2084,7 @@ export interface UsePlayReturn {
 
 /**
  * ============================================================================
- * 13. 磁力搜索与 ACGMHO 图集保存
+ * 11. 磁力搜索与 ACGMHO 图集保存
  * ============================================================================
  */
 
@@ -2160,7 +2114,7 @@ export interface AcgSaveTask {
 
 /**
  * ============================================================================
- * 14. 音频引擎：编译产物与和弦
+ * 12. 音频引擎：编译产物与和弦
  * ============================================================================
  */
 
@@ -2232,7 +2186,7 @@ export interface ChordSymbol {
 
 /**
  * ============================================================================
- * 15. 组件 Props 与对外 ref
+ * 13. 组件 Props 与对外 ref
  * ============================================================================
  */
 

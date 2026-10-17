@@ -1,5 +1,5 @@
 import type { CookieItem } from '../../../shared/meta';
-import type { AgentHost, AgentTab, EvaluateResult } from '../agent/host';
+import type { AgentHost, AgentTab } from '../agent/host';
 import { applyRules, loadRules } from '../background/tamper';
 
 /**
@@ -36,7 +36,14 @@ import { applyRules, loadRules } from '../background/tamper';
 /** 附着时声明的协议版本。Chrome 要求主版本匹配，这里是 DevTools Protocol 的版本 */
 const PROTOCOL_VERSION = '1.3';
 
-/** 页面脚本单次执行超时。与 agent/prompt.ts 的 EXEC_TIMEOUT_MS 同一口径 */
+/**
+ * 页面脚本单次执行超时。
+ *
+ * **真值在这里**，因为 race 由宿主自己做（见文件头：`Runtime.evaluate` 没有
+ * abort，页面死循环时那个 Promise 永远不 settle）。曾经在 agent/prompt.ts 里
+ * 另有一份同值的 EXEC_TIMEOUT_MS，谁也没读 —— 找超时的人改错那一份不会有
+ * 任何报错，只有这一份生效。
+ */
 const EVAL_TIMEOUT_MS = 60000;
 
 /** 已附着的标签页。值是附着 Promise，用来把并发的 attach 合并成一次 */
@@ -94,29 +101,23 @@ const ensureAttached = (tabId: number): Promise<void> => {
  * `returnByValue: true` 同理：不开的话结果是 RemoteObject 描述符，
  * 形如 `{type:'object', objectId:'...'}`，同样不是模型要的东西。
  */
-const evaluateInPage = async (tabId: number, code: string): Promise<EvaluateResult> => {
+const evaluateInPage = async (tabId: number, code: string): Promise<string> => {
     try {
         await ensureAttached(tabId);
     } catch (e) {
-        return {
-            value: JSON.stringify({ __agentError: `无法附着到页面：${errorText(e)}` }),
-            failed: true,
-        };
+        return JSON.stringify({ __agentError: `无法附着到页面：${errorText(e)}` });
     }
 
     let timer = 0;
-    const timeout = new Promise<EvaluateResult>((resolve) => {
+    const timeout = new Promise<string>((resolve) => {
         timer = self.setTimeout(() => {
-            resolve({
-                value: JSON.stringify({
-                    __agentError: `脚本执行超过 ${EVAL_TIMEOUT_MS / 1000} 秒未返回（页面可能在死循环或弹窗阻塞）。请把任务拆小：先取少量字段确认选择器，再分步推进，不要一次 return 整个页面。`,
-                }),
-                failed: true,
-            });
+            resolve(JSON.stringify({
+                __agentError: `脚本执行超过 ${EVAL_TIMEOUT_MS / 1000} 秒未返回（页面可能在死循环或弹窗阻塞）。请把任务拆小：先取少量字段确认选择器，再分步推进，不要一次 return 整个页面。`,
+            }));
         }, EVAL_TIMEOUT_MS);
     });
 
-    const run = (async (): Promise<EvaluateResult> => {
+    const run = (async (): Promise<string> => {
         const raw = await chrome.debugger.sendCommand(
             { tabId },
             'Runtime.evaluate',
@@ -157,32 +158,23 @@ const evaluateInPage = async (tabId: number, code: string): Promise<EvaluateResu
                 || result.exceptionDetails.text
                 || '页面脚本抛出异常';
             const { lineNumber, columnNumber } = result.exceptionDetails;
-            return {
-                value: JSON.stringify({
-                    __agentError: detail,
-                    ...(typeof lineNumber === 'number'
-                        ? { __agentAt: { line: lineNumber + 1, column: columnNumber ?? 0 } }
-                        : {}),
-                }),
-                failed: true,
-            };
+            return JSON.stringify({
+                __agentError: detail,
+                ...(typeof lineNumber === 'number'
+                    ? { __agentAt: { line: lineNumber + 1, column: columnNumber ?? 0 } }
+                    : {}),
+            });
         }
 
         const value = result.result?.value;
         // buildScriptSource 保证返回值已经是字符串；这里兜一层防它被改动
-        return {
-            value: typeof value === 'string' ? value : JSON.stringify(value ?? null),
-            failed: false,
-        };
+        return typeof value === 'string' ? value : JSON.stringify(value ?? null);
     })();
 
     try {
         return await Promise.race([run, timeout]);
     } catch (e) {
-        return {
-            value: JSON.stringify({ __agentError: `执行失败：${errorText(e)}` }),
-            failed: true,
-        };
+        return JSON.stringify({ __agentError: `执行失败：${errorText(e)}` });
     } finally {
         self.clearTimeout(timer);
     }
@@ -235,9 +227,9 @@ const readWebStorage = async (tabId: number, area: 'local' | 'session'): Promise
       }
     })()`);
 
-    const parsed = safeJson(result.value);
+    const parsed = safeJson(result);
     if (parsed && typeof parsed.__agentError === 'string') return '{}';
-    return result.value;
+    return result;
 };
 
 /** 写页面的 localStorage / sessionStorage */
@@ -255,7 +247,7 @@ const writeWebStorage = async (
         return JSON.stringify({ __agentError: String(e && e.message || e) });
       }
     })()`);
-    return result.value === '"ok"' || result.value === 'ok';
+    return result === '"ok"' || result === 'ok';
 };
 
 const removeWebStorage = async (
@@ -271,7 +263,7 @@ const removeWebStorage = async (
         return JSON.stringify({ __agentError: String(e && e.message || e) });
       }
     })()`);
-    return result.value === '"ok"' || result.value === 'ok';
+    return result === '"ok"' || result === 'ok';
 };
 
 /* ========================================================================== */
@@ -376,12 +368,14 @@ const errorText = (e: unknown): string => (e instanceof Error ? e.message : Stri
 /* 导出                                                                       */
 /* ========================================================================== */
 
+const activeTab = async (): Promise<AgentTab | null> => {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (typeof tab?.id !== 'number') return null;
+    return { id: tab.id, url: tab.url || '' };
+};
+
 export const pageHost: AgentHost = {
-    activeTab: async (): Promise<AgentTab | null> => {
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (typeof tab?.id !== 'number') return null;
-        return { id: tab.id, url: tab.url || '' };
-    },
+    activeTab,
 
     evaluate: evaluateInPage,
 
@@ -421,18 +415,20 @@ export const pageHost: AgentHost = {
      */
     tamper: {
         rules: () => loadRules(),
-        applyRules: (intercept, request, headers) => {
-            // 工具层语义：只改内存。落盘要用户显式点「应用更改」（见 tamper-set）
-            void applyRules(
+        /*
+         * 工具层语义：改内存 + 立刻注入当前页面，**不落盘**（落盘要用户在面板里
+         * 显式点「应用更改」，见 service-worker 的 tamper-set）。
+         *
+         * `tabId` 必须传：导航会重建主世界、把钩子冲掉。只改内存镜像的话，
+         * 工具回一句"已对当前页面生效"，而页面还在跑旧规则 —— 用户看到的是
+         * "改了没反应"，且没有任何报错。没有可用标签页时如实回 false。
+         */
+        applyRules: async (intercept, request, headers) => {
+            const tab = await activeTab();
+            return applyRules(
                 { interceptRules: intercept, requestRules: request, headerRules: headers },
+                tab?.id ?? null,
             );
-        },
-        saveRules: async (intercept, request, headers, tabId) => {
-            const { saved } = await applyRules(
-                { interceptRules: intercept, requestRules: request, headerRules: headers },
-                tabId,
-            );
-            return saved;
         },
     },
 };

@@ -30,7 +30,7 @@
  * 会让"这个字段能不能放"变成看运气 —— 在这里随手塞一张 base64 图片没问题，
  * 同样的代码走桥就会静默失败。
  */
-import type { AiChatMessage, AiConfig, AiUsage, CookieItem, HeaderRule, MediaSourceChannel, MediaType, TamperRule } from '../../../shared/meta';
+import type { AiChatMessage, AiConfig, AiUsage, CookieItem, HeaderRule, MediaSourceChannel, MediaType, ReasoningEffort, TamperRule } from '../../../shared/meta';
 
 /* ========================================================================== */
 /* 0. 公共                                                                     */
@@ -225,18 +225,8 @@ export type BallRequest =
         cookie?: CookieItem;
     };
 
-/** SW 推给悬浮球的事件（广播，不针对某一条请求） */
-export type BallEvent =
-    | { target: 'ball'; kind: 'sniffed-media'; item: SniffedMedia }
-    /** 标签页被打开 / 关闭 / 换了地址或标题 —— 球据此刷新标签栏 */
-    | { target: 'ball'; kind: 'tabs-changed' }
-    /** 引擎快照（消息与状态） */
-    | { target: 'ball'; kind: 'agent-snapshot'; snapshot: unknown }
-    /** 流式增量。整个快照太大，逐字重发不现实 */
-    | { target: 'ball'; kind: 'agent-delta'; delta: { content?: string; reasoning?: string } };
-
 /* ========================================================================== */
-/* 2. 悬浮球 ↔ offscreen 宿主文档                                              */
+/* 2. service worker ↔ offscreen 宿主文档                                      */
 /* ========================================================================== */
 
 /**
@@ -271,7 +261,7 @@ export interface HostChatRequest {
     messages: AiChatMessage[];
     temperature?: number;
     maxTokens?: number;
-    reasoningEffort?: 'low' | 'high' | 'max';
+    reasoningEffort?: ReasoningEffort;
 }
 
 export type HostRequest =
@@ -291,7 +281,17 @@ export type HostRequest =
      */
     | { target: 'host'; kind: 'ai-extract-links'; html: string; title: string; aiConfig: AiConfig };
 
-/** 宿主文档推给悬浮球的流式增量与终局 */
+/**
+ * 宿主文档推给 SW 里 chat-port 的流式增量与终局。
+ *
+ * `target` 是 `'chat'` 而不是 `'ball'`：收件人从来不是悬浮球，而是
+ * `background/chat-port.ts` 里的登记表（它按 requestId 认领属于自己的那些）。
+ * 球跑在 Electron 窗口里，根本收不到 `chrome.runtime` 广播 —— 曾经写 `'ball'`
+ * 只会让下一个人以为球在监听这条通道。
+ *
+ * 也不能复用 `'sw'`：那是 `BallRequest` 的收件人，SW 会把这条当成未知端点
+ * 回一句 `{ok:false}`，与 chat-port 抢同一个响应通道。
+ */
 export type HostEvent =
-    | { target: 'ball'; kind: 'ai-delta'; requestId: string; content?: string; reasoning?: string }
-    | { target: 'ball'; kind: 'ai-done'; requestId: string; reply?: string; usage?: AiUsage; error?: string };
+    | { target: 'chat'; kind: 'ai-delta'; requestId: string; content?: string; reasoning?: string }
+    | { target: 'chat'; kind: 'ai-done'; requestId: string; reply?: string; usage?: AiUsage; error?: string };

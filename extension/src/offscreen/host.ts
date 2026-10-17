@@ -12,24 +12,26 @@ import type { HostChatRequest, HostEvent, HostRequest } from '../shared/protocol
  * 前提 —— 一次跑到一半被回收的对话，比一开始就不能跑更糟。
  *
  * offscreen 文档没有这个问题：它是扩展自己的页面，生命周期跟扩展走，
- * 也不受任何页面 CSP 约束。球（content script）不能承担这个角色，因为
- * 内容脚本的 `fetch` 受**页面** CSP 的 `connect-src` 约束，落在白名单外的
+ * 也不受任何页面 CSP 约束。**内容脚本**不能承担这个角色（manifest 里现在也没有
+ * 内容脚本）：它的 `fetch` 受**页面** CSP 的 `connect-src` 约束，落在白名单外的
  * 站点上会直接失败，且失败与否取决于用户打开的是哪个网站。
  *
  * ## 它不做别的
  *
- * 这里只有模型调用。页面执行在 `background/page-host.ts`（那里才有
- * `chrome.debugger`），嗅探与下载在 service worker。分工按"谁有这个能力"切，
- * 不按"谁离得近"切。
+ * 这里只有模型调用。页面执行在 `offscreen/page-host.ts` —— 那个文件虽然放在
+ * 同一目录，但它是被 service worker import 的，**不在这里求值**：offscreen 文档
+ * 没有 `chrome.debugger` / `chrome.tabs` 这些命名空间，它是个普通页面。
+ * 分工按"谁有这个能力"切，不按"谁离得近"切。
  *
  * ## 事件必须广播，不能只回给调用方
  *
  * `chrome.runtime.sendMessage` 的响应只回给发起者，而流式增量要在**整个过程里**
- * 持续推给球 —— 响应通道做不到（它只有一个终值）。所以增量走
- * `chrome.runtime.sendMessage` 广播，球按 `requestId` 认领属于自己的那些。
+ * 持续推出去 —— 响应通道做不到（它只有一个终值）。所以增量走
+ * `chrome.runtime.sendMessage` 广播，`target: 'chat'`，由 SW 里的 chat-port
+ * 按 `requestId` 认领属于自己的那些。
  */
 
-/** 与 `agent/prompt.ts` 的 EXEC_TIMEOUT_MS 无关；这是模型调用的整体上限 */
+/** 模型调用的整体上限。与"页面脚本单次执行"那个超时是两件事，不要合并 */
 const CHAT_TIMEOUT_MS = 10 * 60 * 1000;
 
 interface PendingChat {
@@ -39,7 +41,7 @@ interface PendingChat {
 
 const pending = new Map<string, PendingChat>();
 
-/** 推给球。球可能没开或已销毁，失败是正常情况，吞掉 */
+/** 广播一条事件。SW 里的 chat-port 是唯一收件人，没有在等的那条就没人接，吞掉 */
 const notify = (event: HostEvent): void => {
     chrome.runtime.sendMessage(event).catch(() => undefined);
 };
@@ -64,7 +66,7 @@ const runChat = async (request: HostChatRequest): Promise<void> => {
             },
             onDelta: (delta) => {
                 notify({
-                    target: 'ball',
+                    target: 'chat',
                     kind: 'ai-delta',
                     requestId: request.requestId,
                     ...(delta.content ? { content: delta.content } : {}),
@@ -74,7 +76,7 @@ const runChat = async (request: HostChatRequest): Promise<void> => {
         });
 
         notify({
-            target: 'ball',
+            target: 'chat',
             kind: 'ai-done',
             requestId: request.requestId,
             reply,
@@ -89,7 +91,7 @@ const runChat = async (request: HostChatRequest): Promise<void> => {
          * 同一类问题。
          */
         notify({
-            target: 'ball',
+            target: 'chat',
             kind: 'ai-done',
             requestId: request.requestId,
             error: e instanceof Error ? e.message : String(e),
@@ -110,7 +112,7 @@ const runChat = async (request: HostChatRequest): Promise<void> => {
 chrome.runtime.onMessage.addListener(
     (message: { target?: string; kind?: string }, _sender, sendResponse) => {
         /*
-         * 只处理属于自己的消息。球→SW 的那些会同时广播到这里，
+         * 只处理属于自己的消息。发往 SW / 别的文档的那些会同时广播到这里，
          * 不判 target 就会把它们也认领下来，两边抢着回复。
          */
         if (message?.target !== 'host') return false;

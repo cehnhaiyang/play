@@ -34,7 +34,6 @@ import { IN_PAGE_SCAN, type ScanCandidate, type ScanConfig } from '../shared/inp
 import {
     MAX_SNIFFED_ITEMS,
     STORAGE_KEYS,
-    type BallEvent,
     type BallRequest,
     type BrowserTab,
     type ExtensionResponse,
@@ -45,9 +44,9 @@ import { agentBridge } from './agent-bridge';
 import { readAiConfig } from './chat-port';
 import { emitBridgeEvent, ensureBridge, setDispatcher } from './bridge-port';
 import { pageHost } from '../offscreen/page-host';
-import { applyRules, loadRules, injectRules } from './tamper';
+import { saveRules, loadRules, injectRules } from './tamper';
 import type { AgentEngine } from '../agent/engine';
-import { isFromTab, isGenericTitle, withoutTab } from '../../../shared/core/sniff';
+import { isGenericTitle, withoutTab } from '../../../shared/core/sniff';
 import type { CookieItem, HeaderRule, TamperRule } from '../../../shared/meta';
 
 /* ========================================================================== */
@@ -319,9 +318,10 @@ const clearItems = (): void => {
  *
  * ## 别的标签页也有的条目只摘归属，不整条删
  *
- * 判据与球上的标签栏筛选共用 `isFromTab`，摘归属用 `withoutTab`。
- * 直接 `filter(item => !isFromTab(...))` 会把"两个标签页都请求过的地址"
- * 整条删掉 —— 另一个标签页下它就凭空消失了，而那个标签页并没有被清。
+ * 摘归属用 `withoutTab`：它不拥有这条记录时返回原对象、拥有时返回摘掉归属的
+ * 副本，两种情况天然分开，不需要另判一次。
+ * 换成 `filter` 会把"两个标签页都请求过的地址"整条删掉 —— 另一个标签页下
+ * 它就凭空消失了，而那个标签页并没有被清。
  */
 const clearTab = (tabId: number): number => {
     let removed = 0;
@@ -510,25 +510,6 @@ const getItems = async (): Promise<SniffedMedia[]> => {
     return sniffItems;
 };
 
-/**
- * 把一条事件广播出去。
- *
- * ## 为什么保留 `sendMessage` 这一条
- *
- * 球已经搬到 Electron 窗口里，不再需要它 —— 但 offscreen 宿主文档
- * （`offscreen/host.ts` 的 `ai-delta` / `ai-done`）仍然走同一条广播。
- * 这里只负责把事件交出去，**收件人是谁由各自的 `target` 过滤决定**。
- *
- * ## 没人听时 sendMessage 会抛
- *
- * "Could not establish connection" 是**正常情况**不是错误 ——
- * 没有任何监听者时它必然抛。必须吞掉，否则每次嗅探都在控制台刷一条红色报错，
- * 真正的故障反而被淹没。
- */
-const broadcast = (event: BallEvent): void => {
-    chrome.runtime.sendMessage(event).catch(() => undefined);
-};
-
 /* ========================================================================== */
 /* 2. 嗅探                                                                    */
 /* ========================================================================== */
@@ -661,15 +642,6 @@ const handleResponse = async (details: chrome.webRequest.OnResponseStartedDetail
     };
 
     pushItem(item);
-    broadcast({ target: 'ball', kind: 'sniffed-media', item });
-    /*
-     * 同一条结果也要推给应用里的悬浮球。
-     *
-     * 直接调 `emitBridgeEvent` 而不是包一层 `notifyApp` —— 那层包装只是多一个
-     * 转发，却让 manifest 自检扫不到这个调用点（它按 `emitBridgeEvent('kind'`
-     * 的字面形态匹配），于是"忘了过桥"这个最该被挡住的错误反而查不出来。
-     * 应用没连上时 `emitBridgeEvent` 自己会丢弃，不需要在外面判断。
-     */
     emitBridgeEvent('sniffed-media', item);
 };
 
@@ -1183,7 +1155,7 @@ const dispatchBridge = async (method: string, params: unknown): Promise<unknown>
                 headerRules: Array.isArray(p.headerRules) ? p.headerRules : current.headerRules,
             };
             const tabId = (args as { tabId?: number }).tabId;
-            const { saved } = await applyRules(next, await requireTabId(tabId));
+            const { saved } = await saveRules(next, await requireTabId(tabId));
             // 回读落盘后的镜像：面板据此更新，而不是拿它自己刚发出去的那份
             return { rules: await loadRules(), saved };
         }
@@ -1295,12 +1267,12 @@ ensureBridge();
 /* ========================================================================== */
 
 /**
- * 两条通道的消息都会到这里：球（content script）与 offscreen 宿主。
+ * 三条通道的消息都会到这里：球（经桥）、offscreen 宿主、chat-port。
  * **必须按 `target` 分流**。
  *
- * 不分流会怎样：宿主推的 `ai-delta` 被当成未知消息，SW 回一条 `{ok:false}`，
- * 而球同时在等自己的回包 —— 于是"谁来回这一条"变成了竞态。
- * 协议里带 `target` 就是为了让这件事是确定的。
+ * 不分流会怎样：宿主推的 `ai-delta`（`target: 'chat'`）被当成未知消息，
+ * SW 回一条 `{ok:false}`，而 chat-port 同时在等自己的回包 —— 于是"谁来回这一条"
+ * 变成了竞态。协议里带 `target` 就是为了让这件事是确定的。
  */
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
     const envelope = message as { target?: string; kind?: string } | null;
@@ -1318,11 +1290,11 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     }
 
     /*
-     * offscreen 与球之间的广播不是发给 SW 的，直接放行。
+     * 发给别的文档（offscreen 宿主、chat-port）的消息不是给 SW 的，直接放行。
      *
      * 不 return true 就不会占用响应通道，消息继续由真正的接收方处理。
      */
-    if (envelope?.target === 'host' || envelope?.target === 'ball') return false;
+    if (envelope?.target === 'host' || envelope?.target === 'chat') return false;
 
     /*
      * 到这里说明消息既没有 target，也不属于已知广播。
@@ -1470,24 +1442,24 @@ const runAgentAction = async (
     const { action } = message;
     switch (action.type) {
         case 'send':
-            await engine.snapshot().actions.send(action.prompt);
+            await engine.actions.send(action.prompt);
             return { done: true };
         case 'stop':
-            engine.snapshot().actions.stop();
+            engine.actions.stop();
             return { done: true };
         case 'clear':
-            engine.snapshot().actions.clear();
+            engine.actions.clear();
             return { done: true };
         case 'compact':
-            return { compaction: await engine.snapshot().actions.compact() };
+            return { compaction: await engine.actions.compact() };
         case 'set-compact-ratio':
-            engine.snapshot().actions.setCompactRatio(action.ratio);
+            engine.actions.setCompactRatio(action.ratio);
             return { done: true };
         case 'remove-message':
-            engine.snapshot().actions.removeMessage(action.id);
+            engine.actions.removeMessage(action.id);
             return { done: true };
         case 'rewind':
-            return { prompt: engine.snapshot().actions.rewindTo(action.id) };
+            return { prompt: engine.actions.rewindTo(action.id) };
         default: {
             const never: never = action;
             throw new Error(`未知 Agent 动作：${JSON.stringify(never)}`);

@@ -54,6 +54,7 @@
         "files": [
             "dist/**/*",
             "app/main/**/*",
+            "shared/ai/ai-defaults.json",
             "node_modules/ffmpeg-static/**/*"
         ],
         "directories": {

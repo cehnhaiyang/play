@@ -269,7 +269,7 @@ export interface AiProviderPreset {
  * 由主进程 settings.json 持有，渲染层只通过 IPC 读写，密钥不落到渲染进程。
  */
 export interface AiConfig {
-    /** 接口基址，需带版本段，如 http://127.0.0.1:7863/v1（末尾斜杠会被归一化去掉） */
+    /** 接口基址，需带版本段，如 http://127.0.0.1:3065/v1（默认值见 shared/ai/ai-defaults.json，末尾斜杠会被归一化去掉） */
     baseUrl: string;
     /** 调用密钥；本地服务可为空串 */
     apiKey: string;
@@ -647,7 +647,10 @@ export interface AgentMessage {
     /**
      * 工具消息：回传给模型的完整观察结果。
      *
-     * js 那一条按 RESULT_LIMIT_BYTES 截断（页面返回可能上兆）；沙箱不截断。
+     * **不截断**：js 的页面返回可能上兆，沙箱读的文件也可能很大，两处都原样
+     * 回传。上限该由模型的窗口给，而那是用户配置里的事实、不是插件里的常量 ——
+     * 在这里定一个数等于替用户假设他不知道自己的模型能装多少，代价是内容被
+     * 静默换掉一半。真装不下时应当失败并说出来，而不是少给一点。
      */
     result?: string;
     /**
@@ -692,16 +695,14 @@ export interface AgentCompaction {
     upTo: string;
     /** 压缩完成时刻 */
     at: number;
-    /** 被压掉（不再逐条回放）的消息条数 */
-    coveredMessages: number;
     /**
-     * 其中**真正送进摘要器**的消息条数。
+     * 被压掉（不再逐条回放）的消息条数 —— 也就是这次摘要实际覆盖的条数。
      *
-     * 小于 coveredMessages 时差额是被直接丢弃的：摘要器的输入有上限，
-     * 超出部分连摘要都没有。界面必须如实说出这个差额 ——
-     * 否则用户以为"压过的都还记得"，而实际上有几条是彻底没了。
+     * 摘要器的输入**不设上限**：定一个数就得拿"静默丢掉一部分历史"去换"这次
+     * 调用更可能成功"，而那笔交易不该由程序替用户做。装不下时摘要调用会失败，
+     * 失败如实报出来、历史一个字不动（见 compact 的 catch）。
      */
-    summarizedMessages: number;
+    coveredMessages: number;
     /** 压缩前上下文的估算 token 数 */
     beforeTokens: number;
     /** 压缩后上下文的估算 token 数 */

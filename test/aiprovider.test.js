@@ -35,14 +35,6 @@ const run = () => {
   const { AI_PROVIDERS, DEFAULT_AI_CONFIG, resolveReasoningEffort, findAiModelPreset, findAiProvider, getModelPresets } = aiService;
 
   const byId = (id) => AI_PROVIDERS.find((p) => p.id === id);
-  /**
-   * 地址惰性现取。写死成 `byId(id).baseUrl` 会在 run() 顶部（任何 check 之外）
-   * 裸访问，服务商一改 id 就抛 TypeError，把整个套件连同后续套件一起中止；
-   * 放进 check 内的断言里才只是一条失败用例。
-   */
-  const urlOf = (id) => byId(id).baseUrl;
-  const GCLI = () => urlOf('ofm');
-  const A2A = () => urlOf('agent2api');
 
   /* ------------------------------ 服务商表 ------------------------------ */
 
@@ -51,12 +43,6 @@ const run = () => {
     assert(p, 'AI_PROVIDERS 里应有 agent2api');
     assert.strictEqual(p.baseUrl, 'http://127.0.0.1:3065/v1', '地址应是本地 3065 的 /v1');
     assert(p.apiKey.startsWith('sk-a2a-'), `密钥应是 agent2api 的默认密钥，实际前缀 "${p.apiKey.slice(0, 6)}"`);
-  });
-
-  check('服务商表: LongCat-2.0 声明没有思考配置', () => {
-    const m = findAiModelPreset(A2A(), 'LongCat-2.0');
-    assert(m, 'LongCat-2.0 应在 agent2api 的模型候选里');
-    assert.strictEqual(m.reasoning, false, 'reasoning 必须是 false，否则档位会被原样下发');
   });
 
   check('服务商表: 思考配置不再挂在服务商上（服务商不持有任何档位字段）', () => {
@@ -81,34 +67,44 @@ const run = () => {
   const wire = (baseUrl, model, tier) =>
     resolveReasoningEffort({ baseUrl, apiKey: 'x', model, ...(tier ? { reasoningEffort: tier } : {}) });
 
-  check('映射: 不思考的模型三档全部不下发', () => {
-    for (const [base, model] of [
-      [A2A(), 'LongCat-2.0'],
-      [GCLI(), 'gemini-3.8-flash-high'],
-      [GCLI(), 'claude-sonnet-4-6'],
-    ]) {
-      for (const tier of ['low', 'high', 'max']) {
-        assert.strictEqual(wire(base, model, tier), undefined, `${model} + ${tier} 不该下发参数`);
+  /*
+   * 全表逐模型核对，而不是挑几个名字写死。
+   *
+   * 挑名字的代价已经实测：agent2api 的候选从 LongCat-2.0 换成 Qwen3.8-Flash 之后，
+   * 这个套件一次红了 5 条，而产品没有任何问题 —— 测试在替一张会变的表背书。
+   * 要钉的不变式是「模型声明了什么性质，就下发什么」，与表里有哪几个名字无关。
+   */
+  check('映射: 全表逐模型核对——声明不需要思考的一律不下发，其余按映射取值下发', () => {
+    for (const provider of AI_PROVIDERS) {
+      for (const model of provider.models) {
+        for (const tier of ['low', 'high', 'max']) {
+          const got = wire(provider.baseUrl, model.id, tier);
+          if (model.reasoning === false) {
+            assert.strictEqual(got, undefined,
+              `${provider.id} / ${model.id} 声明不需要思考，${tier} 不该下发参数`);
+          } else {
+            const mapped = model.efforts ? model.efforts[tier] : undefined;
+            assert.strictEqual(got, mapped || tier,
+              `${provider.id} / ${model.id} 的 ${tier} 应下发 ${mapped || tier}，实际 ${got}`);
+          }
+        }
       }
     }
   });
 
-  check('映射: 单次调用显式指定的高档位也压不过模型自己的「不思考」', () => {
-    const config = { baseUrl: A2A(), apiKey: 'x', model: 'LongCat-2.0', reasoningEffort: 'low' };
-    assert.strictEqual(resolveReasoningEffort(config, 'max'), undefined,
-      '调用方传 max 时仍下发了参数——LongCat-2.0 会被这个值带偏');
-  });
-
-  check('映射: 认思考的模型保持原档位（现有行为不变）', () => {
-    for (const tier of ['low', 'high', 'max']) {
-      assert.strictEqual(wire(A2A(), 'global:deepseek-v4.1-flash', tier), tier, `deepseek ${tier} 应原值下发`);
-      assert.strictEqual(wire(A2A(), 'glm-5.3', tier), tier, `glm-5.3 ${tier} 应原值下发`);
+  check('映射: 显式指定的高档位也压不过模型自己的「不思考」', () => {
+    for (const provider of AI_PROVIDERS) {
+      for (const model of provider.models.filter((entry) => entry.reasoning === false)) {
+        const config = { baseUrl: provider.baseUrl, apiKey: 'x', model: model.id, reasoningEffort: 'low' };
+        assert.strictEqual(resolveReasoningEffort(config, 'max'), undefined,
+          `${model.id} 声明不需要思考，调用方传 max 也不该下发`);
+      }
     }
   });
 
   check('映射: 没有档位就是不下发，与地址、模型无关', () => {
-    assert.strictEqual(wire(A2A(), 'global:deepseek-v4.1-flash', undefined), undefined);
-    assert.strictEqual(wire(A2A(), 'LongCat-2.0', undefined), undefined);
+    assert.strictEqual(wire(DEFAULT_AI_CONFIG.baseUrl, DEFAULT_AI_CONFIG.model, undefined), undefined);
+    assert.strictEqual(wire('https://api.example.com/v1', 'any-model', undefined), undefined);
   });
 
   check('映射: 自定义地址没有任何模型依据，按原值下发', () => {
@@ -116,22 +112,32 @@ const run = () => {
   });
 
   check('映射: 预设服务商下的表外模型名按原值下发（并在界面显示实际取值）', () => {
-    assert.strictEqual(wire(A2A(), 'some-unlisted-model', 'low'), 'low');
-    assert.strictEqual(findAiModelPreset(A2A(), 'some-unlisted-model'), null);
+    assert.strictEqual(wire(DEFAULT_AI_CONFIG.baseUrl, 'some-unlisted-model', 'low'), 'low');
+    assert.strictEqual(findAiModelPreset(DEFAULT_AI_CONFIG.baseUrl, 'some-unlisted-model'), null);
   });
 
   check('映射: 地址比对忽略大小写与末尾斜杠', () => {
-    const withSlash = 'HTTP://127.0.0.1:3065/V1/';
-    assert(findAiProvider(withSlash), '归一化后应命中 agent2api');
-    assert.strictEqual(wire(withSlash, 'LongCat-2.0', 'max'), undefined, '斜杠变体下仍不该下发');
+    const base = DEFAULT_AI_CONFIG.baseUrl;
+    const withSlash = `${base.toUpperCase()}/`;
+    assert(findAiProvider(withSlash), '归一化后应命中同一个服务商');
+    assert.strictEqual(wire(withSlash, DEFAULT_AI_CONFIG.model, 'max'),
+      wire(base, DEFAULT_AI_CONFIG.model, 'max'),
+      '斜杠与大小写变体必须给出与规范写法相同的结论');
   });
 
   /* ------------------------------ 模型候选 ------------------------------ */
 
   check('候选: 已登记地址返回该服务商的模型，未登记地址兜底第一个服务商', () => {
-    const a2aModels = getModelPresets(A2A()).map((m) => m.id);
-    assert(a2aModels.includes('LongCat-2.0'), `agent2api 候选应含 LongCat-2.0，实际 ${a2aModels.join(', ')}`);
-    assert(getModelPresets('https://api.example.com/v1')[0].id === AI_PROVIDERS[0].models[0].id,
+    const base = DEFAULT_AI_CONFIG.baseUrl;
+    const provider = findAiProvider(base);
+    assert(provider, `默认地址 ${base} 应对应一个预设服务商`);
+    assert.deepStrictEqual(
+      getModelPresets(base).map((m) => m.id),
+      provider.models.map((m) => m.id),
+      '已登记地址应原样返回该服务商的候选（界面按钮就是它）',
+    );
+    assert(provider.models.length > 0, `${provider.id} 没有模型候选`);
+    assert.strictEqual(getModelPresets('https://api.example.com/v1')[0].id, AI_PROVIDERS[0].models[0].id,
       '未知地址应兜底给第一个服务商的候选');
   });
 

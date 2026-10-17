@@ -620,7 +620,7 @@ const SettingsFloating: React.FC = () => {
                             type="text"
                             value={aiDraft.baseUrl}
                             onChange={(event) => patchAiDraft({ baseUrl: event.target.value })}
-                            placeholder="http://127.0.0.1:7863/v1"
+                            placeholder={DEFAULT_AI_CONFIG.baseUrl}
                             spellCheck={false}
                             className={`${FIELD_CLS} focus:border-violet-500/60`}
                         />
@@ -666,7 +666,7 @@ const SettingsFloating: React.FC = () => {
                             type="text"
                             value={aiDraft.model}
                             onChange={(event) => patchAiDraft({ model: event.target.value })}
-                            placeholder={modelPresets[0]?.id || 'global:deepseek-v4.1-flash'}
+                            placeholder={modelPresets[0]?.id}
                             spellCheck={false}
                             className={`${FIELD_CLS} focus:border-violet-500/60`}
                         />

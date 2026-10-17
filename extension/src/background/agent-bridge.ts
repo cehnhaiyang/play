@@ -1,5 +1,5 @@
-import { AgentEngine, memoryStorage } from '../agent/engine';
-import type { ChatPort, EngineSnapshot, EngineStorage } from '../agent/engine';
+import { AgentEngine } from '../agent/engine';
+import type { EngineSnapshot, EngineStorage } from '../agent/engine';
 import type { SandboxRequest, SandboxResult } from '../../../shared/meta';
 import { SANDBOX_NODE_TIMEOUT_MAX_MS } from '../../../shared/meta';
 import { pageHost } from '../offscreen/page-host';
@@ -20,13 +20,12 @@ import { emitBridgeEvent, requestApp } from './bridge-port';
  *
  * 所以真正的风险是"SW 在 Agent 跑着的时候被回收"。对策是**只要引擎在跑就持续
  * 唤醒**：每一步工具调用、每一次流式增量都会碰 chrome API，而 Chrome 的规则是
- * "扩展 API 活动会重置空闲计时器"。轮内还有一道显式保活（见 keepAlive）。
+ * "扩展 API 活动会重置空闲计时器"。轮内还有一道显式保活（见 startKeepAlive）。
  *
- * ## 消息必须按 requestId 分流
+ * ## 推给球只有一条路
  *
- * 流式增量是**广播**的（响应通道只有一个终值，装不下持续增量），所以这个文件
- * 会收到属于**任何一个**球的事件。按 requestId 对回本地登记的那次调用，
- * 认不出的一律忽略 —— 否则 A 球的输出会出现在 B 球的对话里。
+ * 球跑在 Electron 窗口里，没有 `chrome.runtime`，所以快照与流式增量都只能经
+ * native messaging 过桥。这个文件不碰 `chrome.runtime.sendMessage` —— 见 publish。
  */
 
 /* ========================================================================== */
@@ -80,9 +79,6 @@ const sandboxPort = (request: SandboxRequest): Promise<SandboxResult> => request
  */
 let engine: AgentEngine | null = null;
 
-/** 最近一次快照。球随时可能问"现在什么状态"，而引擎的推送是增量的 */
-let lastSnapshot: EngineSnapshot | null = null;
-
 /** 引擎是否正在跑一轮。用来决定保活定时器开不开 */
 let running = false;
 
@@ -110,27 +106,24 @@ const stopKeepAlive = (): void => {
     keepAliveTimer = null;
 };
 
-/** 把快照广播给球，并顺手更新保活状态 */
+/**
+ * 把快照推给球，并顺手更新保活状态。
+ *
+ * **只走桥这一条路。** 球跑在 Electron 窗口里（见 app/main/orbs.js），它没有
+ * `chrome.runtime`，收不到扩展内的广播 —— 这里曾经也发一条
+ * `chrome.runtime.sendMessage`，理由是"页面里的 content script 球可能还在"，
+ * 而 manifest 里早已没有 `content_scripts`：那条消息发给一个不存在的收件人，
+ * 代价是每推一版快照就把 1MB 量级的 JSON 结构化克隆一遍。
+ *
+ * `snapshot` 里含 `actions`（一组函数），过桥时会被 JSON 丢掉 —— 那是**有意的**：
+ * 球只能通过 `agent-action` 端点驱动引擎，不能拿到函数直接调。
+ */
 const publish = (snapshot: EngineSnapshot): void => {
-    lastSnapshot = snapshot;
     const nowRunning = snapshot.status !== 'idle' || snapshot.compacting;
     if (nowRunning && !running) startKeepAlive();
     if (!nowRunning && running) stopKeepAlive();
     running = nowRunning;
 
-    void chrome.runtime.sendMessage({ target: 'ball', kind: 'agent-snapshot', snapshot })
-        .catch(() => undefined);
-    /*
-     * 同时推给应用。
-     *
-     * 球现在跑在 Electron 窗口里（见 app/main/orbs.js），它收不到
-     * `chrome.runtime` 的广播，只能经 native messaging 拿。两条都发是因为
-     * 页面里的 content script 球还没删干净之前可能两种形态并存。
-     *
-     * `snapshot` 里含 `actions`（一组函数），过桥时会被 JSON 丢掉 ——
-     * 那是**有意的**：球只能通过 `agent-action` 端点驱动引擎，
-     * 不能拿到函数直接调。这也正是桥该有的边界。
-     */
     emitBridgeEvent('agent-snapshot', snapshot);
 };
 
@@ -142,11 +135,7 @@ const getEngine = async (): Promise<AgentEngine> => {
         storage: chromeStorage,
         chat: createChatPort(ensureOffscreen),
         sandbox: sandboxPort,
-        onDelta: (delta) => {
-            void chrome.runtime.sendMessage({ target: 'ball', kind: 'agent-delta', delta })
-                .catch(() => undefined);
-            emitBridgeEvent('agent-delta', delta);
-        },
+        onDelta: (delta) => emitBridgeEvent('agent-delta', delta),
         onSnapshot: publish,
     });
     engine = created;
@@ -200,30 +189,12 @@ export const ensureOffscreen = async (): Promise<void> => {
 /* 4. 导出给消息路由用                                                         */
 /* ========================================================================== */
 
-export interface AgentBridge {
+interface AgentBridge {
     getEngine: () => Promise<AgentEngine>;
     ensureOffscreen: () => Promise<void>;
-    snapshot: () => EngineSnapshot | null;
 }
 
 export const agentBridge: AgentBridge = {
     getEngine,
     ensureOffscreen,
-    snapshot: () => lastSnapshot,
 };
-
-/** 测试与降级路径用：不落盘、不发网络的引擎 */
-export const createMemoryEngine = (chat: ChatPort): AgentEngine => new AgentEngine({
-    host: pageHost,
-    storage: memoryStorage(),
-    chat,
-    /**
-     * 内存引擎不接本机沙箱，如实报"未接通"。
-     *
-     * 不能回 `{bytes:0}` 之类的成功值 —— 那会把一个没接的功能伪装成合法状态，
-     * 模型收到成功就照着往下走（`host.ts` 里 `tamper` 可选化踩过同一坑）。
-     */
-    sandbox: async () => ({ error: '这个引擎实例没有接通本机沙箱。' }),
-    onDelta: () => undefined,
-    onSnapshot: () => undefined,
-});

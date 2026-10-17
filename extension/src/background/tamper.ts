@@ -11,7 +11,8 @@ import type { HeaderRule, TamperRule } from '../../../shared/meta';
  * （面板显示"启用中"，页面里什么都没发生，且不报任何错）。
  *
  * 所以这里给的是完整实现：注入脚本 + 规则状态 + 落盘 + 页面就绪时自动重装。
- * Agent 的 `tamper` 工具也从这里拿 `applyRules`，不再是"未接入"。
+ * Agent 的 `tamper` 工具从这里拿 `applyRules`（只改内存 + 注入当前页，不落盘），
+ * 面板的「应用更改」拿 `saveRules`（落盘 + 注入）。
  *
  * ## 注入用 `func` 而不是字符串
  *
@@ -685,13 +686,35 @@ export const injectRules = async (tabId: number): Promise<boolean> => {
 };
 
 /**
- * 换一套规则并落盘。
+ * 换一套规则并**注入一个标签页**，不落盘。Agent 的 `tamper` 工具走这里。
+ *
+ * `tabId` 必填，`null` 表示"当前没有可注入的页面"：规则照样进内存镜像（用户之后
+ * 点「应用更改」或刷新页面还能用上），但如实回 `false` —— 注入是按页面发生的，
+ * 导航会重建主世界、把钩子冲掉，"改了规则"与"注入那个页面"是同一件事。
+ *
+ * 做成可选参数（`tabId?`）不行：那样"没有页面"就变成这里一个静默的分支，
+ * 而这件事只有调用方（`page-host`）能回答。
+ *
+ * 落盘是另一件事，见 saveRules：模型不该越过用户把浏览器行为永久改掉。
+ */
+export const applyRules = async (next: TamperRules, tabId: number | null): Promise<boolean> => {
+    rules = next;
+    return tabId === null ? false : injectRules(tabId);
+};
+
+/**
+ * 换一套规则、落盘、并注入一个标签页。面板的「应用更改」走这里。
+ *
+ * `tabId` 是 `number` 而不是可空：面板那条路径在调用前就用 `requireTabId`
+ * 拿不到页面时直接报错了（"没有可扫描的标签页"比"规则存了但没生效"更该说出口）。
  *
  * 落盘与注入**顺序固定**：先写内存镜像再注入，这样注入用的是新规则；
- * 落盘是异步的且失败只记日志 —— 配额满了的时候，用户最不该看到的是
+ * 落盘是异步的且失败只记在返回值里 —— 配额满了的时候，用户最不该看到的是
  * "改了规则之后面板卡住"。规则已经对当前页面生效，只是活不过浏览器重启。
+ *
+ * 返回值是**持久化**结果，不是注入结果 —— 两者会分离，调用方必须能说出这个区别。
  */
-export const applyRules = async (next: TamperRules, tabId?: number): Promise<{ saved: boolean }> => {
+export const saveRules = async (next: TamperRules, tabId: number): Promise<{ saved: boolean }> => {
     rules = next;
     let saved = true;
     try {
@@ -699,6 +722,6 @@ export const applyRules = async (next: TamperRules, tabId?: number): Promise<{ s
     } catch {
         saved = false;
     }
-    if (typeof tabId === 'number') await injectRules(tabId);
+    await injectRules(tabId);
     return { saved };
 };

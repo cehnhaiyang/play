@@ -135,6 +135,8 @@ const runChat = async (listener, sent, aiConfig) => {
         );
     });
     const done = sent.slice(before).find((m) => m.kind === 'ai-done');
+    // 收件人必须是 SW 里的 chat-port，不是球 —— 球收不到 chrome.runtime 广播
+    eq(done.target, 'chat', 'ai-done 的 target 必须是 chat（chat-port 才认）');
     assert(done && !done.error, `模型调用应当成功，实际：${JSON.stringify(done)}`);
     return done;
 };

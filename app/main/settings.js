@@ -20,22 +20,28 @@ const path = require('path');
  */
 
 /**
- * 合法档位：界面与配置里只有这三档；模型口径的转换在 AiService 下发前做。
- * 档位是可选字段，缺省即「不思考」（请求不下发 reasoning_effort）。
+ * AI 服务的档位清单与默认值。**值与清单都不写在这里**：本文件与
+ * `shared/ai/AiService.ts` 读的是同一份 `shared/ai/ai-defaults.json`。
+ *
+ * 主进程是纯 CJS，import 不了 TS，所以真值放在三方都读得动的 JSON 里。
+ * 以前这里手抄了档位清单与一份默认配置：清单靠静态比对兜着，默认配置没人比对，
+ * 于是分叉成两份（地址、密钥、档位三个字段都不一致）—— "新装的用户连哪个服务"
+ * 取决于谁先读到它。**不得再写回任何一项**：多一份就是多一个"谁说了算"。
+ *
+ * 该 JSON 由 electron-builder 按 package.json 的 `build.files` 打包：缺了它
+ * 开发态一切正常、装出来的应用启动即 MODULE_NOT_FOUND，所以那条清单
+ * 由 `test/mainstatic.test.js` 静态钉住。
  */
-const REASONING_EFFORTS = ['low', 'high', 'max'];
+const AI_DEFAULTS = require('../../shared/ai/ai-defaults.json');
 
-/** AI 服务默认值：本地 tc2api */
-const DEFAULT_AI = {
-    baseUrl: 'http://127.0.0.1:7863/v1',
-    apiKey: '1',
-    model: 'global:deepseek-v4.1-flash',
-    reasoningEffort: 'low',
-};
+/** 合法档位：界面与配置里只有这三档；模型口径的转换在 AiService 下发前做 */
+const REASONING_EFFORTS = AI_DEFAULTS.reasoningEfforts.map((tier) => tier.value);
+
+const DEFAULT_AI_CONFIG = AI_DEFAULTS.config;
 
 const DEFAULT_SETTINGS = {
     proxyPort: '',
-    ai: { ...DEFAULT_AI },
+    ai: { ...DEFAULT_AI_CONFIG },
 };
 
 let cachedSettingsPath = null;
@@ -72,11 +78,11 @@ function normalizeAiConfig(input) {
     const effort = typeof raw.reasoningEffort === 'string' ? raw.reasoningEffort.trim() : '';
 
     return {
-        baseUrl: baseUrl || DEFAULT_AI.baseUrl,
+        baseUrl: baseUrl || DEFAULT_AI_CONFIG.baseUrl,
         // 密钥允许为空（本地服务常常不校验）。字段存在就尊重它，哪怕存的是空串——
         // 用户主动清空过，不该被"默认值"悄悄填回去；字段整个缺失才是没配过。
-        apiKey: typeof raw.apiKey === 'string' ? apiKey : DEFAULT_AI.apiKey,
-        model: model || DEFAULT_AI.model,
+        apiKey: typeof raw.apiKey === 'string' ? apiKey : DEFAULT_AI_CONFIG.apiKey,
+        model: model || DEFAULT_AI_CONFIG.model,
         ...(REASONING_EFFORTS.includes(effort) ? { reasoningEffort: effort } : {}),
     };
 }
@@ -189,7 +195,7 @@ function normalizeAiInput(input) {
     const model = String(raw.model == null ? '' : raw.model).trim();
     const effort = String(raw.reasoningEffort == null ? '' : raw.reasoningEffort).trim();
 
-    if (!baseUrl) return { value: null, error: '接口地址不能为空，例如 http://127.0.0.1:7863/v1' };
+    if (!baseUrl) return { value: null, error: `接口地址不能为空，例如 ${DEFAULT_AI_CONFIG.baseUrl}` };
     if (!/^https?:\/\//i.test(baseUrl)) return { value: null, error: '接口地址需以 http:// 或 https:// 开头' };
     try {
         // 只做格式校验，不发请求；后续由「测试连接」验证可达性
@@ -342,6 +348,5 @@ module.exports = {
     saveAiConfig,
     testAiConnection,
     normalizeAiConfig,
-    DEFAULT_AI,
     REASONING_EFFORTS,
 };

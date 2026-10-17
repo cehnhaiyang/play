@@ -631,7 +631,10 @@ const run = () => {
             path.join(ROOT, 'extension', 'src', 'shared', 'protocol.ts'), 'utf8');
         const start = protocolSrc.indexOf('export type BallRequest');
         assert(start > 0, '找不到 BallRequest');
-        const block = protocolSrc.slice(start, protocolSrc.indexOf('export type BallEvent', start));
+        // 取到这一段结束：下一节的分隔注释
+        const end = protocolSrc.indexOf('/* 2. service worker ↔ offscreen 宿主文档', start);
+        assert(end > start, '找不到 BallRequest 之后的分节注释，无法界定它的范围');
+        const block = protocolSrc.slice(start, end);
 
         // kind 都是字符串字面量，抓 `kind: '...'`
         const kinds = [...block.matchAll(/kind: '([\w-]+)'/g)].map((m) => m[1]);

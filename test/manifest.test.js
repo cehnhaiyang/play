@@ -238,13 +238,31 @@ const run = () => {
     }
 
     /*
-     * 推给悬浮球的每一条事件都必须过桥。
+     * 产物内部的相对引用必须落得到磁盘上。
+     *
+     * 打包器会把共享模块拆成 `chunks/*.js`（AiService 就是一个），入口里因此留下
+     * `import{…}from"./chunks/AiService-xxxx.js"`。那个文件缺失时 Chrome 报的还是
+     * 同一句"清单文件丢失或不可读取"，看不出缺的是哪一个 —— 而它只在**跑起来那一刻**
+     * 才暴露（service worker 加载失败 = 插件整个不工作）。
+     * 上面那几条只校验了 manifest 直接声明的文件，够不到入口内部的引用。
+     */
+    for (const file of walk(DIST).filter((f) => f.endsWith('.js'))) {
+        const src = fs.readFileSync(file, 'utf8');
+        for (const m of src.matchAll(/(?:from|import)\s*\(?\s*["'](\.[^"']+)["']/g)) {
+            if (!fs.existsSync(path.resolve(path.dirname(file), m[1]))) {
+                fails.push(`${path.relative(DIST, file)} 引用了 ${m[1]}，但产物里没有这个文件`);
+            }
+        }
+    }
+
+    /*
+     * 推给悬浮球的每一条事件都必须过桥，而且**只能**过桥。
      *
      * ## 这一条为什么必须存在
      *
-     * 球现在跑在 Electron 窗口里（不是 content script），它**收不到**
-     * `chrome.runtime.sendMessage` 的广播。所以每一次"给球推数据"都必须
-     * 同时走 `emitBridgeEvent`。漏掉的表现是：
+     * 球跑在 Electron 窗口里（不是 content script），它没有 `chrome.runtime`，
+     * 收不到扩展内的广播。所以每一次"给球推数据"都必须走 `emitBridgeEvent`。
+     * 漏掉的表现是：
      *
      *   · 球能连上、能取到初始快照；
      *   · 但**之后再也不会更新** —— 嗅探出新地址列表不动、模型回复逐字
@@ -252,28 +270,58 @@ const run = () => {
      *
      * 这种"能连上但不动"最难查：连接是好的，请求也是好的，只有推送断了。
      *
-     * ## 判据
+     * ## 两个方向都要查
      *
-     * 凡是出现 `sendMessage({ target: 'ball', kind: X })` 的地方，同一个文件里
-     * 必须有对应的 `emitBridgeEvent(X, ...)`。按 kind 逐个比对，而不是数个数 ——
-     * 数个数会在"加了新事件但忘了桥"时仍然相等。
+     *  1. **该推的都在推**：BALL_KINDS 里每一个都必须有 emitBridgeEvent 调用点。
+     *  2. **没有第二份**：SW 侧不许再出现 `target: 'ball'` 的
+     *     `chrome.runtime` 广播 —— 曾经每条快照都多发一遍，收件人根本不存在，
+     *     代价是每推一版就把 1MB 量级的 JSON 克隆一次。
+     *
+     * 扩展内部另有一条通道（offscreen 的 `ai-*` 发给 SW 里的 chat-port），
+     * 它的 `target` 是 `'chat'`，与球无关，不在这一条的范围内。
      */
     const BALL_KINDS = ['sniffed-media', 'tabs-changed', 'agent-snapshot', 'agent-delta'];
-    for (const file of ['background/service-worker.ts', 'background/agent-bridge.ts']) {
+    const swSide = ['background/service-worker.ts', 'background/agent-bridge.ts'];
+    for (const kind of BALL_KINDS) {
+        const pushed = swSide.some((file) => {
+            const full = path.join(srcDir, file);
+            if (!fs.existsSync(full)) return false;
+            return new RegExp(`emitBridgeEvent\\(\\s*'${kind}'`).test(stripComments(fs.readFileSync(full, 'utf8')));
+        });
+        if (!pushed) {
+            fails.push(`没有任何地方 emitBridgeEvent('${kind}') —— 球永远收不到这个事件，界面会停在初始状态`);
+        }
+    }
+    for (const file of swSide) {
         const full = path.join(srcDir, file);
         if (!fs.existsSync(full)) continue;
         const src = stripComments(fs.readFileSync(full, 'utf8'));
-
-        for (const kind of BALL_KINDS) {
-            // 该文件里有没有给球推这个 kind
-            const pushes = new RegExp(`kind:\\s*'${kind}'`).test(src);
-            if (!pushes) continue;
-            // 有的话，必须也过桥
-            if (!new RegExp(`emitBridgeEvent\\(\\s*'${kind}'`).test(src)) {
-                fails.push(`${file} 推了 '${kind}' 给球但没过桥（emitBridgeEvent）——`
-                    + '球在 Electron 窗口里收不到 chrome.runtime 广播，界面会停在初始状态');
-            }
+        if (/target:\s*'ball'/.test(src)) {
+            fails.push(`${file} 里又出现了 target: 'ball' 的 chrome.runtime 广播 ——`
+                + '球在 Electron 窗口里，那条消息没有收件人，只是白白克隆一遍大对象');
         }
+    }
+
+    /*
+     * 宿主推事件用的 target 必须与收件人认领的那个字符串**逐字相同**。
+     *
+     * 两端各写一个字面量，拼错一个字母的表现是"调用发出去了、回执也收到了，
+     * 然后界面永远停在正在思考" —— 增量与终局都发进虚空，没有报错。
+     * 这条检查存在的理由与上面那条一样：能连上但不动，最难查。
+     */
+    const hostSrc = fs.readFileSync(path.join(srcDir, 'offscreen', 'host.ts'), 'utf8');
+    const portSrc = fs.readFileSync(path.join(srcDir, 'background', 'chat-port.ts'), 'utf8');
+    const sendTarget = (hostSrc.match(/target:\s*'([a-z-]+)',\s*\n\s*kind:\s*'ai-delta'/) || [])[1];
+    const listenTarget = (portSrc.match(/target\s*!==\s*'([a-z-]+)'/) || [])[1];
+    if (!sendTarget || !listenTarget) {
+        fails.push('找不到宿主 ai-delta 的 target 或 chat-port 的认领判据 —— 这条检查的正则已失配');
+    } else if (sendTarget !== listenTarget) {
+        fails.push(`宿主把 ai-delta 发到 target '${sendTarget}'，而 chat-port 只认 '${listenTarget}' ——`
+            + '增量与终局会全部落进虚空，界面永远停在"正在思考"且不报错');
+    }
+    if (sendTarget === 'ball') {
+        fails.push('宿主的 ai-* 事件又用 target: \'ball\' 了 —— 球在 Electron 窗口里收不到这条，'
+            + '真正的收件人是 SW 里的 chat-port');
     }
 
     /*
@@ -296,6 +344,33 @@ const run = () => {
                 fails.push(`插件会推 '${kind}'，但球的 BridgeEventName 里没有它 —— 球会把它丢掉`);
             }
         }
+    }
+
+    /*
+     * 篡改规则的三个出口必须各司其职，且 Agent 那一口必须真的注入。
+     *
+     * `applyRules` 只改内存 + 注入（工具层，不落盘），`saveRules` 落盘 + 注入
+     * （面板「应用更改」）。两条都只差一行，而差别是"模型能永久改掉浏览器行为"
+     * —— 那正是要挡的事。这里钉住：SW 的 tamper-set 走 saveRules，page-host
+     * 的 tamper.applyRules 走 applyRules 且把 tabId 传下去。
+     *
+     * 后半条尤其容易漏：不传 tabId 时规则进了内存却没进页面，工具回"已生效"
+     * 而页面还在跑旧规则 —— 没有报错，只有"改了没反应"。
+     */
+    const pageHostSrc = stripComments(fs.readFileSync(path.join(srcDir, 'offscreen', 'page-host.ts'), 'utf8'));
+    const applyCall = pageHostSrc.match(/return applyRules\([\s\S]*?\);/);
+    if (!applyCall) {
+        fails.push('offscreen/page-host.ts 的 tamper.applyRules 没有转调 tamper.ts 的 applyRules');
+    } else if (!/tab\?\.id/.test(applyCall[0])) {
+        fails.push('page-host 的 tamper.applyRules 没把当前标签页传给 applyRules ——'
+            + '规则只会进内存，页面里不会生效，而工具会回"已生效"');
+    }
+    if (/saveRules/.test(pageHostSrc)) {
+        fails.push('page-host 调了 saveRules —— 模型改规则不得落盘，那是面板「应用更改」的事');
+    }
+    const swSrc2 = stripComments(fs.readFileSync(path.join(srcDir, 'background', 'service-worker.ts'), 'utf8'));
+    if (!/case 'tamper-set'[\s\S]{0,800}?await saveRules\(/.test(swSrc2)) {
+        fails.push("service-worker 的 tamper-set 没有走 saveRules —— 面板点「应用更改」不会落盘");
     }
 
     // 反过来：声明了却没人用的权限，会在安装时吓退用户（"读取浏览记录"这类提示）

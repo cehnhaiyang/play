@@ -572,59 +572,50 @@ function run() {
     }
 
     /**
-     * 思考强度档位：界面、AiService、主进程三处清单一致，下发前都过映射。
+     * 思考强度档位：清单**只有一份**（`shared/ai/ai-defaults.json`），两侧都从它推导。
      *
      * low / high / max 是界面与配置的唯一口径（「不思考」等同于档位缺省，
      * 不占白名单名额），各模型认的取值不同，由 AiService.resolveReasoningEffort
      * 按模型映射（映射矩阵本身在 aiprovider.test.js 里跑真实函数验证）。
      * 清单分叉会让档位被静默改写或点不到，漏映射则是服务端一次 503。
+     *
+     * 这里**调用两侧的真实模块**取清单，而不是从源码切字符串 —— 切字符串只能证明
+     * "两处文本长得一样"，证明不了"读的是同一份"。再加两条负向断言，防止有人把
+     * 清单抄回代码里：抄一份就重新有了分叉的可能。
      */
     checks += 1;
     const settingsSrc = fs.readFileSync(path.join(ELECTRON_DIR, 'settings.js'), 'utf8');
     const floatingSrc = fs.readFileSync(path.join(ROOT, 'app', 'components', 'Floating.tsx'), 'utf8');
     const aiSvcSrc = fs.readFileSync(path.join(ROOT, 'shared', 'ai', 'AiService.ts'), 'utf8');
 
-    const effortsBlock = settingsSrc.match(/REASONING_EFFORTS\s*=\s*\[([^\]]*)\]/);
-    const settingsEfforts = effortsBlock
-        ? [...effortsBlock[1].matchAll(/'([a-z]+)'/g)].map((m) => m[1])
-        : [];
-
-    // 界面按钮的档位来自 AiService 的 EFFORT_OPTIONS（低 / 高 / 最大）
-    const optionsFrom = aiSvcSrc.indexOf('export const EFFORT_OPTIONS');
-    const optionsTo = optionsFrom >= 0 ? aiSvcSrc.indexOf('\n];', optionsFrom) : -1;
-    const optionsBlock = optionsFrom >= 0 && optionsTo > optionsFrom
-        ? aiSvcSrc.slice(optionsFrom, optionsTo)
-        : '';
-    const uiEfforts = [...optionsBlock.matchAll(/value:\s*'([a-z]+)'/g)].map((m) => m[1]);
-
-    // AiService 自己的归一化白名单（浏览器降级模式下由它再挡一道）
-    const aiEffortsBlock = aiSvcSrc.match(/const REASONING_EFFORTS[^=]*=\s*\[([^\]]*)\]/);
-    const aiEfforts = aiEffortsBlock
-        ? [...aiEffortsBlock[1].matchAll(/'([a-z]+)'/g)].map((m) => m[1])
-        : [];
+    const aiEfforts = require(path.join(__dirname, 'build', 'shared', 'ai', 'AiService.js'))
+        .EFFORT_OPTIONS.filter((option) => option.value).map((option) => option.value);
+    const settingsEfforts = require(path.join(ELECTRON_DIR, 'settings.js')).REASONING_EFFORTS;
 
     const effortProblems = [];
-    if (settingsEfforts.length === 0) effortProblems.push('settings.js 里找不到 REASONING_EFFORTS');
-    if (uiEfforts.length === 0) effortProblems.push('AiService.ts 里找不到 EFFORT_OPTIONS');
-    if (aiEfforts.length === 0) effortProblems.push('AiService.ts 里找不到 REASONING_EFFORTS');
-    for (const e of uiEfforts) {
+    if (aiEfforts.length === 0) effortProblems.push('AiService 的 EFFORT_OPTIONS 里没有档位');
+    if (settingsEfforts.length === 0) effortProblems.push('settings.js 的 REASONING_EFFORTS 是空的');
+    for (const e of aiEfforts) {
         if (!settingsEfforts.includes(e)) {
             effortProblems.push(`界面提供「${e}」，但主进程白名单没有它（会被静默改写成默认档）`);
         }
     }
     for (const e of settingsEfforts) {
-        if (!uiEfforts.includes(e)) {
+        if (!aiEfforts.includes(e)) {
             effortProblems.push(`主进程支持「${e}」，但界面没有对应按钮（用户选不到）`);
         }
     }
-    for (const e of aiEfforts) {
-        if (!settingsEfforts.includes(e)) {
-            effortProblems.push(`AiService 认「${e}」，但主进程白名单没有它（同一次配置两条链路判定不同）`);
-        }
+    if (/REASONING_EFFORTS\s*=\s*\[/.test(settingsSrc)) {
+        effortProblems.push('settings.js 里又出现了档位数组字面量（应从 ai-defaults.json 推导）');
     }
-    for (const e of settingsEfforts) {
-        if (!aiEfforts.includes(e)) {
-            effortProblems.push(`主进程支持「${e}」，但 AiService 不认（浏览器模式下会被降级成默认档）`);
+    if (/REASONING_EFFORTS\s*(:[^=\n]*)?=\s*\[/.test(aiSvcSrc)) {
+        effortProblems.push('AiService.ts 里又出现了档位数组字面量（应从 ai-defaults.json 推导）');
+    }
+    const tierTable = require(path.join(ROOT, 'shared', 'ai', 'ai-defaults.json')).reasoningEfforts || [];
+    for (const tier of tierTable) {
+        // 缺 label / hint 会在界面上画出一个没有文字的按钮，而按钮仍然可点
+        if (!tier.value || !tier.label || !tier.hint) {
+            effortProblems.push(`ai-defaults.json 的档位缺少 value/label/hint：${JSON.stringify(tier)}`);
         }
     }
     // 设置面板必须拿 AiService 的三档；手抄一份清单就等于把"两边分叉"的坑重新埋回去
@@ -649,6 +640,39 @@ function run() {
         failed += 1;
         console.log('  FAIL  思考强度档位在界面、AiService 与主进程之间分叉：');
         for (const p of effortProblems) console.log(`          ${p}`);
+    }
+
+    /**
+     * 主进程 require 的仓内文件必须进打包清单。
+     *
+     * 主进程是**纯 CJS 源码**，electron-builder 按 package.json 的 `build.files`
+     * 白名单打包：require 一个不在清单里的文件，开发态一切正常，装出来的应用
+     * 启动即 MODULE_NOT_FOUND。此前主进程不 require 仓内任何文件，这条约束一直是
+     * 隐含的；默认 AI 配置挪进 `shared/ai/ai-defaults.json` 之后必须显式钉住。
+     */
+    checks += 1;
+    const packFiles = ((require(path.join(ROOT, 'package.json')).build || {}).files) || [];
+    const packed = (rel) => packFiles.some((entry) => {
+        const norm = String(entry).replace(/\\/g, '/');
+        if (norm.endsWith('/**/*')) return rel.startsWith(norm.slice(0, -4));
+        if (norm.endsWith('/**')) return rel.startsWith(norm.slice(0, -2));
+        return norm === rel;
+    });
+    const packProblems = [];
+    for (const file of fs.readdirSync(ELECTRON_DIR).filter((f) => f.endsWith('.js'))) {
+        const src = fs.readFileSync(path.join(ELECTRON_DIR, file), 'utf8');
+        for (const m of src.matchAll(/require\('(\.\.?\/[^']+)'\)/g)) {
+            const rel = path.relative(ROOT, path.resolve(ELECTRON_DIR, m[1])).replace(/\\/g, '/');
+            if (rel.startsWith('..')) continue;   // 仓外路径不归这条清单管
+            if (!packed(rel)) {
+                packProblems.push(`${file} require 了 ${rel}，但 package.json 的 build.files 里没有它（打包后启动即崩）`);
+            }
+        }
+    }
+    if (packProblems.length > 0) {
+        failed += 1;
+        console.log('  FAIL  主进程 require 的文件没进打包清单：');
+        for (const p of packProblems) console.log(`          ${p}`);
     }
 
     /**

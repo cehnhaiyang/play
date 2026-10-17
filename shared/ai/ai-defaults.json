@@ -1,0 +1,13 @@
+{
+    "config": {
+        "baseUrl": "http://127.0.0.1:3065/v1",
+        "apiKey": "sk-a2a-f345da9360a116c54801e02675eb0c37",
+        "model": "global:deepseek-v4.1-flash",
+        "reasoningEffort": "max"
+    },
+    "reasoningEfforts": [
+        { "value": "low", "label": "低", "hint": "最快、省 token" },
+        { "value": "high", "label": "高", "hint": "质量与速度平衡" },
+        { "value": "max", "label": "最大", "hint": "最强推理，最慢" }
+    ]
+}

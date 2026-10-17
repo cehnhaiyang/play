@@ -19,7 +19,7 @@ import { asString, errorText } from './text';
  * 只依赖回复原文这一个输入（纯函数）：回灌文案在"当场"与"下一轮重建"
  * 两处必须逐字一致，而重建时手上只有存下来的那条原文。
  */
-export type ReplyProblem =
+type ReplyProblem =
     /** 整条回复里连一个 `{` 都没有 —— 写成了散文 */
     | { kind: 'noJson' }
     /** JSON 没闭合。绝大多数是回复被输出长度截断 */
@@ -40,17 +40,18 @@ export type ReplyProblem =
 /**
  * 诊断一条不合协议的回复。
  *
- * 与 extractJsonObject 共用同一套扫描（`scanObject`），只在"切不出来之后"分岔：
- * 那边返回 null 就结束了，这里要把**为什么**切不出来说清楚 —— 前者要它把这一步
- * 拆小，后者要它去检查转义，两件事对模型的动作完全不同。
+ * 只看**第一个** `{` 起扫出来的那个对象，不像 extractJsonObject 那样把每个起点
+ * 都试一遍：这里要回答的是"这条回复为什么切不出 JSON"，而模型写的那个对象总是
+ * 从第一个 `{` 开始。逐起点试是给"前面有散文"用的，那是**找**对象的问题。
  */
 export const diagnoseReply = (text: string): ReplyProblem => {
     const start = text.indexOf('{');
     if (start < 0) return { kind: 'noJson' };
 
-    const { end, inString, depth } = scanObject(text, start);
+    const { spans, inString, depth } = scanBraces(text, start);
+    const self = spans.find((span) => span.start === start);
 
-    if (end < 0) {
+    if (!self) {
         return {
             kind: 'truncated',
             detail: inString
@@ -58,6 +59,7 @@ export const diagnoseReply = (text: string): ReplyProblem => {
                 : `JSON 的括号没有闭合，还差 ${depth} 个 }`,
         };
     }
+    const { end } = self;
 
     try {
         const parsed = JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>;
@@ -106,17 +108,29 @@ export const diagnoseReply = (text: string): ReplyProblem => {
 };
 
 /**
- * 从 `start` 起做字符串感知的括号扫描。
+ * 从 `start` 起做字符串感知的括号扫描，一遍扫出**全部**平衡对象的跨度。
  *
  * 不能用正则匹配花括号 —— 脚本源码里必然含 `{ }` 与字符串，只有字符串感知的
- * 括号计数才能切准边界。返回对象闭合处的下标；**没闭合返回 -1**，并顺带报出
- * 停下时的状态（还在字符串里 / 还差几层），供诊断文案区分"截断"与"括号不配对"。
+ * 括号计数才能切准边界。返回按起点升序的跨度，以及扫到结尾时的状态
+ * （还在字符串里 / 还差几层），后者供诊断文案区分"截断"与"括号不配对"。
+ *
+ * ## 为什么必须是一遍
+ *
+ * `extractJsonObject` 要把每个 `{` 都当起点试一次，而逐个起点现扫会一直走到
+ * 文本结尾 —— 复杂度于是变成 O(起点数 × 长度)。实测一份被截断的 1.4MB 回复
+ * （96003 个 `{`）要 990ms，而"回复被截断"恰恰是"这一步写的代码太大"的必然
+ * 结果，两者总是同时发生，正好卡在最需要快速给出错误文案的时刻。括号配对是
+ * 栈的教科书用例，一遍扫完即可。
+ *
+ * 字符串感知也顺带修正了一处旧行为：从一个**字符串内部**的 `{` 起扫，会把那段
+ * 字符串当成 JSON 解析（`他说"{"a":1}"` 会解析出 `{"a":1}`）—— 那不是回复本身。
  */
-const scanObject = (
+const scanBraces = (
     text: string,
     start: number,
-): { end: number; inString: boolean; depth: number } => {
-    let depth = 0;
+): { spans: { start: number; end: number }[]; inString: boolean; depth: number } => {
+    const open: number[] = [];
+    const spans: { start: number; end: number }[] = [];
     let inString = false;
     let escaped = false;
 
@@ -131,30 +145,26 @@ const scanObject = (
         }
 
         if (ch === '"') inString = true;
-        else if (ch === '{') depth += 1;
-        else if (ch === '}') {
-            depth -= 1;
-            if (depth === 0) return { end: i, inString: false, depth: 0 };
-        }
+        else if (ch === '{') open.push(i);
+        else if (ch === '}' && open.length > 0) spans.push({ start: open.pop() as number, end: i });
     }
 
-    return { end: -1, inString, depth };
+    // 栈是后进先出的，跨度因此按**闭合**顺序产生；起点升序才是"逐个起点试"的顺序
+    return { spans: spans.sort((a, b) => a.start - b.start), inString, depth: open.length };
 };
 
 /**
  * 从模型回复里抠出第一个能解析的**平衡** JSON 对象。
  *
  * 不能只看第一个 `{` —— 模型常在 JSON 前写一句"我的计划是…"，那个花括号不是
- * 起点，因此逐个 `{` 当起点试，解析成功即返回。
+ * 起点，因此每个 `{` 都当起点试一次，解析成功即返回。
  */
 export const extractJsonObject = (text: string): Record<string, unknown> | null => {
     if (!text) return null;
 
     // 起点全部收集：intent 或代码里花括号再多也不能让外层 JSON 的起点被截掉。
     // 曾经限制过起点数量，后果是"回复里示例代码多写几个 { }，真正的调用就解析不到"。
-    for (let start = text.indexOf('{'); start >= 0; start = text.indexOf('{', start + 1)) {
-        const { end } = scanObject(text, start);
-        if (end < 0) continue;
+    for (const { start, end } of scanBraces(text, 0).spans) {
         try {
             const parsed = JSON.parse(text.slice(start, end + 1));
             if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
@@ -175,7 +185,7 @@ export const extractJsonObject = (text: string): Record<string, unknown> | null 
  * 提示词写哪个、历史怎么回放，三处各自漂移，而漂移的症状是**静默丢掉后半批**。
  * 写错字段名的模型会收到协议错误回执，那比猜它想调什么便宜。
  */
-export interface AgentCall {
+interface AgentCall {
     tool: string;
     args: Record<string, unknown>;
 }
@@ -200,9 +210,7 @@ export const MAX_CALLS_PER_REPLY = 8;
  *    "整条回复白写了"，于是把同一批原样再发一次。
  *  - **args 缺失归一成 `{}`**：工具层对缺参数有自己的错误文案（"缺少 code"
  *    比"args 不是对象"更能让它一步改对）。
- *  - **上限 MAX_CALLS_PER_REPLY 条**：一批的实际成本是各次观察之和，而它们会
- *    随每一步重发。截断而不是报错，是因为前几条通常已经做完了事，丢掉它们
- *    等于白跑。
+ *  - **上限 MAX_CALLS_PER_REPLY 条**：理由见那个常量，截断而不是报错。
  *
  * 同时回传 `written`（模型这一批写了几个）—— 截断与跳过都是**静默**的，
  * 不回传的话模型看到的结果比它写的少，只会以为工具坏了，然后把同一批再发一遍。
@@ -237,7 +245,7 @@ export const extractCalls = (
  * 而"结果是不是一个可解析的对象"是同一个问题。分头解析的话，一处改成
  * 容忍数组、另一处没改，两个工具就会对同一种返回给出相反的结论。
  */
-export const parseToolResult = (result: string): Record<string, unknown> | null => {
+const parseToolResult = (result: string): Record<string, unknown> | null => {
     if (!result.startsWith('{')) return null;
     try {
         const parsed = JSON.parse(result);
@@ -256,9 +264,9 @@ export const parseToolResult = (result: string): Record<string, unknown> | null 
  * `{"error": null, "data": [...]}` 是合法值，按前缀判会被标成失败。
  * 必须解析出来看：**含 error 字段且它是非空字符串**才算错。
  *
- * js 另有专属通道 `__agentError`：页面业务数据里出现 `{error:"..."}` 是成功的
- * 数据，不是工具失败。js 的成败判据见 isJsErrorResult，这里保留对 error 的
- * 判断是给 tamper/storage/tokens 这些"错误只能由我们构造"的工具用的。
+ * 只管 tamper / storage / tokens / sandbox / navigate：它们的错误对象**只可能**
+ * 由我们构造，所以 `{error}` 就是失败。js 不适用 —— 它的返回值是页面数据，
+ * 判据见 isJsErrorResult。
  */
 export const isErrorResult = (result: string): boolean => {
     const parsed = parseToolResult(result);
@@ -270,21 +278,18 @@ export const isErrorResult = (result: string): boolean => {
 /**
  * js 脚本执行是否失败。
  *
- * 只认 `__agentError`（脚本抛错 / 返回值不可序列化 / 执行器异常）与
- * dispatchTool 自身的参数错误 `{error}`（缺 code 等，那是调用姿势错了）。
- * 页面数据里自带的 `{error:"..."}` 不是失败 —— 那是探测到的业务字段。
+ * **只认 `__agentError`。** 那是执行器与 dispatchTool 专用的失败通道（脚本抛错 /
+ * 返回值不可序列化 / 缺 code）。页面返回值里的 `error` 字段一律不算失败 ——
+ * 它是**探测到的业务数据**，`{"error":"invalid token"}` 是最常见的接口响应之一。
+ *
+ * 曾经按"error 是唯一键就当参数错误"来分辨这两者：那条规则对单键业务错误必然
+ * 猜错，把一次成功的数据探测标成失败，模型于是对着成功的结果去"修正参数"。
+ * 现在两边各走一条通道（见 tools.ts 的 js 分支），判据不需要猜。
  */
 export const isJsErrorResult = (result: string): boolean => {
     const parsed = parseToolResult(result);
     if (!parsed) return false;
-    if (typeof parsed.__agentError === 'string' && parsed.__agentError.length > 0) return true;
-    // 参数错误同样是 {error}，但它只在 code 缺失等情况下由 dispatchTool 构造；
-    // 页面数据里的 error 字段走到这里会被误伤 —— 区分方法是看键集合：
-    // dispatchTool 的参数错误对象**只有** error 一个键。
-    if (typeof parsed.error === 'string' && parsed.error.length > 0) {
-        return Object.keys(parsed).length === 1;
-    }
-    return false;
+    return typeof parsed.__agentError === 'string' && parsed.__agentError.length > 0;
 };
 
 /** 解析存储快照；坏了就返回空对象，不让一个坏键毁掉整个 tokens find */
@@ -299,13 +304,7 @@ export const safeParseObject = (raw: string): Record<string, unknown> => {
     }
 };
 
-/**
- * 把模型给的代码包成可返回值的异步 IIFE。
- *
- * 包一层的必要性：模型写的是脚本片段（含 `return`），裸求值里顶层 `return` 是
- * 语法错误；同时返回值必须自己序列化 —— `Runtime.evaluate` 对 DOM 节点、
- * 循环引用这类不可序列化的值会直接抛错或回传空对象。
- */
+/** 包装前缀。为什么必须包这一层，见 buildScriptSource */
 const PREFIX = `(async () => {
   let __v;
   try {
@@ -334,6 +333,15 @@ const CODE_LINE_OFFSET = PREFIX.split('\n').length - 1;
  * 拿不到位置时原样返回 —— 宁可少说，也不要报一个错的坐标。
  */
 export const locateScriptError = (result: string, code: string): string => {
+    /*
+     * 先看有没有 `__agentError` 再解析。
+     *
+     * 这个函数在**每一个** js 结果上跑一次，而绝大多数结果是正常数据 ——
+     * 对 1.2MB 的正常返回值做一次完整 JSON.parse 要 8.5ms，而查一个子串是 1.1ms
+     * （实测）。没有那个字段时解析出来的东西一行都用不上。
+     */
+    if (!result.includes('__agentError')) return result;
+
     let parsed: Record<string, unknown>;
     try {
         const value = JSON.parse(result) as unknown;
@@ -374,7 +382,7 @@ export const buildScriptSource = (code: string): string => `${PREFIX}${code}
     })();
   } catch (__err) {
     // 基础设施失败走专属通道 __agentError：页面接口正常返回 {error:"..."}
-    // 是合法数据，不能与"脚本抛错"混用同一个 error 字段，否则 isErrorResult
+    // 是合法数据，不能与"脚本抛错"混用同一个 error 字段，否则 isJsErrorResult
     // 会把一次成功的数据探测误判成工具失败，模型对着成功的结果修 bug。
     return JSON.stringify({ __agentError: String(__err && __err.message || __err) });
   }

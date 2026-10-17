@@ -18,16 +18,15 @@ import {
 } from '../../../shared/core';
 import type { AgentHost } from './host';
 import { asString, errorText } from './text';
-import { isJsErrorResult, safeParseObject } from './parse';
+import { safeParseObject } from './parse';
 
 /**
  * 六个工具的派发。
  *
- * ## 为什么从 hook 里搬出来
+ * ## 为什么是普通函数
  *
- * 它原来长在 `useAgent` 内部，于是测试只能靠切源码字符串 + React shim 才能跑到。
- * 现在它是**接收宿主接口的普通异步函数**：宿主可替换，因此每个工具都能在 Node 里
- * 直接调，不需要浏览器、不需要 React、不需要 DOM。
+ * 它是**接收宿主接口的纯异步函数**，不碰 React、不碰 DOM、不碰 chrome.*：
+ * 宿主可替换，因此每个工具都能在 Node 里直接调，不需要浏览器。
  *
  * ## 返回值一律是字符串
  *
@@ -36,12 +35,12 @@ import { isJsErrorResult, safeParseObject } from './parse';
  * 能让模型少走一整步。改动这些措辞时要知道它们在影响模型行为。
  */
 
-export interface ToolContext {
+interface ToolContext {
     host: AgentHost;
     /** 在页面里执行代码（走引擎的串行队列，不与模型的其它步骤交错） */
     exec: (code: string) => Promise<string>;
     /**
-     * 本机沙箱。宿主没接通时工具如实报"未接通"，不回落成"成功但什么都没做"。
+     * 本机沙箱。桌面应用没连上时工具如实报"不可用"，不回落成"成功但什么都没做"。
      *
      * 必填而不是可选：可选会在缺实现时走进一条运行时分支，而"沙箱能用吗"
      * 是接线问题，编译时就该报错（与 `tamper` 同一教训，见 host.ts）。
@@ -80,6 +79,16 @@ const unknownActionError = (got: string, valid: string[]): string => {
 const cookieKeyError = (key: string): string =>
     `找不到 cookie：${key}。key 要用 storage get 或 tokens find 返回的那个原样传入。`;
 
+/**
+ * set 缺 value 时的错误文案。
+ *
+ * 不能当成空值写下去：模型少打一个字段就**静默改掉了这条数据的值**，而回执是
+ * `{saved:true}` —— 它照着自己写的值往下走，页面里读到的却是空。清空是合法操作，
+ * 但要显式给空串；两者混在一起，就再也分不出"它想清空"与"它忘了写"。
+ */
+const missingValueError = (area: string): string =>
+    `缺少 value（${area} set 必须给要写入的值；要写成空串请显式传 ""）。`;
+
 /** 把任意值收敛成字符串。引擎内部对规则字段一律 String() 化 */
 const toRuleString = (value: unknown): string => (value == null ? '' : String(value));
 
@@ -110,28 +119,29 @@ const toEngineValue = (value: unknown): string => {
  *
  * 返回 string 表示**出错**（错误消息），返回数组表示成功 —— 用联合类型而不是抛
  * 异常，是因为这里的错误要原样回传给模型让它自己改，不该中断整轮对话。
- * 缺 id 的补一个：面板按 id 做 React key 与删除定位，没有 id 会删错行。
+ *
+ * 缺 id 的补一个：引擎不读它，面板拿它做 React key（`key={rule.id || index}`）。
+ * 模型给的规则常常没有 id，靠 index 兜底会让列表在插入 / 删除时错位复用节点。
  */
 const normalizeFieldRules = (raw: unknown, label: string): TamperRule[] | string => {
     if (!Array.isArray(raw)) return `${label} 必须是数组`;
-    const items = raw.map((item) => (item && typeof item === 'object' ? (item as Record<string, unknown>) : {}));
-    for (let i = 0; i < items.length; i += 1) {
-        const op = asString(items[i].op) || 'set';
+    const rules: TamperRule[] = [];
+    for (let i = 0; i < raw.length; i += 1) {
+        const r = (raw[i] && typeof raw[i] === 'object' ? raw[i] : {}) as Record<string, unknown>;
+        const op = asString(r.op) || 'set';
         if (op !== 'set' && op !== 'delete') return `${label}[${i}] 未知 op：${op}（可用 set / delete）`;
-        if (op === 'set' && !('value' in items[i])) {
+        if (op === 'set' && !('value' in r)) {
             return `${label}[${i}] 缺少 value（op 为 set 时必须给 value；删字段请用 op delete）`;
         }
-    }
-    return items.map((r) => {
-        const op = asString(r.op) || 'set';
-        return {
+        rules.push({
             id: typeof r.id === 'string' && r.id ? r.id : generateId(),
             enabled: r.enabled !== false,
             urlPattern: toRuleString(r.url_pattern),
             jsonPath: toRuleString(r.key),
             newValue: op === 'delete' ? 'undefined' : toEngineValue(r.value),
-        };
-    });
+        });
+    }
+    return rules;
 };
 
 const normalizeHeaderRules = (raw: unknown): HeaderRule[] | string => {
@@ -202,11 +212,16 @@ export const dispatchTool = async (
          *
          * 无 action：整个工具就做这一件事。空 code 直接报错 ——
          * 空跑一步的代价不是零，这一步的结果（哪怕是 null）会被后续每一步重发。
+         *
+         * 自己的错误走 `__agentError`，与脚本抛错同一个通道：js 的返回值是**页面
+         * 数据**，里面出现 `{error:"..."}` 是完全正常的业务字段（`{"error":"invalid
+         * token"}` 这种接口响应很常见）。两条通道混用的话，判据只能去猜"这个 error
+         * 是我们写的还是页面给的" —— 猜法（看键数）对单键业务错误必然猜错。
          */
         case 'js': {
             const code = asString(args.code);
             if (!code.trim()) {
-                return JSON.stringify({ error: '缺少 code（要运行的 JS，必须显式 return 一个可序列化值）' });
+                return JSON.stringify({ __agentError: '缺少 code（要运行的 JS，必须显式 return 一个可序列化值）' });
             }
             return ctx.exec(code);
         }
@@ -227,7 +242,7 @@ export const dispatchTool = async (
                 if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) {
                     url = raw;
                 } else if (raw.startsWith('/')) {
-                    url = new URL(raw, current?.url || '').href;
+                    url = new URL(raw, current.url).href;
                 } else {
                     url = `https://${raw}`;
                 }
@@ -247,7 +262,7 @@ export const dispatchTool = async (
             const engine = ctx.host.tamper;
 
             const action = asString(args.action) || 'get';
-            // 现读：规则可能刚被用户在面板里改过，而引擎的内存镜像不是权威
+            // 现读而不是缓存：用户在面板里改完规则，下一句 `tamper get` 就该看到新的
             const current = await engine.rules();
 
             if (action === 'get') {
@@ -280,8 +295,16 @@ export const dispatchTool = async (
             if (typeof nextRequest === 'string') return JSON.stringify({ error: nextRequest });
             if (typeof nextHeaders === 'string') return JSON.stringify({ error: nextHeaders });
 
-            // applyRules 而非 saveRules：模型改规则立刻生效，但不越过用户写进本地存储
-            engine.applyRules(nextIntercept, nextRequest, nextHeaders);
+            /*
+             * 改内存 + 注入当前页面，**不落盘**：模型改的规则立刻生效，但不越过
+             * 用户写进本地存储。
+             *
+             * 返回值是**注入**结果。false 表示规则进了内存，但这个页面没装上
+             * 钩子（没有可用标签页 / 受限页面）—— 必须说出来。导航会重建主世界，
+             * 注入失败时页面还在跑旧规则，而 applied:true 会让模型以为成功了，
+             * 它会一直不知道为什么"改了没反应"。
+             */
+            const applied = await engine.applyRules(nextIntercept, nextRequest, nextHeaders);
 
             /**
              * 报出会被引擎跳过的规则。引擎对没有目标键的规则直接丢弃（它永远匹配
@@ -294,8 +317,19 @@ export const dispatchTool = async (
                 headers: nextHeaders,
             });
 
+            const parts = [
+                applied
+                    ? '已对当前页面生效。'
+                    : '规则已记下，但这个页面没能装上钩子（没有可用标签页，或当前页面不允许注入），'
+                        + '页面里暂时不会生效。',
+            ];
+            if (dropped.length > 0) {
+                parts.push(`有 ${dropped.length} 条被引擎跳过（见 dropped），这些规则不会生效。`);
+            }
+            parts.push('未写入本地存储，用户点「应用更改」后才持久化。');
+
             return JSON.stringify({
-                applied: true,
+                applied,
                 counts: {
                     intercept: nextIntercept.length,
                     request: nextRequest.length,
@@ -303,9 +337,7 @@ export const dispatchTool = async (
                 },
                 // 只在真有时才带这个字段：空数组会让模型误以为"有被跳过的"
                 ...(dropped.length > 0 ? { dropped } : {}),
-                note: dropped.length > 0
-                    ? `已对当前页面生效，但有 ${dropped.length} 条被引擎跳过（见 dropped），这些规则不会生效。未写入本地存储，用户点「应用更改」后才持久化。`
-                    : '已对当前页面生效。未写入本地存储，用户点「应用更改」后才持久化。',
+                note: parts.join(''),
             });
         }
 
@@ -361,6 +393,7 @@ export const dispatchTool = async (
                 }
 
                 // 到这里只剩 set（未知 action 已在入口拦掉）
+                if (args.value === undefined) { return JSON.stringify({ error: missingValueError('cookie') }); }
                 // 已存在则取回原属性再改值 —— setCookie 是整条覆盖，漏掉 httpOnly /
                 // expirationDate 会让会话 cookie 降级甚至掉登录态。key 找不到时
                 // 直接报错：编一个 key 等于在猜改哪一条，比报错更难查。
@@ -409,6 +442,7 @@ export const dispatchTool = async (
             }
 
             // 到这里只剩 set（未知 action 已在入口拦掉）
+            if (args.value === undefined) { return JSON.stringify({ error: missingValueError(area) }); }
             // 值统一转成字符串：Storage 规范规定存进去的只能是字符串，
             // 传数字/对象进来会被浏览器隐式转成 "[object Object]"，不如自己转干净。
             const value = typeof args.value === 'string' ? args.value : JSON.stringify(args.value ?? '');
@@ -624,6 +658,3 @@ export const dispatchTool = async (
             return JSON.stringify({ error: `未知工具：${String(tool)}` });
     }
 };
-
-/** 重新导出，供引擎判断工具成败时复用同一套判据 */
-export { isJsErrorResult };

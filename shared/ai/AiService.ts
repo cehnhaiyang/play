@@ -17,26 +17,65 @@ import type {
 } from '../meta';
 import { getElectronAPI } from '../meta';
 import { fileToDataUrl, splitDataUrl } from '../core';
+import aiDefaults from './ai-defaults.json';
 
 /* -------------------------------------------------------------------------- */
 /*                                服务商预设                                   */
 /* -------------------------------------------------------------------------- */
 
-/** 默认配置：本地 tc2api。预设表引用它，所以声明在表前面 */
-export const DEFAULT_AI_CONFIG: AiConfig = {
-    baseUrl: 'http://127.0.0.1:3065/v1',
-    apiKey: 'sk-a2a-f345da9360a116c54801e02675eb0c37',
-    model: 'global:deepseek-v4.1-flash',
-    reasoningEffort: 'max',
+/**
+ * 档位清单与默认配置的**唯一来源**。
+ *
+ * 这两样东西有三处消费者，而其中一处是纯 CJS、import 不了这个 .ts：
+ *   · 界面按钮（下面导出的 `EFFORT_OPTIONS`）
+ *   · AiService 的归一化白名单（`REASONING_EFFORTS`）
+ *   · 主进程的写入校验与默认值（`app/main/settings.js`）
+ * 以前三处各抄一份、靠 `test/mainstatic.test.js` 逐项比对；手抄的代价已经实测
+ * 出现过：默认配置分叉成两份（地址、密钥、档位三个字段不一致），而"新装的用户
+ * 连哪个服务"取决于谁先读到它。JSON 三边都读得动，清单因此只有一份。
+ */
+const AI_DEFAULTS = aiDefaults as {
+    config: { baseUrl: string; apiKey: string; model: string; reasoningEffort?: string };
+    reasoningEfforts: { value: string; label: string; hint: string }[];
 };
 
-/** 界面档位：不思考 + 低 / 高 / 最大三档 */
+/**
+ * 合法档位：界面、AiService、主进程三处一致；档位可选，缺省即「不思考」。
+ * 由清单推导，不再手写 —— 手写就等于把"三处分叉"的坑重新埋回去。
+ */
+const REASONING_EFFORTS: ReasoningEffort[] = AI_DEFAULTS.reasoningEfforts
+    .map((tier) => tier.value as ReasoningEffort);
+
+/** 界面档位：不思考 + 低 / 高 / 最大三档。标签与取值的真值都在 ai-defaults.json */
 export const EFFORT_OPTIONS: AiEffortOption[] = [
     { label: '不思考', hint: '不下发思考参数，由服务商默认行为决定' },
-    { value: 'low', label: '低', hint: '最快、省 token' },
-    { value: 'high', label: '高', hint: '质量与速度平衡' },
-    { value: 'max', label: '最大', hint: '最强推理，最慢' },
+    ...AI_DEFAULTS.reasoningEfforts.map((tier) => ({
+        value: tier.value as ReasoningEffort,
+        label: tier.label,
+        hint: tier.hint,
+    })),
 ];
+
+/**
+ * 默认配置：本地 tc2api。预设表引用它，所以声明在表前面。
+ *
+ * 值放在 JSON 而不是写在这里：**主进程也要读这份默认值**，而它是纯 CJS
+ * （`app/main/settings.js`，不经过任何编译），import 不了 .ts。
+ */
+export const DEFAULT_AI_CONFIG: AiConfig = (() => {
+    const effort = AI_DEFAULTS.config.reasoningEffort as ReasoningEffort;
+    return {
+        baseUrl: AI_DEFAULTS.config.baseUrl,
+        apiKey: AI_DEFAULTS.config.apiKey,
+        model: AI_DEFAULTS.config.model,
+        /*
+         * 档位过一遍白名单：JSON 里的值没有类型约束，写错一个字母（`medium`）
+         * 会被原样下发给服务商 —— 那是服务端一次 4xx，而配置看上去完全正常。
+         * 不在白名单里即当作「不思考」，与 normalizeConfig 的缺省语义一致。
+         */
+        ...(REASONING_EFFORTS.includes(effort) ? { reasoningEffort: effort } : {}),
+    };
+})();
 
 /** 服务商预设表。都是本地服务，顺序即界面按钮顺序 */
 export const AI_PROVIDERS: AiProviderPreset[] = [
@@ -62,8 +101,6 @@ export const AI_PROVIDERS: AiProviderPreset[] = [
             { id: 'Qwen3.8-Flash', reasoning: false, }, { id: 'GLM-5.3-Flash' },
             // zcode
             { id: 'glm-5.3' }, { id: 'glm-5.3-flash' },
-            // 妙手
-            { id: 'LongCat-2.0', reasoning: false, }, { id: 'MiniMax-M3', reasoning: false, }, { id: 'deepseek-v4-flash' }, { id: 'glm-5.3-flashx' },
         ],
     },
 ];
@@ -108,9 +145,6 @@ export const getModelPresets = (baseUrl: string): AiModelPreset[] =>
 /* -------------------------------------------------------------------------- */
 /*                                配置读写                                    */
 /* -------------------------------------------------------------------------- */
-
-/** 合法档位：界面、AiService、主进程三处一致；档位可选，缺省即「不思考」 */
-const REASONING_EFFORTS: ReasoningEffort[] = ['low', 'high', 'max'];
 
 /** 把任意输入收敛成一份字段齐全且合法的配置 */
 const normalizeConfig = (input: Partial<AiConfig> | null | undefined): AiConfig => {

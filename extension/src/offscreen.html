@@ -8,10 +8,11 @@
 
 <body>
     <!--
-        这个文档没有可见界面。
+        这个文档没有可见界面。host.ts 只注册 chrome.runtime 监听器，不碰 DOM，
+        #root 没有任何代码读它（e2e 脚本也只用这个页面的地址，不用它的内容）。
 
         它存在的唯一理由是：模型调用需要一条不受 service worker 空闲回收影响、
-        也不受页面 CSP 约束的生命周期。脚本自己挂到 #root 上，不需要挂载点。
+        也不受页面 CSP 约束的生命周期。
     -->
     <div id="root"></div>
     <script type="module" src="./offscreen/host.ts"></script>

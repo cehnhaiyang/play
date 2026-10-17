@@ -15,7 +15,8 @@ import { requestApp } from './bridge-port';
  *
  * - `chrome.runtime.sendMessage(ai-chat)` 只拿一个**回执**（收到了），
  *   因为响应通道只有一个终值，装不下持续增量；
- * - 增量与终局由 offscreen **广播** `ai-delta` / `ai-done`，按 `requestId` 认领。
+ * - 增量与终局由 offscreen **广播** `ai-delta` / `ai-done`（`target: 'chat'`），
+ *   按 `requestId` 认领。
  *
  * 这带来一个必须处理的边界：广播是全局的，所以这里会收到不属于自己的事件。
  * 按登记表过滤，认不出的一律忽略 —— 否则并发两次调用会互相串词。
@@ -36,7 +37,7 @@ const waiting = new Map<string, {
  * 求值，所以"注册写在 async 里"会让事件在回收重启后没人听。
  */
 chrome.runtime.onMessage.addListener((message: { target?: string; kind?: string } & Partial<HostEvent>) => {
-    if (message?.target !== 'ball') return false;
+    if (message?.target !== 'chat') return false;
 
     if (message.kind === 'ai-delta') {
         const entry = waiting.get(String(message.requestId));

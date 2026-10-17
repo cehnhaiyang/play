@@ -1,11 +1,29 @@
 import type {
-    AgentCompaction,
     AgentMessage,
     AgentUsage,
     AiChatMessage,
 } from '../../../shared/meta';
 import { COMPACT_PREFIX } from './prompt';
 import { diagnoseReply } from './parse';
+
+/**
+ * 界面记录 → 模型消息序列，以及回灌给模型的那几段文案。
+ *
+ * ## 为什么不能直接把 `messages` 发给模型
+ *
+ * 1. **形状不同**。`AgentMessage` 是展示记录（带 reasoning / 脚本源码 / 时间戳），
+ *    模型侧只该拿到 role + content。推理尤其不能进 —— 那会把每一步的独白在后续
+ *    每一步重发一遍。
+ * 2. **时序不同**。工具结果在**本轮循环内**以 user 消息回灌（ReAct 形态），若从
+ *    `messages` 全量重建，它们会被当成"用户说的话"再发一遍。所以 `send()` 必须在
+ *    **追加本轮提问之前**读历史，本轮上下文交给循环自己维护。
+ *
+ * ## 措辞必须逐字共用
+ *
+ * 协议错误与工具结果各有专属文案函数，主循环当场回灌用的也是它们 —— 不在这里
+ * 各写一遍。同一段历史在"本轮循环里"与"下一轮重建时"长得不一样的话，模型对
+ * "这一步到底错在哪"的判断会随轮次漂移。
+ */
 
 /**
  * 摘要消息的前缀，**从这里再导出一次**。
@@ -17,26 +35,6 @@ import { diagnoseReply } from './parse';
 export { COMPACT_PREFIX };
 
 /**
- * 界面记录 → 模型消息序列。
- *
- * ## 两个不能直接复用 `messages` 的原因
- *
- * 1. **形状不同**。界面的 `AgentMessage` 是展示记录（带 reasoning / 脚本源码 /
- *    时间戳），模型侧只该拿到 role + content。推理尤其不能进 —— 那会把每一步的
- *    独白在后续每一步重发一遍。
- * 2. **时序不同**。工具结果在**本轮循环内**以 user 消息回灌（ReAct 形态），若从
- *    `messages` 全量重建，它们会被当成"用户说的话"再发一遍。所以调用方必须在
- *    **追加本轮提问之前**读历史，本轮上下文交给循环自己维护。
- *
- * ## 措辞必须逐字共用
- *
- * 两种非工具调用（协议错误 / 普通工具结果）各有专属文案函数。
- * 它们与主循环当场回灌的那一份**逐字共用**，不在这里各写一遍：同一段历史在
- * "本轮循环里"与"下一轮重建时"长得不一样的话，模型对"这一步到底错在哪"的判断
- * 会随轮次漂移。
- */
-
-/**
  * 按**轮次**切分对话记录。一轮的边界只有一个：新的用户提问。
  *
  * 上下文重建用它把同一轮的观察合并成一条消息。压缩**不用**它：压缩按消息条数与
@@ -46,7 +44,7 @@ export { COMPACT_PREFIX };
  * 首条消息就是工具消息时（上一轮结束时还有观察没被 flush，用户没再提问），它自成一轮而不是
  * 被丢掉：那一步确实发生过，模型应当知道。
  */
-export const splitRounds = (messages: AgentMessage[]): AgentMessage[][] => {
+const splitRounds = (messages: AgentMessage[]): AgentMessage[][] => {
     const rounds: AgentMessage[][] = [];
     let current: AgentMessage[] = [];
     for (const message of messages) {
@@ -322,18 +320,16 @@ export const sumUsage = (messages: AgentMessage[], contextTokens: number): Agent
  * 压缩生效时，分界线之前的那一段不再逐条回放，改为一条摘要消息 ——
  * 边界由 splitByCompaction 判定，这里不重复一套。
  *
- * **这里不做任何裁剪。** 历史上它按 256KB 从后往前丢掉旧轮次，后果有两个，
- * 都不可接受：静默丢历史（用户与模型都不知道少了什么），以及上下文永远到不了
- * 硬门槛（裁剪先于门槛生效，800k 那条线成了死代码）。现在超限的处置权交给用户。
+ * **这里不做任何裁剪。** 裁剪有两个后果都不可接受：静默丢历史（用户与模型都不知道
+ * 少了什么），以及裁剪先于硬门槛生效，让那条 CONTEXT_LIMIT_TOKENS 的线永远碰不到。
+ * 超限的处置权在用户手里 —— 宁可让他看到"上下文已满"，也不要他看到一份缺了几轮的记录。
  */
 export const buildTranscript = (messages: AgentMessage[]): AiChatMessage[] => {
     const { messages: live, summary } = splitByCompaction(messages);
 
-    // 观察值不二次截断：执行器回传时已按 RESULT_LIMIT_BYTES 截过一次，
-    // 这里再收窄会让"存下来的"与"模型看到的"不一致，复盘时无从解释。
+    // 观察值不截断：回传什么就存什么、就发给模型什么。截断只可能发生在源头，
+    // 而源头（execOnPage）也刻意不设上限 —— 那会让"用户展开看到的"与"模型读到的"
+    // 变成两份不同的东西，复盘时无从解释。
     const flat = splitRounds(live).flatMap(roundToMessages);
     return summary ? [{ role: 'user', content: `${COMPACT_PREFIX}\n${summary}` }, ...flat] : flat;
 };
-
-/** 压缩记录的类型别名，供引擎与界面共用同一份定义 */
-export type { AgentCompaction };

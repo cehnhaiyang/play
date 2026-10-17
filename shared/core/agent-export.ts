@@ -7,7 +7,7 @@
  * （见 `AgentExportOptions.includeReasoning`）。
  *
  * 段落顺序刻意与界面逐条对齐（助手气泡是「推理 → 正文」，工具卡片是
- * 「摘要 → 推理 → 脚本 → 返回值」）：两边各写一套顺序时，用户复盘
+ * 「目的 → 推理 → 脚本 → 返回值」）：两边各写一套顺序时，用户复盘
  * 「它当时为什么这么改」会看到两份不一样的记录，而无从判断该信哪个。
  *
  * ## 只有最后一步需要 DOM
@@ -87,12 +87,9 @@ const usageLine = (usage: AiUsage | undefined): string | null => {
 };
 
 /** 压缩记录的一行摘要说明 */
-const compactionLine = (compaction: AgentCompaction): string => {
-    const dropped = compaction.coveredMessages - compaction.summarizedMessages;
-    return `已压缩 ${compaction.coveredMessages} 条（${compaction.beforeTokens} → ${compaction.afterTokens} token）`
-        + `${dropped > 0 ? `，其中 ${dropped} 条超出摘要输入上限被直接丢弃` : ''}`
-        + `${compaction.overBudget ? '，**压缩后仍超预算**' : ''}`;
-};
+const compactionLine = (compaction: AgentCompaction): string =>
+    `已压缩 ${compaction.coveredMessages} 条（${compaction.beforeTokens} → ${compaction.afterTokens} token）`
+    + `${compaction.overBudget ? '，**压缩后仍超预算**' : ''}`;
 
 /** 一条消息的正文块，顺序与界面一致 */
 const sectionBody = (message: AgentMessage, includeReasoning: boolean): string[] => {
@@ -150,7 +147,7 @@ const resolveExportOptions = (options: AgentExportOptions): Required<AgentExport
  * 带时间戳同理：落盘路径由下载目录决定、同名自动编号，
  * 不留时间的话一串「Agent对话_xxx (1).md」谁也认不出哪份是新的。
  */
-export const buildAgentSessionFileName = (messages: AgentMessage[], options: AgentExportOptions = {}): string => {
+const buildAgentSessionFileName = (messages: AgentMessage[], options: AgentExportOptions = {}): string => {
     const { includeReasoning, at } = resolveExportOptions(options);
     const stamp = formatDateTime(at).replace(/[-: ]/g, '');
     const title = sessionTitle(messages).replace(UNSAFE_FILENAME_CHARS, '_');
@@ -158,7 +155,7 @@ export const buildAgentSessionFileName = (messages: AgentMessage[], options: Age
 };
 
 /** 会话 → Markdown 单文件（推理、脚本、返回值按选项收录） */
-export const buildAgentSessionMarkdown = (messages: AgentMessage[], options: AgentExportOptions = {}): string => {
+const buildAgentSessionMarkdown = (messages: AgentMessage[], options: AgentExportOptions = {}): string => {
     const { includeReasoning, at } = resolveExportOptions(options);
     const header = [
         `导出时间：${formatDateTime(at)}`,

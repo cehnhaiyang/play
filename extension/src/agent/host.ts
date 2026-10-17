@@ -5,26 +5,15 @@ import type { CookieItem, HeaderRule, TamperRule } from '../../../shared/meta';
  *
  * ## 为什么要有这一层
  *
- * 应用里那份 Agent 通过 `AgentDeps` 拿到三个东西：`getActiveWebview()`、
- * `onPageReady()`、`tamper`。它假定宿主是一个 Electron `<webview>` 元素 ——
- * 那个前提随自建浏览器外壳一起消失了。
+ * 引擎要的每一项能力 —— 在页面里跑脚本、导航、读写存储与 Cookie、装篡改钩子 ——
+ * 都需要 tabId 与 `chrome.*`，而"现在操作哪个页面"每秒都可能变。
+ * **把这些调用直接写进主循环，等于让"Agent 跑在什么环境里"渗进业务逻辑**，
+ * 而它本来只是一个接口问题。
  *
- * 直接改调用点是不行的：`useAgent.ts` 里有 11 处 `deps.`，散在工具派发、
- * 导航等待、自动执行三条路径上。**把它们逐个换成 chrome.* 调用，等于让
- * "Agent 跑在什么环境里"这件事渗进业务逻辑**，而它本来只该是一个接口问题。
- *
- * 所以把差异收进这一个接口：引擎不认识 webview、不认识 tabId、不认识
- * chrome.*，只认识"执行一段代码""导航到某个地址"。
- *
- * ## 与 AgentDeps 的对应关系
- *
- * | AgentDeps | 这里 | 为什么变了 |
- * |---|---|---|
- * | `getActiveWebview()` | `activeTab()` | 浏览器里没有"当前 webview"，只有 tabId + URL |
- * | `webview.executeJavaScript()` | `evaluate()` | 宿主是 chrome.debugger，见 page-host |
- * | `webview.loadURL()` | `navigate()` | 同上 |
- * | `onPageReady()` | —（已删） | 唯一的订阅者是"URL 命中自动跑脚本"，那套机制已移除；页面就绪等待收进宿主自己的 `navigate()` |
- * | `tamper` | `tamper` | 语义相同，实现换到插件侧 |
+ * 所以差异收进这一个接口：引擎不认识 tabId、不认识 chrome.*，只认识"执行一段
+ * 代码""导航到某个地址"。真实实现见 `offscreen/page-host.ts`（它由 service
+ * worker import，不在 offscreen 文档里求值 —— 那个文档没有 chrome.tabs）；
+ * 测试塞一个假宿主就能把整个主循环跑起来。
  *
  * ## 所有成员都是必填的
  *
@@ -40,25 +29,23 @@ export interface AgentTab {
     url: string;
 }
 
-/** 在页面里执行一段代码的结果。失败也返回字符串，由引擎决定怎么回灌 */
-export interface EvaluateResult {
-    /** 页面返回的值（已序列化成字符串）。出错时是错误文案 */
-    value: string;
-    /** 这次执行是不是失败（页面抛错、宿主不可用、超时） */
-    failed: boolean;
-}
-
 export interface AgentHost {
     /** 当前要操作的页面。没有可用页面时返回 null */
     activeTab: () => Promise<AgentTab | null>;
     /**
-     * 在指定页面的主世界执行代码。
+     * 在指定页面的主世界执行代码，返回**已序列化的观察值**。
+     *
+     * 失败也是一条观察值（`{"__agentError":"..."}`），不另开一个字段表示成败。
+     * 曾经返回 `{value, failed}`：`failed` 由宿主在四条失败路径上各写一次，
+     * 而读它的一处也没有 —— 引擎判成败走的是 isJsErrorResult（成败还要参与
+     * 历史重建，只有它能对"页面数据里自带 error 字段"与"脚本抛错"分岔）。
+     * 同一个事实存两处，迟早出现"宿主说失败、字符串说成功"。
      *
      * **不传超时**：`Runtime.evaluate` 没有 abort，页面死循环时那个 Promise 永远
      * 不 settle，所以超时必须由宿主自己 race 出来 —— 它是宿主能力的差异，
      * 不是调用方该关心的事。
      */
-    evaluate: (tabId: number, code: string) => Promise<EvaluateResult>;
+    evaluate: (tabId: number, code: string) => Promise<string>;
     /** 导航并等页面就绪。返回最终地址 */
     navigate: (tabId: number, url: string) => Promise<{ url: string; loaded: boolean }>;
 
@@ -77,13 +64,21 @@ export interface AgentHost {
      *
      * ## 为什么 `rules` 是异步的
      *
-     * 规则的唯一权威是 `chrome.storage.local`，而读它是异步的。曾经把它做成
-     * 同步 getter（读内存镜像）—— 于是**读到的可能是"还没加载完"的空数组**：
+     * 持久化的那份在 `chrome.storage.local`，而读它是异步的。曾经把它做成
+     * 同步 getter（直接读内存镜像）—— 于是**读到的可能是"还没加载完"的空数组**：
      * 用户明明存了规则，`tamper get` 回一个空列表，模型据此以为没有规则，
      * 转头又加了一遍。把它做成 `await` 之后，"读到未加载状态"在类型上就不存在了。
      *
-     * `applyRules` 是**只改内存不落盘**的那个（工具层语义：模型改的规则立刻
-     * 生效，但用户点「应用更改」才持久化）。落盘版是 `saveRules`。
+     * 注意镜像会**领先**存储：`applyRules` 之后规则已经对页面生效，但还没落盘。
+     * 所以 `tamper get` 读到的是"当前真正生效的"，不一定是"存下来的"。
+     *
+     * `applyRules` 是**改内存 + 注入当前页面、不落盘**的那个（工具层语义：模型改的
+     * 规则立刻对页面生效，但用户点「应用更改」才持久化）。这里刻意**没有**落盘版：
+     * 模型不该越过用户把浏览器行为永久改掉，而一个用不上的口只会让人以为有人在用。
+     *
+     * 返回**注入**结果，不是持久化结果：`false` 表示"规则已进内存，但这个页面
+     * 没能装上钩子"（没有可用标签页、受限页面）。工具层必须把它说出来 ——
+     * 导航会重建主世界，注入失败时页面还在跑旧规则，而"改了没反应"没有任何症状。
      */
     tamper: {
         rules: () => Promise<{
@@ -91,8 +86,6 @@ export interface AgentHost {
             requestRules: TamperRule[];
             headerRules: HeaderRule[];
         }>;
-        applyRules: (intercept: TamperRule[], request: TamperRule[], headers: HeaderRule[]) => void;
-        /** 改规则并落盘，同时立刻对指定标签页注入一次 */
-        saveRules: (intercept: TamperRule[], request: TamperRule[], headers: HeaderRule[], tabId?: number) => Promise<boolean>;
+        applyRules: (intercept: TamperRule[], request: TamperRule[], headers: HeaderRule[]) => Promise<boolean>;
     };
 }

@@ -7,14 +7,13 @@ import type {
     AgentUsage,
     AiChatMessage,
     AiUsage,
+    ReasoningEffort,
     SandboxRequest,
     SandboxResult,
 } from '../../../shared/meta';
 import { generateId } from '../../../shared/core';
 import type { AgentHost } from './host';
 import {
-    COMPACT_INPUT_BUDGET_BYTES,
-    COMPACT_MAX_TOKENS,
     COMPACT_PREFIX,
     COMPACT_RATIO_DEFAULT,
     COMPACT_RATIO_STORE_KEY,
@@ -28,7 +27,7 @@ import {
     SYSTEM_PROMPT,
     compactCoverCount,
     contextFullMessage,
-    contextTokensOf,
+    requestTokensOf,
 } from './prompt';
 import {
     PROTOCOL_ERROR_LABEL,
@@ -45,6 +44,7 @@ import {
     buildScriptSource,
     extractCalls,
     extractJsonObject,
+    isErrorResult,
     isJsErrorResult,
     locateScriptError,
     MAX_CALLS_PER_REPLY,
@@ -54,23 +54,24 @@ import { dispatchTool } from './tools';
 /**
  * Agent 引擎。
  *
- * ## 为什么不是 React hook
+ * ## 为什么是一个普通类
  *
- * 应用里那份是 `useAgent`，挂在渲染层。搬到这里之后有两个理由必须改掉这个形态：
+ * 两个理由都来自它自己会做的事：
  *
- * 1. **它自己的 navigate 工具会换页**。挂在 content script 里的话，换页会重跑
- *    整个脚本，主循环当场死掉 —— 而"跨页继续"正是 Agent 存在的意义之一。
+ * 1. **它的 navigate 工具会换页**。挂在页面里的话（内容脚本、注入的脚本），
+ *    换页会重跑整个脚本，主循环当场死掉 —— 而"跨页继续"正是 Agent 存在的
+ *    意义之一。
  * 2. **它必须在没有界面的情况下继续跑**。球收起、用户切到别的标签页，循环都该
  *    继续。挂在某个组件的生命周期上做不到这一点。
  *
- * 所以它是一个普通的状态机：构造时给宿主与持久化端口，之后靠 `subscribe` 把
- * 快照推给界面。测试里可以直接 new 出来跑，不需要 React、不需要 DOM。
+ * 所以它是一个普通的状态机：构造时给宿主、存储、模型、沙箱四个端口，之后靠
+ * `onSnapshot` 回调把快照推出去。测试里可以直接 new 出来跑，不需要 React、不需要 DOM。
  *
- * ## 与界面那份 `AgentState` 的关系
+ * ## 与 `AgentState` 的关系
  *
- * 快照形状保持不变（界面代码不用重学），但**多了一个 `revision`**：消息数组是
- * 每次变更新建的，跨进程消息只传增量会让界面难以判断"这次推的是新的还是重复的"，
- * 带一个单调递增的序号最省事。
+ * 快照形状就是 `AgentState`（悬浮球按它渲染），只**多了一个 `revision`**：
+ * 条数不变的改写（同一段历史被重算）在界面侧看不出变化，带一个单调递增的序号
+ * 最省事。
  */
 
 /** 引擎推给界面的快照 */
@@ -89,10 +90,10 @@ export interface EngineStorage {
  *
  * ## 为什么引擎不直接调 `chat()`
  *
- * 引擎跑在 service worker 里（它要 `chrome.tabs` / `chrome.cookies` /
- * `chrome.debugger` 这一整套 API），而**模型调用不能在那里发**：一次流式补全
- * 可能持续几分钟，SW 空闲约 30 秒就被回收，它是否会被"在途 fetch"续命没有
- * 可实测的依据。
+ * 引擎跑在 service worker 里（它挂的宿主 `page-host` 要 `chrome.tabs` /
+ * `chrome.cookies` / `chrome.debugger` 这一整套 API），而**模型调用不能在那里发**：
+ * 一次流式补全可能持续几分钟，SW 空闲约 30 秒就被回收，它是否会被"在途 fetch"
+ * 续命没有可实测的依据。
  *
  * 所以调用被推到 offscreen 文档，中间隔这一个端口。副作用是引擎**完全不知道
  * 网络的存在** —— 测试里塞一个假实现就能把整个主循环跑起来，不碰网络。
@@ -103,21 +104,21 @@ export interface ChatPort {
         messages: AiChatMessage[];
         temperature?: number;
         maxTokens?: number;
-        reasoningEffort?: 'low' | 'high' | 'max';
+        reasoningEffort?: ReasoningEffort;
         signal: AbortSignal;
         onDelta: (delta: { content?: string; reasoning?: string }) => void;
         onUsage: (usage: AiUsage) => void;
     }) => Promise<string>;
 }
 
-export interface EngineOptions {
+interface EngineOptions {
     host: AgentHost;
     storage: EngineStorage;
     chat: ChatPort;
     /**
      * 本机沙箱端口（`sandbox` 工具的实现）。
      *
-     * **不放 `AgentHost`**：那一层是"页面宿主"的抽象（见 host.ts 的对照表），
+     * **不放 `AgentHost`**：那一层是"页面宿主"的抽象（见 host.ts 的文件头），
      * 而沙箱既不认识 tab，也不碰 chrome.* —— 它唯一的通路是过桥到桌面应用。
      * 混进去会让 pageHost 背上与页面无关的能力。
      */
@@ -131,25 +132,35 @@ export interface EngineOptions {
     onSnapshot: (snapshot: EngineSnapshot) => void;
 }
 
-/** 默认的内存实现，给测试与"存储不可用"的降级路径用 */
-export const memoryStorage = (): EngineStorage => {
-    const map = new Map<string, unknown>();
-    return {
-        load: async <T,>(key: string, fallback: T): Promise<T> =>
-            (map.has(key) ? (map.get(key) as T) : fallback),
-        save: async (key, value) => {
-            map.set(key, value);
-        },
-    };
-};
-
 export class AgentEngine {
     private readonly options: EngineOptions;
 
     private messages: AgentMessage[] = [];
+
+    /**
+     * 上一轮的上下文重建。键是数组身份，理由见 contextOf
+     */
+    private contextCache: { messages: AgentMessage[]; transcript: AiChatMessage[]; tokens: number } | null = null;
+
+    /**
+     * 主循环在途时，**真正要发出去的那一份**的 token 数；空闲时是 null。
+     *
+     * 与 `contextCache.tokens` 不是一回事，两者在轮内会差出一大截：轮内的
+     * transcript 每步都追加模型那条完整 JSON 回复（含整份 args.code），而重建
+     * messages 时工具消息只回放 label + result，脚本源码一个字都不进。
+     *
+     * 写入只有两处：循环顶部（每次请求前重算）与 finally 里的复位。读者是轮内
+     * 闸门与快照 —— 门槛与界面上显示的那个数必须是同一个，否则用户会看到
+     * "上下文 1.7k"然后突然被告知已满。
+     *
+     * 复位放在 finally 里，而不是每个 break 之前：循环有八处出口（三处"已停止"、
+     * 上下文越线、调用中断、收尾、协议错误超限、空回复），漏一处就会让下一轮
+     * 一开始就拿着上一轮的旧数，判"已满"而拒绝一切提问。
+     */
+    private liveTokens: number | null = null;
+
     private status: AgentRunStatus = 'idle';
     private error = '';
-    private streaming: { content: string; reasoning: string } | null = null;
     private compacting = false;
     private compactRatio = COMPACT_RATIO_DEFAULT;
     private revision = 0;
@@ -157,6 +168,14 @@ export class AgentEngine {
     private busy = false;
     private stopped = false;
     private abort: AbortController | null = null;
+    /**
+     * 在途的压缩调用。
+     *
+     * 与 `abort` 分开：压缩不是"一轮"，它可以在空闲时发起，也不该被 send() 开头
+     * 的重置碰掉。但**停止必须够得着它** —— 原先这里传的是 `new AbortController().signal`，
+     * 一个没有人持有的控制器，于是 stop() 永远碰不到它。
+     */
+    private compactAbort: AbortController | null = null;
 
     /**
      * 脚本执行的串行队列。
@@ -167,6 +186,26 @@ export class AgentEngine {
      */
     private execChain: Promise<unknown> = Promise.resolve();
 
+    /**
+     * 动作表。**只建一次**，快照原样带上它。
+     *
+     * 它只是一组指向本实例方法的闭包，内容不随状态变 —— 以前在 `snapshot()` 里
+     * 现建：每推一版快照就扔掉 7 个函数对象，而调用方拿它只是为了**调一个动作**
+     * （service worker 的 `agent-action` 转发端点），根本不需要先算一版快照。
+     *
+     * 界面拿不到它（过桥时 JSON 会丢掉函数，见 agent-bridge），这是有意的：
+     * 球驱动引擎的唯一通路是 `agent-action` 端点，而不是拿到函数直接调。
+     */
+    readonly actions: AgentState['actions'] = {
+        send: (prompt) => this.send(prompt),
+        stop: () => this.stop(),
+        clear: () => this.clear(),
+        removeMessage: (id) => this.removeMessage(id),
+        rewindTo: (id) => this.rewindTo(id),
+        compact: () => this.compact(),
+        setCompactRatio: (ratio) => this.setCompactRatio(ratio),
+    };
+
     constructor(options: EngineOptions) {
         this.options = options;
     }
@@ -175,14 +214,19 @@ export class AgentEngine {
     /* 生命周期                                                                */
     /* ---------------------------------------------------------------------- */
 
-    /** 从存储恢复。构造之后必须先 await 它，否则第一次快照是空的 */
+    /**
+     * 从存储恢复。构造之后必须先 await 它，否则第一次快照是空的。
+     *
+     * 读进来的每条都要过 isStoredMessage：存储是外部输入，一条坏记录足以让
+     * buildTranscript 抛错，而那时界面连「清空」都点不了（见 isStoredMessage）。
+     */
     async hydrate(): Promise<void> {
         const [messages, ratio] = await Promise.all([
             this.options.storage.load<AgentMessage[]>(MESSAGES_STORE_KEY, []),
             this.options.storage.load<number>(COMPACT_RATIO_STORE_KEY, COMPACT_RATIO_DEFAULT),
         ]);
 
-        this.messages = Array.isArray(messages) ? messages : [];
+        this.messages = Array.isArray(messages) ? messages.filter(isStoredMessage) : [];
         this.compactRatio = (COMPACT_RATIOS as readonly number[]).includes(ratio)
             ? ratio
             : COMPACT_RATIO_DEFAULT;
@@ -190,29 +234,61 @@ export class AgentEngine {
         this.emit();
     }
 
+    /**
+     * 上下文重建与它的 token 数 —— **按 messages 的数组身份缓存**。
+     *
+     * 这两样每次推快照都要用（快照里带着上下文占用，`send()` 还要拿重建结果当
+     * 历史），而重建一次要把全部历史重新拼装一遍再逐字符估一遍 token：一份
+     * 1.5MB 的历史上是 7ms（实测），与一版快照同价。emit 在一步里要被叫好几遍
+     * —— 状态变化、追加消息、落盘 —— 其中只有历史**真的变了**的那一次需要重算。
+     *
+     * 缓存键取数组身份而不是内容：`messages` 每次变更都是整体替换（追加、删除、
+     * 回退、清空、压缩、hydrate），身份变了就等于内容变了，逐字段比对纯属浪费。
+     * 失效条件也只有这一个 —— 这个函数的输入就只有 messages。
+     */
+    private contextOf(messages: AgentMessage[]): { transcript: AiChatMessage[]; tokens: number } {
+        if (this.contextCache?.messages === messages) return this.contextCache;
+        const transcript = buildTranscript(messages);
+        this.contextCache = { messages, transcript, tokens: requestTokensOf(transcript) };
+        return this.contextCache;
+    }
+
+    /**
+     * 下一次请求会带上多少 token —— **门槛与界面共用这一个数**。
+     *
+     * 主循环在跑时是 `liveTokens`（本轮真正要发出去的那一份），空闲时退回按
+     * messages 重建的结果（下一轮要发的就是它）。两者在轮内会差一大截，理由见
+     * liveTokens 的注释。
+     */
+    private contextTokens(): number {
+        return this.liveTokens ?? this.contextOf(this.messages).tokens;
+    }
+
     snapshot(): EngineSnapshot {
-        const contextTokens = contextTokensOf(this.messages);
+        const contextTokens = this.contextTokens();
         const usage: AgentUsage = sumUsage(this.messages, contextTokens);
         return {
             messages: this.messages,
             status: this.status,
             error: this.error,
-            streaming: this.streaming,
-            canEdit: this.status === 'idle' && !this.compacting,
+            /*
+             * 判据是 busy 与 compacting，**不是 status**。
+             *
+             * send() 一开始就把 busy 置真，而 status 要等第一次请求发出才变
+             * thinking：按 status 判的话，"提问刚进对话"那一刻推出去的快照会说
+             * 可以编辑，可主循环已经拿着 messages 在跑了 —— 按钮显示为可用，
+             * 点下去却什么也不会发生（改写历史的闸门是 busy）。
+             *
+             * compacting 同样必须在里面：三个改历史的动作都拦它（见 locked），
+             * 这里少写一项，快照就会说"能改"而动作拒绝。
+             */
+            canEdit: !this.locked(),
             usage,
             contextFull: contextTokens >= CONTEXT_LIMIT_TOKENS,
             canCompact: compactCoverCount(splitByCompaction(this.messages).messages.length, this.compactRatio) >= 1,
             compacting: this.compacting,
             compactRatio: this.compactRatio,
-            actions: {
-                send: (prompt) => this.send(prompt),
-                stop: () => this.stop(),
-                clear: () => this.clear(),
-                removeMessage: (id) => this.removeMessage(id),
-                rewindTo: (id) => this.rewindTo(id),
-                compact: () => this.compact(),
-                setCompactRatio: (ratio) => this.setCompactRatio(ratio),
-            },
+            actions: this.actions,
             revision: this.revision,
         };
     }
@@ -220,6 +296,21 @@ export class AgentEngine {
     private emit(): void {
         this.revision += 1;
         this.options.onSnapshot(this.snapshot());
+    }
+
+    /**
+     * 现在能不能改历史。**快照与三个动作共用这一个判据。**
+     *
+     * 曾经写成两处：快照判 `!busy && !compacting`，动作只判 `busy`。于是压缩
+     * 在途时界面把按钮禁掉，而程序化路径（`agent-action` 桥端点）照样能删能清 ——
+     * 用户看到的是"灰着却能生效"，比两种行为都糟。
+     *
+     * 压缩为什么必须锁：摘要调用的 digest 与 upTo 是开始那一刻算的，这期间
+     * 历史一变，这次调用就白跑（锚点没了会自愈成丢弃，但白花一次调用）。
+     * 而压缩是用户自己点的、明知要等几十秒，锁住比"让他改完再重压"更省事。
+     */
+    private locked(): boolean {
+        return this.busy || this.compacting;
     }
 
     /* ---------------------------------------------------------------------- */
@@ -230,18 +321,34 @@ export class AgentEngine {
      * 落盘。**不 await**：它挂在每个 appendMessage 后面，而写 storage 是异步的，
      * await 会让主循环每追加一条消息就多等一个来回。
      *
-     * 失败只记日志不抛：配额满了的时候，用户最不该看到的是"对话进行到一半
-     * 整个卡住"。历史丢失是可惜，但比中断当前这轮轻。
+     * 失败静默吞掉（`catch` 里连日志都没有）：配额满了的时候，用户最不该看到的是
+     * "对话进行到一半整个卡住"。代价是写入失败时界面只表现为"历史不再保存" ——
+     * 这条取舍是有意的，不是遗漏；要让它可查得先有一个界面上的落盘失败提示。
      */
     private persist(): void {
         const messages = trimToBudget(this.messages, STORE_BUDGET_MESSAGES).slice(-MESSAGES_STORE_MAX);
         void this.options.storage.save(MESSAGES_STORE_KEY, messages).catch(() => undefined);
     }
 
-    private appendMessage(message: AgentMessage): void {
-        this.messages = [...this.messages, message];
+    /**
+     * 追加消息。**追加的写入口只有这一个**，`messages` 变了就要落盘、就要推快照
+     * 这条不变式在这里维护一次（其余五处是整体替换：清空 / 删除 / 回退 / 压缩 /
+     * hydrate，各自也都走 persist + emit）。
+     *
+     * 收数组而不是单条，是因为一批工具调用是**一步**：逐条追加会让界面按条数
+     * 连跳几下（而它们本就是同一步发生的事），落盘那头也变成 N 次写、每次都要
+     * 把整份历史重算一遍体积预算。
+     */
+    private appendMessages(messages: AgentMessage[]): void {
+        if (messages.length === 0) return;
+        this.messages = [...this.messages, ...messages];
         this.persist();
         this.emit();
+    }
+
+    /** 单条追加，就是上面那个的退化情形 */
+    private appendMessage(message: AgentMessage): void {
+        this.appendMessages([message]);
     }
 
     /* ---------------------------------------------------------------------- */
@@ -251,8 +358,10 @@ export class AgentEngine {
     /**
      * 在页面里执行一段代码，走串行队列。
      *
-     * 超时只是"不等了"，不是"掐断了"：后返回的结果会被丢弃，队列按 race 的
-     * settle 推进，不会因此卡住。
+     * **返回值原样回传，不设字节上限。** 页面返回可能上兆，而模型窗口能装多少
+     * 是用户配置里的事实 —— 在这儿定一个数等于替他假设，代价是把一条观察静默
+     * 换掉一半（模型拿到半截 JSON 还得重跑一次）。提示词里改为如实说明代价：
+     * 返回什么就会随后续每一步重发，所以该只要需要的字段。
      */
     private execOnPage(tabId: number, code: string): Promise<string> {
         const task = async (): Promise<string> => {
@@ -263,7 +372,7 @@ export class AgentEngine {
              */
             const result = await this.options.host.evaluate(tabId, buildScriptSource(code));
             // 宿主拿到的是**包装后**源码的行号，这里换算回模型自己写的行
-            return locateScriptError(result.value, code);
+            return locateScriptError(result, code);
         };
 
         const queued: Promise<string> = this.execChain.then(task, task);
@@ -281,7 +390,9 @@ export class AgentEngine {
          */
         const tab = await this.options.host.activeTab();
         if (!tab) {
-            return JSON.stringify({ error: '当前没有可用的页面（标签页是空白页或未就绪）' });
+            // 走 `__agentError`：这是**我们**的失败，与页面返回的 `{error:"..."}`
+            // 业务字段必须分开（判据见 isJsErrorResult）。
+            return JSON.stringify({ __agentError: '当前没有可用的页面（标签页是空白页或未就绪）' });
         }
         return this.execOnPage(tab.id, code);
     }
@@ -310,10 +421,11 @@ export class AgentEngine {
         /*
          * 硬门槛的第二道闸门。
          *
-         * 界面已禁用输入框，但不能只靠界面：快捷键、以及任何直接调 actions.send
-         * 的路径都会绕过 disabled。在唯一的入口处拦一次才是真正的保证。
+         * 界面已禁用输入框，但不能只靠界面：任何直接调 `actions.send` 的路径
+         * （`agent-action` 桥端点、测试）都会绕过 disabled。在唯一的入口处
+         * 拦一次才是真正的保证。
          */
-        if (contextTokensOf(this.messages) >= CONTEXT_LIMIT_TOKENS) {
+        if (this.contextTokens() >= CONTEXT_LIMIT_TOKENS) {
             this.error = contextFullMessage();
             this.emit();
             return;
@@ -328,7 +440,7 @@ export class AgentEngine {
          * 读在它前面就不必关心时序，也不会把本轮提问重复算进历史。
          * 不接历史的话模型每轮都从零开始，追问「它 / 刚才那个」全部落空。
          */
-        const history = buildTranscript(this.messages);
+        const history = this.contextOf(this.messages).transcript;
         this.appendMessage({ id: generateId(), role: 'user', content: text, at: Date.now() });
 
         // 模型侧记录。JSON 协议没有 tool role，观察结果以 user 消息回灌（ReAct 形态）
@@ -343,8 +455,20 @@ export class AgentEngine {
             for (;;) {
                 if (this.stopped) break;
 
-                // 轮内门槛：transcript 在本轮内单调增长，入口处那道闸门管不住它。
-                if (contextTokensOf(this.messages) >= CONTEXT_LIMIT_TOKENS) {
+                /*
+                 * 轮内门槛量的必须是**真正要发出去的那一份**，也就是 transcript，
+                 * 不是 `contextOf(messages)`。
+                 *
+                 * 两者不等价，而且差的正是最容易撑爆的那一块：transcript 里每步
+                 * 都追加模型那条**完整 JSON 回复**（含整份 args.code），而重建
+                 * messages 时工具消息只回放 label + result，脚本源码一个字都不进
+                 * （见 roundToMessages）。按重建量的话，"模型每步写一个大脚本"
+                 * 这条路永远量不到 —— 实测连发 3 步 90 万字符的脚本，实际发出
+                 * 180 万 token，引擎自报仍是 1707，error 为空。超限最后由服务商
+                 * 报，而那时三条 90 万字符的 script 已经落盘了。
+                 */
+                this.liveTokens = requestTokensOf(transcript);
+                if (this.liveTokens >= CONTEXT_LIMIT_TOKENS) {
                     this.appendMessage({
                         id: generateId(),
                         role: 'assistant',
@@ -357,11 +481,10 @@ export class AgentEngine {
                 }
 
                 this.status = 'thinking';
-                this.streaming = { content: '', reasoning: '' };
                 this.emit();
 
-                // 增量累积在局部变量里，再整块 setState：
-                // 每个 token 都推一次快照会让长回复卡住渲染。
+                // 增量累积在局部变量里，等这一步结束再整块落进消息列表：
+                // 每个分片都推一次快照会让长回复卡住渲染。实时滚字由 onDelta 负责。
                 let liveContent = '';
                 let liveReasoning = '';
                 const controller = new AbortController();
@@ -421,7 +544,6 @@ export class AgentEngine {
                     break;
                 } finally {
                     this.abort = null;
-                    this.streaming = null;
                     this.emit();
                 }
 
@@ -458,9 +580,17 @@ export class AgentEngine {
                         break;
                     }
 
-                    // 走到这里：既没有 final 也没有可执行的调用。有正文内容才算协议错误 ——
-                    // 空回复回灌一句"你没输出"它也变不出内容来，那是浪费一次调用。
-                    if (reply.trim()) {
+                    /*
+                     * 走到这里：既没有 final 也没有可执行的调用。有正文内容才算协议错误 ——
+                     * 空回复回灌一句"你没输出"它也变不出内容来，那是浪费一次调用。
+                     *
+                     * 两条文案喂**同一段** trim 过的正文：它们各自调 diagnoseReply，
+                     * 而诊断里的字符偏移是相对传进去的那段文本算的 —— 一处给原文、
+                     * 一处给 trim 过的，同一次错误就会对用户说"第 120 个字符"、
+                     * 对模型说"第 118 个"。
+                     */
+                    const badReply = reply.trim();
+                    if (badReply) {
                         protocolErrors += 1;
 
                         /*
@@ -474,16 +604,16 @@ export class AgentEngine {
                         this.appendMessage({
                             id: generateId(),
                             role: 'tool',
-                            content: protocolErrorSummary(reply),
+                            content: protocolErrorSummary(badReply),
                             reasoning: keepReasoning(liveReasoning),
                             label: PROTOCOL_ERROR_LABEL,
                             ok: false,
-                            result: reply.trim(),
+                            result: badReply,
                             ...(stepUsage ? { usage: stepUsage } : {}),
                             at: Date.now(),
                         });
 
-                        transcript.push({ role: 'user', content: protocolErrorObservation(reply.trim()) });
+                        transcript.push({ role: 'user', content: protocolErrorObservation(badReply) });
 
                         if (protocolErrors >= MAX_PROTOCOL_ERRORS) {
                             this.appendMessage({
@@ -552,7 +682,12 @@ export class AgentEngine {
                             sandbox: this.options.sandbox,
                         });
                     } catch (e) {
-                        result = JSON.stringify({ error: `工具 ${tool} 执行时抛出异常：${errorText(e)}` });
+                        // 异常也走 `__agentError`：js 这条路径上它是唯一被认作失败的
+                        // 通道（页面返回的 {error} 是业务数据，见 isJsErrorResult）
+                        const text = `工具 ${tool} 执行时抛出异常：${errorText(e)}`;
+                        result = tool === 'js'
+                            ? JSON.stringify({ __agentError: text })
+                            : JSON.stringify({ error: text });
                     }
 
                     // 日志只写工具名会分不清模型做的是哪件事
@@ -562,10 +697,11 @@ export class AgentEngine {
 
                     /**
                      * 失败判据按工具分岔，因为"什么算失败"对两者本就不同：
-                     * js 的页面数据里 `{error:"..."}` 是**探测到的业务字段**，
-                     * 只有 `__agentError` 与 dispatchTool 自己的参数错误才算失败。
+                     * js 的返回值是**页面数据**，`{error:"..."}` 是探测到的业务字段，
+                     * 只有 `__agentError` 算失败；其余工具的错误对象只可能由我们自己
+                     * 构造，`{error}` 就是失败。
                      */
-                    const failed = tool === 'js' ? isJsErrorResult(result) : isErrorResultLocal(result);
+                    const failed = tool === 'js' ? isJsErrorResult(result) : isErrorResult(result);
                     return { tool, label, result, ok: !failed };
                 }));
 
@@ -577,8 +713,18 @@ export class AgentEngine {
                 // 判据是"模型能不能正确表达调用意图"，它已经表达对了。
                 protocolErrors = 0;
 
+                /*
+                 * 一批的展示记录**一次性**写进列表（见 appendMessages）：
+                 * 这一步是一次请求换回来的一批结果，界面该看到的是列表一次到位，
+                 * 而不是按条数闪几下。
+                 *
+                 * `at` 也只取一个时刻：同一步的几条记录带上毫秒级的先后差，
+                 * 读历史的人会以为它们是两件事。
+                 */
+                const at = Date.now();
+                const created: AgentMessage[] = [];
                 for (const [index, item] of batch.entries()) {
-                    this.appendMessage({
+                    created.push({
                         id: generateId(),
                         role: 'tool',
                         /*
@@ -604,9 +750,10 @@ export class AgentEngine {
                         // 一批里的几条共用同一次调用的用量，只记在**第一条**上 —— 每条都挂一份，
                         // 累计用量（sumUsage）会把一次调用算成 N 次，而那个数用户是拿来核账单的。
                         ...(stepUsage && index === 0 ? { usage: stepUsage } : {}),
-                        at: Date.now(),
+                        at,
                     });
                 }
+                this.appendMessages(created);
 
                 transcript.push({
                     role: 'user',
@@ -624,7 +771,8 @@ export class AgentEngine {
         } finally {
             this.busy = false;
             this.status = 'idle';
-            this.streaming = null;
+            // 本轮结束了，下一次请求要发的是重建出来的历史 —— 交还给 contextTokens
+            this.liveTokens = null;
             this.emit();
         }
     }
@@ -634,15 +782,18 @@ export class AgentEngine {
         // 真掐断在途请求。只置标志位的话，得等整包回来循环才会发现已停止 ——
         // 流式下这一点尤其明显：界面还在滚字，用户以为停止没生效。
         this.abort?.abort();
+        // 压缩是独立于主循环的一次调用（空闲时也能发起），同一个按钮也该能掐断它。
+        // 不掐的话用户点了停止只能干等 —— 摘要调用可能跑几十秒。
+        this.compactAbort?.abort();
     }
 
     private clear(): void {
         // 运行中禁止清空：主循环正拿着 messages 追加，此刻清空后它的下一次
         // appendMessage 会把旧轮次"接"回来，界面表现为"清了但历史又冒出来"。
-        if (this.busy) return;
+        // 压缩中同理（见 locked）：那次摘要调用的锚点会指向已经不存在的历史。
+        if (this.locked()) return;
         this.messages = [];
         this.error = '';
-        this.streaming = null;
         this.persist();
         this.emit();
     }
@@ -654,7 +805,7 @@ export class AgentEngine {
      * 密钥的工具返回值；回退是从这条起往后全砍掉。
      */
     private removeMessage(id: string): void {
-        if (this.busy) return;
+        if (this.locked()) return;
         this.messages = this.messages.filter((m) => m.id !== id);
         this.persist();
         this.emit();
@@ -668,7 +819,7 @@ export class AgentEngine {
      * 还有用的探测结果，按整轮切会把有用的部分一起扔掉。
      */
     private rewindTo(id: string): string {
-        if (this.busy) return '';
+        if (this.locked()) return '';
         const at = this.messages.findIndex((m) => m.id === id);
         if (at < 0) return '';
 
@@ -693,10 +844,13 @@ export class AgentEngine {
     /* ---------------------------------------------------------------------- */
 
     /**
-     * 把分界线之后的旧消息按当前档位压成结构化摘要。
+     * 把现存消息（分界线之后的那一段）按当前档位压成结构化摘要。
      *
      * **只由用户手动触发，没有自动压缩。** 压缩是不可逆的历史改写加上一次模型
      * 调用，这两样代价都不该由程序替他决定。
+     *
+     * 已有摘要时它作为前缀一起进摘要器：这次覆盖的是"上一次摘要 + 新的一段"，
+     * 所以压第二次不会把第一次的结论丢掉。
      */
     private async compact(): Promise<AgentCompaction | null> {
         if (this.busy || this.compacting) return null;
@@ -707,34 +861,48 @@ export class AgentEngine {
         if (coverCount < 1) return null;
 
         const covered = live.slice(0, coverCount);
-        // 空消息不该出现在给用户看的消息数里，所以先滤掉再算条数
-        const summarizable = covered
-            .filter((m) => m.role !== 'tool' || m.result || m.content)
-            .map((m) => [m]);
-        const budgeted = trimToBudget(summarizable, COMPACT_INPUT_BUDGET_BYTES);
-        const summarizedMessages = budgeted.length;
+        /*
+         * 空消息不进摘要器，也不计入给用户看的条数。
+         *
+         * 覆盖区**整段**进摘要器，不按体积裁剪：裁掉的那部分既没进摘要、又落在
+         * 分界线之前 —— 等于压缩时静默丢掉一段历史。摘要器装不下就让它失败：
+         * catch 里如实报出，历史一个字不动。
+         */
+        const summarizable = covered.filter((m) => m.role !== 'tool' || m.result || m.content);
 
         /*
          * 刻意不叫 transcript：那是 send() 里"发给模型的本轮上下文"的名字，
          * 而这份是**送进摘要器的历史原文**，两者的生命周期与用途都不同。
          */
         const digest = priorSummary
-            ? [{ role: 'user' as const, content: `${COMPACT_PREFIX}\n${priorSummary}` }, ...budgeted.flat().map(toChatMessage)]
-            : budgeted.flat().map(toChatMessage);
+            ? [{ role: 'user' as const, content: `${COMPACT_PREFIX}\n${priorSummary}` }, ...summarizable.map(toChatMessage)]
+            : summarizable.map(toChatMessage);
 
         this.compacting = true;
         this.error = '';
         this.emit();
+        const controller = new AbortController();
+        this.compactAbort = controller;
         try {
             let usage: AiUsage | undefined;
             const body = await this.options.chat.chat({
                 system: COMPACT_SYSTEM_PROMPT,
                 messages: digest,
-                maxTokens: COMPACT_MAX_TOKENS,
+                /*
+                 * **不指定输出上限**。摘要不会比它的输入更长，而输入能不能装下
+                 * 由模型窗口决定；在这里定一个数只会在摘要写长时把它从中间切断，
+                 * 而切断后的摘要是要**替换掉那段历史**的 —— 又是静默丢内容。
+                 * 与主循环那条路径一样，输出上限交给服务商/模型的默认值。
+                 */
                 // 摘要要的是忠实，不是创意：温度压到最低能显著减少"顺手补全"的编造
                 temperature: 0,
-                reasoningEffort: 'low',
-                signal: new AbortController().signal,
+                /*
+                 * **不指定档位**：与主循环那条路径一致，档位由配置决定
+                 * （AiService.resolveReasoningEffort 的 `requested || config.reasoningEffort`）。
+                 * 在这里写死一个档位，等于让插件维护第三份模型配置，
+                 * 用户在设置里选了什么都盖不过它。
+                 */
+                signal: controller.signal,
                 onDelta: () => undefined,
                 onUsage: (u) => {
                     usage = u;
@@ -749,15 +917,13 @@ export class AgentEngine {
                 return null;
             }
 
-            const beforeTokens = contextTokensOf(list);
+            const beforeTokens = this.contextOf(list).tokens;
             const upTo = covered[covered.length - 1].id;
             const next: AgentCompaction = {
                 summary,
                 upTo,
                 at: Date.now(),
-                // 用 summarizable 而不是 covered：空消息不该出现在给用户看的消息数里
                 coveredMessages: summarizable.length,
-                summarizedMessages,
                 beforeTokens,
                 afterTokens: 0,
                 overBudget: false,
@@ -778,20 +944,35 @@ export class AgentEngine {
                 ...(usage ? { usage } : {}),
                 at: next.at,
             };
-            const after = insertAfterId(list, upTo, marker);
-            next.afterTokens = contextTokensOf(after);
-            next.overBudget = next.afterTokens >= CONTEXT_LIMIT_TOKENS;
 
             /*
-             * 落盘前再确认一次锚点还在：压缩是异步的，这期间历史可能被改过。
-             * 锚点没了还硬插，insertAfterId 会兜底追加到末尾，摘要就会名义上覆盖
-             * **全部**历史 —— 保留的那些会被静默吞掉。丢弃这次摘要是安全方向。
+             * 锚点必然还在 —— 这是**不变式检查**，不是绕开某条路径的兜底。
+             *
+             * 压缩期间 `locked()` 挡住了 send / clear / removeMessage / rewindTo，
+             * appendMessages 只被 send 调用，hydrate 只在构造后跑一次 —— 所以从
+             * upTo 算出来到这里，那条消息一定还在。真丢了只可能是锁被绕过。
+             *
+             * 那时必须丢弃摘要：insertAfterId 找不到锚点会兜底追加到末尾，摘要
+             * 就名义上覆盖**全部**历史 —— 保留区被静默吞掉，比白花一次调用严重
+             * 得多。
              */
             if (!this.messages.some((m) => m.id === upTo)) {
                 this.error = '压缩期间对话发生了变化，本次摘要已丢弃，历史未改动。';
                 this.emit();
                 return null;
             }
+
+            /*
+             * 拼接用**现在**的 messages，不用开始那一刻拍的 list。
+             *
+             * 这一条同样是给"锁被绕过"留的：list 里那条若已被删掉，拿它拼出来的
+             * after 赋值回去等于把用户刚删的东西静默复活。用当前列表拼接，最少
+             * 保住"已经删掉的不会回来"这个性质。
+             */
+            const after = insertAfterId(this.messages, upTo, marker);
+            next.afterTokens = this.contextOf(after).tokens;
+            next.overBudget = next.afterTokens >= CONTEXT_LIMIT_TOKENS;
+
             this.messages = after;
             this.persist();
             // 成功后清掉报错：压缩在途时 send() 的拒绝会写一条"请稍候"，
@@ -801,32 +982,64 @@ export class AgentEngine {
 
             return next;
         } catch (e) {
-            this.error = `压缩失败：${errorText(e)}`;
+            /*
+             * 用户点了停止掐断的这次压缩**不报错**：与主循环那条路径同一个判据
+             * （见 send 里 `aborted` 那段）—— 中止是用户的动作，不是失败，
+             * 而历史一个字没动。报一条"压缩失败：已停止"只会让人以为出了事。
+             *
+             * 失败必须说清"历史未改动"。最可能的失败原因是这次输入超过了所配
+             * 模型的窗口 —— 那正是用户要自己判断的事（换档位 / 分几次压 /
+             * 清空），而报错原文里带着服务端给出的实测数字。这里**不替他做
+             * 任何裁剪**：少喂一点换"这次成功"，代价是静默丢掉一段历史。
+             */
+            const aborted = e instanceof Error && e.name === 'AbortError';
+            if (!aborted) this.error = `压缩失败：${errorText(e)}（历史未改动）`;
             this.emit();
             return null;
         } finally {
+            this.compactAbort = null;
             this.compacting = false;
             this.emit();
         }
     }
 }
 
+/**
+ * 存储里的一条记录是不是能用的 `AgentMessage`。
+ *
+ * 存储是**外部输入**（上一版插件写的、用户手改的、同 origin 的别的代码写的），
+ * 而 `hydrate` 曾经只做 `Array.isArray` 就整份收下。一条 `null` 的代价实测过：
+ * `buildTranscript` 抛 "Cannot read properties of null"，于是 `hydrate` 抛、
+ * `snapshot()` 也抛 —— 界面拿不到快照，消息列表为空，「清空」按钮恒为 disabled，
+ * 用户连自救的入口都没有，只能手动清 `chrome.storage.local`。
+ *
+ * 判据只查**重建上下文真正会碰到的字段**，不追求完整校验：
+ * 少一个可选字段（reasoning / script / usage）不影响任何读法，多校验一遍只是
+ * 给未来的字段加一道忘改就失效的门。
+ *
+ * 代价是**静默**：被滤掉的记录不会告诉用户，历史看起来就像少了几条。要让它
+ * 可见得先在界面上有一个"有 N 条记录读不出来"的位置，而不是在这里改成抛错
+ * （那会让整份历史都打不开）。
+ */
+const isStoredMessage = (value: unknown): value is AgentMessage => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const m = value as Record<string, unknown>;
+    if (typeof m.id !== 'string' || !m.id) return false;
+    if (m.role !== 'user' && m.role !== 'assistant' && m.role !== 'tool') return false;
+    // content 会被 estimateTokens 逐字符遍历，不是字符串就当场炸
+    if (typeof m.content !== 'string') return false;
+    if (typeof m.at !== 'number') return false;
+    // 压缩记录的形状由 splitByCompaction 直接读 summary
+    if (m.compaction !== undefined) {
+        const c = m.compaction as Record<string, unknown> | null;
+        if (!c || typeof c !== 'object' || typeof c.summary !== 'string') return false;
+    }
+    return true;
+};
+
 /* -------------------------------------------------------------------------- */
 /* 局部工具                                                                    */
 /* -------------------------------------------------------------------------- */
-
-/** 非 js 工具的成败判据：错误只能由我们构造，任何非空 error 都是失败 */
-const isErrorResultLocal = (result: string): boolean => {
-    if (!result.startsWith('{')) return false;
-    try {
-        const parsed = JSON.parse(result) as Record<string, unknown>;
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
-        if (typeof parsed.__agentError === 'string' && parsed.__agentError.length > 0) return true;
-        return typeof parsed.error === 'string' && parsed.error.length > 0;
-    } catch {
-        return false;
-    }
-};
 
 /**
  * 一条展示记录 → 发给摘要器的消息。

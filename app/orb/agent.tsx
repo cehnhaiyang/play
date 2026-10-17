@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { AgentMessage, AgentUsage, CookieItem, HeaderRule, TamperRule } from '../../shared/meta';
 import {
@@ -23,6 +24,7 @@ import {
     TerminalIcon,
 } from './orb-kit';
 import type { AgentAction, EngineSnapshot } from './orb-kit';
+import { sameAgentRow } from './agent-row';
 
 /**
  * Agent 球窗口：入口 + 对话面板 + 四个数据页签。
@@ -106,6 +108,48 @@ const AGENT_TABS: { id: AgentTab; label: string }[] = [
     { id: 'jwt', label: 'JWT' },
 ];
 
+/**
+ * 一个页签面板。
+ *
+ * 四个数据页共用同一个壳（同一段 className），而 `role` / `id` / `aria-labelledby`
+ * 必须与页签条那边的按钮**一一对应**：抄四遍就有三遍可能抄错，而抄错不会有任何
+ * 报错 —— 屏幕阅读器只是报不出面板的名字。
+ */
+const TabPanel = ({ id, children }: { id: AgentTab; children: ReactNode }) => (
+    <div
+        id={`agent-tabpanel-${id}`}
+        role="tabpanel"
+        aria-labelledby={`agent-tab-${id}`}
+        className="min-h-0 flex-1 overflow-y-auto p-2.5"
+    >
+        {children}
+    </div>
+);
+
+/**
+ * 面板顶部的一条横幅。
+ *
+ * 「没连上插件 / 桥的报错 / 引擎的报错 / 上下文已满」四种情况都要出现，样式各写
+ * 一遍的话，改一次边框色就得改四处 —— 而漏掉的那一处不会有任何提示。
+ */
+const Banner = ({ tone, children }: { tone: 'amber' | 'rose'; children: ReactNode }) => (
+    <div className={`shrink-0 border-b px-3 py-1.5 text-[10px] leading-relaxed ${tone === 'rose'
+        ? 'border-rose-500/30 bg-rose-500/10 text-rose-300'
+        : 'border-amber-500/30 bg-amber-500/10 text-amber-300'}`}
+    >
+        {children}
+    </div>
+);
+
+/**
+ * 一次规则保存的结果。
+ *
+ * 是对象而不是布尔：连着两次都保存成功时，布尔的取值没有变化，React 会因为
+ * `Object.is` 相等**直接跳过这次更新**，`SaveHint` 的 effect 也就不再重跑 ——
+ * 症状是"已保存"只在第一次保存后出现过，之后存多少次都不再提示。
+ */
+type RulesSave = { ok: boolean };
+
 const AgentOrb = () => {
     const [snapshot, setSnapshot] = useState<EngineSnapshot | null>(null);
     const [streaming, setStreaming] = useState<{ content: string; reasoning: string } | null>(null);
@@ -120,8 +164,19 @@ const AgentOrb = () => {
         requestRules: [],
         headerRules: [],
     });
-    /** 规则的保存状态。`null` = 还没改过，不显示任何提示 */
-    const [rulesSaved, setRulesSaved] = useState<boolean | null>(null);
+    /** 规则的最后一次保存结果。`null` = 还没改过，不显示任何提示 */
+    const [rulesSave, setRulesSave] = useState<RulesSave | null>(null);
+    /**
+     * 草稿版本号，以及**已被插件确认**的版本号。
+     *
+     * 切到数据页签会重新拉一次规则（模型可能刚用 `tamper` 工具改过），而那次读取
+     * 可能是在本地改动**之前**发出的，也可能是在改动还没送出去的那 400ms 里发出去的。
+     * 拿它写回本地就抹掉了用户刚敲的字；更糟的是下一次保存会以这份旧值当底整个发出去，
+     * 等于把上一次编辑撤回。所以判据是"本地还有没有未确认的改动"：只有没有时，
+     * 插件那份才是权威。
+     */
+    const rulesRev = useRef(0);
+    const rulesAckRev = useRef(0);
     /** 当前活动标签页地址。存储页与 JWT 页按它取数据 */
     const [activePage, setActivePage] = useState('');
 
@@ -133,6 +188,22 @@ const AgentOrb = () => {
      */
     const pendingDelta = useRef({ content: '', reasoning: '' });
     const deltaRaf = useRef<number | null>(null);
+
+    /*
+     * 丢掉"还没提交到画面的那一小段"。
+     *
+     * 只清 streaming 不够：增量先攒在 ref 里、下一个动画帧才提交，而一个回答的
+     * 最后几个 token 与定稿快照几乎同时到达 —— 快照收起气泡之后，那一帧又把
+     * 缓存的尾巴提交回来，列表下面于是多出一段**刚刚定稿过的文字**，
+     * 一直挂到下一步的快照才消失。
+     */
+    const dropPendingDelta = useCallback(() => {
+        if (deltaRaf.current !== null) {
+            window.cancelAnimationFrame(deltaRaf.current);
+            deltaRaf.current = null;
+        }
+        pendingDelta.current = { content: '', reasoning: '' };
+    }, []);
 
     /*
      * 自动滚到底。
@@ -178,7 +249,9 @@ const AgentOrb = () => {
     useEffect(() => onBridgeEvent((event, payload) => {
         if (event === 'agent-snapshot') {
             setSnapshot(payload as EngineSnapshot);
-            // 快照是权威：它已经含了定稿内容，本地累积的增量必须丢掉
+            // 快照是权威：它已经含了定稿内容，本地累积的增量必须丢掉 ——
+            // 包括还没提交到画面的那一帧，见 dropPendingDelta
+            dropPendingDelta();
             setStreaming(null);
             return;
         }
@@ -205,12 +278,10 @@ const AgentOrb = () => {
                 }));
             });
         }
-    }), []);
+    }), [dropPendingDelta]);
 
     /* 卸载时把在途的那一帧取消，否则窗口关掉之后还会 setState 一次 */
-    useEffect(() => () => {
-        if (deltaRaf.current !== null) window.cancelAnimationFrame(deltaRaf.current);
-    }, []);
+    useEffect(() => () => dropPendingDelta(), [dropPendingDelta]);
 
     /**
      * 拉一次篡改规则与当前页面。
@@ -229,7 +300,8 @@ const AgentOrb = () => {
                     bridge<{ rules: { interceptRules: TamperRule[]; requestRules: TamperRule[]; headerRules: HeaderRule[] } }>('tamper-get'),
                     bridge<{ pageUrl: string }>('sniffer-active-page'),
                 ]);
-                setRules(res.rules);
+                // 本地还有未确认的改动：这份读取已经过期，见 rulesRev
+                if (rulesRev.current === rulesAckRev.current) setRules(res.rules);
                 setActivePage(page.pageUrl || '');
                 setError('');
             } catch (e) {
@@ -255,18 +327,27 @@ const AgentOrb = () => {
     const saveRules = useCallback((next: typeof rules) => {
         setRules(next);
         setError('');
+        rulesRev.current += 1;
         if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
         saveTimer.current = window.setTimeout(() => {
             saveTimer.current = null;
+            const sentRev = rulesRev.current;
             void (async () => {
                 try {
                     const result = await bridge<{ saved: boolean }>('tamper-set', next);
-                    setRulesSaved(result.saved);
+                    setRulesSave({ ok: result.saved });
                     setConnected(true);
                 } catch (e) {
                     setError(e instanceof Error ? e.message : String(e));
-                    setRulesSaved(false);
+                    setRulesSave({ ok: false });
                     setConnected(await bridgeConnected());
+                } finally {
+                    /*
+                     * 这一次尝试有结论了（成功或失败都算），本地草稿不再需要保护。
+                     * 用 max 而不是直接赋值：两个保存可以同时在途，先发的后回时
+                     * 不能把版本号退回去。
+                     */
+                    rulesAckRev.current = Math.max(rulesAckRev.current, sentRev);
                 }
             })();
         }, 400);
@@ -297,7 +378,14 @@ const AgentOrb = () => {
         // 立刻清空输入框：引擎会推回快照，那条消息随后出现在列表里。
         // 不清空的话用户会以为没发出去而再点一次。
         setInput('');
-        void act({ type: 'send', prompt: text });
+        void act({ type: 'send', prompt: text }).then((result) => {
+            /*
+             * 桥这一层失败（preload 缺失、host 没起来）时 act 返回 null，而那次
+             * 发送根本没到引擎 —— 输入框却已经被清空了，用户刚写的一段话就没了。
+             * 只在输入框还空着的时候放回去，免得压掉他重新打的字。
+             */
+            if (result === null) setInput((current) => (current ? current : text));
+        });
     }, [act, input]);
 
     /**
@@ -305,8 +393,15 @@ const AgentOrb = () => {
      *
      * 把该条的提问填回输入框 —— 用户的意图几乎总是"改一下再问一遍"，
      * 而回退已经把那条连同之后的全部删了。不填回去等于让他凭记忆重打。
+     *
+     * **输入框里有东西时先问一句**：覆盖是静默的，而那段字没有任何副本
+     * （回退只把提问还回来，不会还他正在写的内容）。问在调用之前 ——
+     * 拒绝了就连消息都不删，而不是删完再吞掉他的草稿。
      */
     const rewind = useCallback(async (id: string) => {
+        if (input.trim() && !window.confirm('回退会把这条提问填回输入框，覆盖你正在写的内容。继续？')) {
+            return;
+        }
         setError('');
         try {
             const prompt = await rewindTo(id);
@@ -316,12 +411,30 @@ const AgentOrb = () => {
             setError(e instanceof Error ? e.message : String(e));
             setConnected(await bridgeConnected());
         }
-    }, []);
+    }, [input]);
 
     const state = snapshot;
-    const busy = state?.status !== 'idle';
+
+    /*
+     * 还没收到快照时状态是**未知**，不是"正在跑"。
+     *
+     * `state?.status !== 'idle'` 在 state 为 null 时左边是 undefined，于是未知被
+     * 判成忙 —— 冷启动那一刻输入框禁用、标题写着"正在执行…"、还多出一个停止按钮；
+     * 而快照取不回来时（桥连上了、引擎没应答）这一串会永久停在那个状态，
+     * 用户连字都打不进去。
+     */
+    const busy = state ? state.status !== 'idle' : false;
     const messages = state?.messages || [];
-    const canEdit = state?.canEdit !== false && !busy;
+
+    /*
+     * 能不能改历史**只问引擎**（快照里的 canEdit），不在这里重算一遍。
+     *
+     * 这里原先是 `state?.canEdit !== false && !busy`：同一个判据存了两份，而本地
+     * 那份用的正是 `status !== 'idle'` —— 引擎在 send() 一开始就置 busy，status
+     * 却要等第一次请求发出才变，于是那段窗口里界面亮着「回退 / 删除」，
+     * 点下去引擎拒绝，什么也不会发生。
+     */
+    const canEdit = state?.canEdit === true;
 
     /*
      * 贴底滚动。
@@ -329,27 +442,61 @@ const AgentOrb = () => {
      * 用 useLayoutEffect 而不是 useEffect：要在**浏览器绘制之前**把位置定好，
      * 否则会看到内容先出现在下面、再跳一下。
      *
-     * 依赖是消息条数与流式文本长度 —— 这两样是"内容变高了"的全部来源。
+     * 依赖里必须有快照版本号：条数不变的改写（同一段历史被重算成更高的内容）
+     * 不会触发这个 effect，那时"贴底"就悄悄失效了。多设一次 scrollTop 没有代价。
      */
     useLayoutEffect(() => {
         const box = scrollRef.current;
         if (!box || !stickToBottom.current) return;
         box.scrollTop = box.scrollHeight;
-    }, [messages.length, streaming?.content, streaming?.reasoning]);
+    }, [messages.length, state?.revision, streaming?.content, streaming?.reasoning]);
 
     /*
      * 页签条。
      *
      * 放在**标题栏下面**而不是塞进标题栏：标题栏只有 440px 宽，五个页签加上
      * 停止/清空/收起会全部挤成单字。独立一行还能给每个页签足够的点击面积。
+     *
+     * 用**完整**的 tablist 语义（role / aria-selected / 方向键 / roving tabindex）：
+     * 只加一半比不加更误导 —— 屏幕阅读器会宣布"页签"，而键盘用户按方向键
+     * 什么也不会发生。
      */
+    const onTabKeyDown = useCallback((event: React.KeyboardEvent<HTMLButtonElement>) => {
+        const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
+        const jump = event.key === 'Home' ? 0 : event.key === 'End' ? AGENT_TABS.length - 1 : -1;
+        if (step === 0 && jump < 0) return;
+        event.preventDefault();
+        const next = jump >= 0
+            ? AGENT_TABS[jump]
+            : AGENT_TABS[(AGENT_TABS.findIndex((entry) => entry.id === tab) + step + AGENT_TABS.length) % AGENT_TABS.length];
+        setTab(next.id);
+        // 焦点必须跟着走：roving tabindex 下，焦点留在旧页签上会让方向键失效
+        document.getElementById(`agent-tab-${next.id}`)?.focus();
+    }, [tab]);
+
     const tabBar = (
-        <nav className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-white/[0.07] px-1.5 py-1 scrollbar-hide">
+        <nav
+            role="tablist"
+            aria-label="Agent 面板"
+            className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-white/[0.07] px-1.5 py-1 scrollbar-hide"
+        >
             {AGENT_TABS.map((entry) => (
                 <button
                     key={entry.id}
+                    id={`agent-tab-${entry.id}`}
                     type="button"
+                    role="tab"
+                    aria-selected={tab === entry.id}
+                    /*
+                     * 只给当前页签挂 aria-controls：面板是**按需挂载**的（存储/JWT
+                     * 打开时才去读页面），此刻只有它那个 panel 真的在 DOM 里 ——
+                     * 指向一个不存在的 id 是无效引用。
+                     */
+                    aria-controls={tab === entry.id ? `agent-tabpanel-${entry.id}` : undefined}
+                    // roving tabindex：Tab 进出页签条只停一次，页签之间用方向键走
+                    tabIndex={tab === entry.id ? 0 : -1}
                     onClick={() => setTab(entry.id)}
+                    onKeyDown={onTabKeyDown}
                     className={`shrink-0 rounded-lg px-2.5 py-1.5 text-[11px] font-medium transition ${tab === entry.id
                         ? 'bg-fuchsia-500/20 text-fuchsia-200'
                         : 'text-slate-500 hover:bg-white/[0.06] hover:text-slate-300'
@@ -363,7 +510,12 @@ const AgentOrb = () => {
 
     const toolbar = (
         <>
-            {busy && (
+            {/*
+              压缩也能停。判据是"有没有在途的模型调用"，不是"主循环在不在跑"：
+              压缩是空闲时发起的一次独立调用，而它可能跑几十秒（摘要调用）。
+              只按 busy 判的话，压缩中那个按钮不会出现 —— 而它恰恰最需要出现。
+            */}
+            {(busy || state?.compacting) && (
                 <button
                     type="button"
                     onClick={() => void act({ type: 'stop' })}
@@ -388,46 +540,36 @@ const AgentOrb = () => {
             hint={
                 !connected
                     ? '插件未连接'
-                    : state?.compacting
-                        ? '正在压缩上下文…'
-                        : busy
-                            ? '正在执行…'
-                            : `上下文 ${formatTokens(state?.usage)}`
+                    : !state
+                        ? '正在读取…'
+                        : state.compacting
+                            ? '正在压缩上下文…'
+                            : busy
+                                ? '正在执行…'
+                                : `上下文 ${formatTokens(state.usage)}`
             }
             accent="from-fuchsia-500 via-purple-500 to-indigo-500"
             icon={<TerminalIcon className="h-6 w-6" />}
             toolbar={toolbar}
         >
             {!connected && (
-                <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-[10px] leading-relaxed text-amber-300">
+                <Banner tone="amber">
                     没有连上浏览器插件。请确认：① 浏览器已打开；② 扩展已加载；
                     ③ 已跑过 <code className="font-mono">npm run host:install</code> 并重启过浏览器。
-                </div>
+                </Banner>
             )}
 
             {/* 两条横幅说同一件事，只留一条。理由见 SniffOrb 同名那段 */}
-            {error && connected && (
-                <div className="shrink-0 border-b border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-[10px] leading-relaxed text-rose-300">
-                    {error}
-                </div>
-            )}
+            {error && connected && <Banner tone="rose">{error}</Banner>}
 
-            {state?.error && !error && (
-                <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-[10px] leading-relaxed text-amber-300">
-                    {state.error}
-                </div>
-            )}
+            {state?.error && !error && <Banner tone="amber">{state.error}</Banner>}
 
-            {state?.contextFull && (
-                <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-[10px] leading-relaxed text-amber-300">
-                    上下文已满，必须先压缩或清空才能继续。
-                </div>
-            )}
+            {state?.contextFull && <Banner tone="amber">上下文已满，必须先压缩或清空才能继续。</Banner>}
 
             {tabBar}
 
             {tab === 'rules' && (
-                <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
+                <TabPanel id="rules">
                     {/*
                       规则不落盘就等于没配 —— 而"引擎会跳过这条"是最容易让人
                       白费功夫的一处：面板显示启用中，页面里什么都没发生。
@@ -439,36 +581,45 @@ const AgentOrb = () => {
                         </div>
                     )}
                     <RulesTab rules={rules} onChange={saveRules} />
-                    <SaveHint saved={rulesSaved} />
-                </div>
+                    <SaveHint save={rulesSave} />
+                </TabPanel>
             )}
 
             {tab === 'headers' && (
-                <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
+                <TabPanel id="headers">
                     {droppedHint(rules) && (
                         <div className="mb-2 rounded-lg border border-amber-400/20 bg-amber-500/[0.08] px-2 py-1.5 text-[9px] leading-relaxed text-amber-200">
                             {droppedHint(rules)}
                         </div>
                     )}
                     <HeadersTab headers={rules.headerRules} onChange={(headerRules) => saveRules({ ...rules, headerRules })} />
-                    <SaveHint saved={rulesSaved} />
-                </div>
+                    <SaveHint save={rulesSave} />
+                </TabPanel>
             )}
 
             {tab === 'storage' && (
-                <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
+                <TabPanel id="storage">
                     <StorageTab pageUrl={activePage} />
-                </div>
+                </TabPanel>
             )}
 
             {tab === 'jwt' && (
-                <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
+                <TabPanel id="jwt">
                     <JwtTab pageUrl={activePage} />
-                </div>
+                </TabPanel>
             )}
 
             {tab === 'chat' && (
-                <>
+                /*
+                 * 对话页不是单纯的滚动容器（它是"滚动区 + 输入区"两段），所以不用
+                 * TabPanel，但 role/id 必须与页签条那边对得上。
+                 */
+                <div
+                    id="agent-tabpanel-chat"
+                    role="tabpanel"
+                    aria-labelledby="agent-tab-chat"
+                    className="flex min-h-0 flex-1 flex-col"
+                >
                     <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
                         {messages.length === 0 && !streaming ? (
                             <p className="p-4 text-[11px] leading-relaxed text-slate-500">
@@ -582,7 +733,7 @@ const AgentOrb = () => {
                             </button>
                         </div>
                     </div>
-                </>
+                </div>
             )}
         </OrbShell>
     );
@@ -597,25 +748,25 @@ const AgentOrb = () => {
  *
  * 只有**失败**才值得一直显示。成功那条 2 秒后自己消失 —— 常驻的"已保存"
  * 会让人以为它说的是"当前草稿已保存"，而实际上它说的是"上一次保存成功了"。
- * `saved === null`（还没改过）时什么都不画。
+ * `save === null`（还没改过）时什么都不画。
  */
-const SaveHint = ({ saved }: { saved: boolean | null }) => {
-    const [visible, setVisible] = useState(saved !== null);
+const SaveHint = ({ save }: { save: RulesSave | null }) => {
+    const [visible, setVisible] = useState(save !== null);
 
     useEffect(() => {
-        if (saved === null) return;
+        if (save === null) return;
         setVisible(true);
         // 失败不自动消失：用户必须看到它，否则会以为规则已经存住了
-        if (!saved) return;
+        if (!save.ok) return;
         const timer = window.setTimeout(() => setVisible(false), 2000);
         return () => window.clearTimeout(timer);
-    }, [saved]);
+    }, [save]);
 
-    if (saved === null || !visible) return null;
+    if (save === null || !visible) return null;
 
     return (
-        <p className={`mt-2 text-[9px] ${saved ? 'text-emerald-400/70' : 'text-rose-300'}`}>
-            {saved
+        <p className={`mt-2 text-[9px] ${save.ok ? 'text-emerald-400/70' : 'text-rose-300'}`}>
+            {save.ok
                 ? '已保存并对当前页面生效。'
                 : '规则已对当前页面生效，但写入本地存储失败（配额可能已满）—— 重启浏览器后会丢失。'}
         </p>
@@ -625,6 +776,13 @@ const SaveHint = ({ saved }: { saved: boolean | null }) => {
 /* ========================================================================== */
 /* 消息行                                                                      */
 /* ========================================================================== */
+
+/** 正文语气。三次判断不值得 useMemo：每次快照都是新的消息对象，依赖永远在变 */
+const bodyTone = (message: AgentMessage): string => {
+    if (message.role === 'user') return 'text-slate-200';
+    if (message.role === 'assistant') return 'text-slate-300';
+    return message.ok === false ? 'text-rose-300' : 'text-emerald-300';
+};
 
 const MessageRow = ({
     message,
@@ -639,13 +797,29 @@ const MessageRow = ({
 }) => {
     const [expanded, setExpanded] = useState(false);
 
-    const tone = useMemo(() => {
-        if (message.role === 'user') return 'text-slate-200';
-        if (message.role === 'assistant') return 'text-slate-300';
-        return message.ok === false ? 'text-rose-300' : 'text-emerald-300';
-    }, [message]);
+    const tone = bodyTone(message);
 
-    const badge = message.label || message.tool || message.role;
+    /*
+     * 界面自己补的提示（notice）与模型说的话必须分开标。
+     *
+     * 它长得和助手气泡一模一样，内容却是"（模型本轮没有返回内容，已停止。）"
+     * 这种界面文案 —— 不标出来，用户会以为那是模型自己说的。导出件里两边
+     * 早就分开了（见 agent-export.ts 的 sectionHeading）。
+     */
+    const badge = message.notice ? '界面提示' : message.label || message.tool || message.role;
+
+    /*
+     * 工具消息分两层画。
+     *
+     * `content` 是这一步的**说明**：模型发起的调用写的是它自己的 intent
+     * （一批里的几条共用同一个，带 1/N 序号），协议错误那条写的是诊断结论。
+     * `result` 才是工具真正返回的东西。
+     *
+     * 从前只画 result，于是对话流里只剩一串返回值 —— "它为什么去读这个字段"
+     * 没有任何答案，而那正是复盘时要问的第一句。
+     */
+    const intent = message.role === 'tool' ? message.content.trim() : '';
+    const body = message.result || (message.role === 'tool' ? '' : message.content);
 
     /*
      * 折叠长结果。
@@ -653,7 +827,6 @@ const MessageRow = ({
      * 工具返回值动辄几 KB，全展开会把对话冲得没法看。但**不能截断** ——
      * 用户排查时正要看那段原文，所以给一个展开开关而不是切片。
      */
-    const body = message.result || message.content;
     const long = body.length > 400;
     const shown = expanded || !long ? body : `${body.slice(0, 400)}…`;
 
@@ -663,14 +836,31 @@ const MessageRow = ({
      * 工具返回值动辄几 KB，用鼠标在里面选中再拖过面板边界很容易失手，而
      * "把这段报错/数据发给别人"恰恰是它最常见的用途。`navigator.clipboard`
      * 在 file:// 下需要安全上下文，拿不到时静默失败即可 —— 文字本身还能手动选。
+     *
+     * 复制的是**说明 + 结果**：只复制 result 会把"它当时想干什么"那一行丢掉，
+     * 而收件人正是靠那句话判断这次调用对不对。
      */
     const [copied, setCopied] = useState(false);
+    /*
+     * "已复制"那 1.2s 的定时器要能取消：行可能在它到点之前就被卸载（下一版快照
+     * 把它换掉），那时这次 setState 打在已卸载的组件上 —— React 18 之后不警告、
+     * 也无副作用，但没必要留一个在途的定时器。
+     */
+    const copyTimer = useRef<number | null>(null);
+    useEffect(() => () => {
+        if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+    }, []);
+    const copyText = [intent, body].filter(Boolean).join('\n\n');
     const onCopy = useCallback(() => {
-        void navigator.clipboard?.writeText(body).then(() => {
+        void navigator.clipboard?.writeText(copyText).then(() => {
             setCopied(true);
-            window.setTimeout(() => setCopied(false), 1200);
+            if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+            copyTimer.current = window.setTimeout(() => {
+                copyTimer.current = null;
+                setCopied(false);
+            }, 1200);
         }).catch(() => undefined);
-    }, [body]);
+    }, [copyText]);
 
     /* 压缩分界线单独画：它既不是模型说的话也不是用户的提问 */
     if (message.compaction) {
@@ -700,7 +890,7 @@ const MessageRow = ({
     return (
         <li className="group px-3 py-2">
             <div className="mb-0.5 flex items-center gap-1.5">
-                <span className="rounded bg-white/10 px-1 py-0.5 font-mono text-[9px] text-slate-400">
+                <span className={`rounded px-1 py-0.5 font-mono text-[9px] ${message.notice ? 'bg-amber-500/20 text-amber-300' : 'bg-white/10 text-slate-400'}`}>
                     {badge}
                 </span>
                 {message.usage && (
@@ -760,19 +950,31 @@ const MessageRow = ({
                 )}
             </div>
 
+            {/*
+              工具卡片按「目的 → 推理 → 脚本 → 返回值」排，与导出件逐条对齐
+              （见 shared/core/agent-export.ts 的 sectionBody）—— 两边各排一套顺序时，
+              用户复盘"它当时为什么这么改"会看到两份不一样的记录，而无从判断该信哪个。
+              助手气泡没有 intent 与脚本，于是自然退化成「推理 → 正文」。
+            */}
+            {intent && (
+                <p className="mb-1 text-[10px] leading-relaxed text-slate-400">{intent}</p>
+            )}
+
             {message.reasoning && expanded && (
                 <pre className="mb-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded bg-white/[0.03] p-1.5 font-mono text-[10px] leading-relaxed text-slate-500">
                     {message.reasoning}
                 </pre>
             )}
 
-            <pre className={`whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed ${tone}`}>
-                {shown}
-            </pre>
-
             {message.script && expanded && (
-                <pre className="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded bg-white/[0.03] p-1.5 font-mono text-[10px] leading-relaxed text-slate-500">
+                <pre className="mb-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded bg-white/[0.03] p-1.5 font-mono text-[10px] leading-relaxed text-slate-500">
                     {message.script}
+                </pre>
+            )}
+
+            {shown && (
+                <pre className={`whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed ${tone}`}>
+                    {shown}
                 </pre>
             )}
         </li>
@@ -780,15 +982,16 @@ const MessageRow = ({
 };
 
 /*
- * memo 的比较函数不能省。
+ * memo 的比较函数不能省，而且**不能比对象身份**。
  *
- * 父组件每次渲染都会新建 onRemove / onRewind 两个箭头函数，默认的浅比较
- * 因此永远判"变了"，memo 形同虚设 —— 而消息列表是长列表，每步都要整体重渲。
- * 两个回调的**语义**完全由 message.id 决定，所以比 message 本身与 canEdit
- * 就够了：这两个没变，回调做的事就没变。
+ * 父组件每次渲染都会新建 onRemove / onRewind 两个箭头函数，默认的浅比较因此
+ * 永远判"变了"；而快照过一趟 IPC 会被结构化克隆，`prev.message === next.message`
+ * 同样永远为假 —— 每来一份快照，整个列表都要重渲一遍（见 agent-row.ts）。
+ * 两个回调的语义完全由 message.id 决定，所以比 canEdit 与画出来的那几个字段
+ * 就够了：它们没变，这一行画出来就没变。
  */
 const MessageRowMemo = memo(MessageRow, (prev, next) => (
-    prev.message === next.message && prev.canEdit === next.canEdit
+    prev.canEdit === next.canEdit && sameAgentRow(prev.message, next.message)
 ));
 
 /**
@@ -1164,17 +1367,27 @@ const StorageTab = ({ pageUrl }: { pageUrl: string }) => {
     useEffect(() => { void refresh(); }, [refresh, pageUrl]);
 
     const write = useCallback(async (area: 'local' | 'session', key: string, value: string | null) => {
+        setError('');
+        let failure = '';
         try {
             const result = await bridge<{ ok: boolean }>('page-storage-write', { area, key, value });
-            setError(result.ok ? '' : '写入失败：页面可能已禁用存储或配额已满。');
+            if (!result.ok) failure = '写入失败：页面可能已禁用存储或配额已满。';
         } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            failure = e instanceof Error ? e.message : String(e);
         }
+        /*
+         * 失败要在**重读之后**才报：重读成功会清掉 error，而它正是这次写入的结果。
+         * 顺序反过来（先报错、再重读）会让"写入失败"一闪而过，界面最后什么都不剩，
+         * 用户以为改成功了。
+         */
         await refresh();
+        if (failure) setError(failure);
     }, [refresh]);
 
     /** 改一条 cookie。走插件侧整条覆盖语义，只换 value，见上面那段 */
     const writeCookie = useCallback(async (cookie: CookieItem, value: string) => {
+        setError('');
+        let failure = '';
         try {
             const result = await bridge<{ ok: boolean }>('page-storage-write', {
                 area: 'cookie',
@@ -1184,11 +1397,13 @@ const StorageTab = ({ pageUrl }: { pageUrl: string }) => {
                 cookie,
                 value,
             });
-            setError(result.ok ? '' : '写入 Cookie 失败：当前没有可用的页面地址。');
+            if (!result.ok) failure = '写入 Cookie 失败：当前没有可用的页面地址。';
         } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            failure = e instanceof Error ? e.message : String(e);
         }
+        // 理由同 write：重读会清掉 error，失败要落在它后面
         await refresh();
+        if (failure) setError(failure);
     }, [refresh]);
 
     const cookieData = useMemo(() => buildCookieData(data.cookies), [data.cookies]);
