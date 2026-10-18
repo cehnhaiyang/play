@@ -11,8 +11,6 @@ import type {
     AiStreamDelta,
     AiTestResult,
     AiUsage,
-    FoundLink,
-    MediaType,
     ReasoningEffort,
 } from '../meta';
 import { getElectronAPI } from '../meta';
@@ -929,81 +927,4 @@ export const generateSpeech = async (text: string): Promise<string | null> => {
     const clean = (text || '').trim();
     if (!clean) return null;
     return chatForSpeech({ messages: [{ role: 'user', content: clean }] });
-};
-
-/* -------------------------------------------------------------------------- */
-/*                              页面资源提取                                   */
-/* -------------------------------------------------------------------------- */
-
-const EXTRACT_PROMPT = `Extract direct media URLs from the text below.
-Target: Stream (m3u8, mpd), Video (mp4, mkv, etc), Audio (mp3, etc), Images (high res).
-Return strictly JSON array: [{"url": "...", "title": "...", "type": "video"}]
-Do not wrap in markdown code blocks. Just the raw JSON.
-Text: `;
-
-/** 嗅探结果里认可的媒体类型；其余（含 other）一律丢弃 */
-const KNOWN_TYPES: MediaType[] = ['stream', 'video', 'audio', 'image', 'document'];
-
-/**
- * 用 AI 从页面源码里提取直链资源。
- *
- * 输出不可信：只收录 http(s) 直链、已知媒体类型，ext 去掉 query/hash，上限 50 条。
- * 返回的字段与 FoundLink 对齐，由调用方补齐 pageUrl/referer 等上下文。
- *
- * `config` 与 chat 的同名参数同义：插件宿主必须传，见 AiChatOptions.config。
- */
-export const extractMediaLinks = async (
-    pageContent: string,
-    fallbackTitle: string,
-    config: AiConfig
-): Promise<Array<Pick<FoundLink, 'url' | 'title' | 'type' | 'ext'>>> => {
-    const preview = pageContent.length > 80000 ? pageContent.slice(0, 80000) : pageContent;
-
-    const text = await chat({
-        config,
-        messages: [{ role: 'user', content: `${EXTRACT_PROMPT}${preview}` }],
-        reasoningEffort: 'low',
-    });
-
-    const parsed = extractJsonArray(text);
-    if (!parsed) return [];
-
-    return parsed
-        /**
-         * 只收 http(s) 直链。
-         *
-         * `blob:` 必须排除：它是**页面自己那块内存**的句柄，不是可下载的远端资源 ——
-         * 跨不过进程边界（主进程下载器按这个地址请求只会失败），
-         * 播放器也不在页面那个源上，同样读不到。收进来等于给用户两个点了没反应的按钮。
-         *
-         * 提示词里写的就是 "direct media URLs"，页内脚本与网络层也都各自拦了 blob:，
-         * 唯独这里放行过 —— 三条路径口径必须一致，否则同一个页面走哪条路结论不同。
-         */
-        .filter((item): item is { url: string; title?: string; type?: string } => {
-            const url = (item as { url?: unknown })?.url;
-            return typeof url === 'string' && /^https?:\/\//i.test(url.trim());
-        })
-        .slice(0, 50)
-        .map((item) => {
-            const cleanUrl = item.url.trim();
-            const pathPart = cleanUrl.split('?')[0].split('#')[0];
-            const lastSegment = pathPart.split('/').pop() || '';
-            /**
-             * 后缀只从**最后一个路径段**里取，且必须是真正的扩展名。
-             *
-             * 早先直接 `pathPart.split('.').pop()`：路径里没有点时（`/stream/abc123`）
-             * 取到的是整个末段，`^[a-z0-9]{2,5}$` 一过就把它当成后缀 ——
-             * 于是落盘文件叫 `标题.abc123`，系统认不出类型。
-             * 现在要求末段里**确实有点**，且点不在首位（`.hidden` 不是后缀）。
-             */
-            const dot = lastSegment.lastIndexOf('.');
-            const extGuess = dot > 0 ? lastSegment.slice(dot + 1).toLowerCase() : '';
-            const ext = /^[a-z0-9]{2,5}$/.test(extGuess) ? extGuess : 'unknown';
-            const type: MediaType = KNOWN_TYPES.includes(item.type as MediaType)
-                ? (item.type as MediaType)
-                : 'other';
-            return { url: cleanUrl, title: item.title || fallbackTitle || 'AI 识别资源', type, ext };
-        })
-        // 'other' 非媒体候选项直接丢弃，避免污染嗅探列表
-        .filter((item) => item.type !== 'other');
 };

@@ -441,7 +441,7 @@ const BrowseSection: React.FC<BrowseSectionProps> = ({
     tasks,
     downloadActions,
 }) => {
-    const { channels, channelId, searchKeyword, items, hasMore, isLoading, isLoadingMore, error } =
+    const { sites, siteId, channels, channelId, searchKeyword, items, hasMore, isLoading, isLoadingMore, error } =
         galleryState;
     const [query, setQuery] = useState(searchKeyword || '');
 
@@ -468,6 +468,34 @@ const BrowseSection: React.FC<BrowseSectionProps> = ({
     }, [galleryActions, hasMore, isLoading, isLoadingMore]);
 
     const isAcgmhoPage = useMemo(() => isAcgUrl(currentUrl), [currentUrl]);
+
+    // 站点切换条：按主进程 registry 渲染，加站点不需要改这里。
+    // 只有一个站点时整条不显示（避免多一行没有选择意义的按钮）。
+    const siteBar = sites.length > 1 ? (
+        <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto pb-1 scrollbar-thin">
+            <span className="shrink-0 pr-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
+                站点
+            </span>
+            {sites.map((s) => {
+                const active = s.id === siteId;
+                return (
+                    <button
+                        key={s.id}
+                        type="button"
+                        onClick={() => galleryActions.selectSite(s.id)}
+                        title={s.adult ? `${s.label}（成人内容站点）` : s.label}
+                        className={`flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${active
+                            ? 'bg-white/15 text-white ring-1 ring-white/25'
+                            : 'border border-white/10 bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-white'
+                            }`}
+                    >
+                        {s.label}
+                        {s.adult && <span className="text-[10px] font-normal text-rose-300/80">18+</span>}
+                    </button>
+                );
+            })}
+        </div>
+    ) : null;
 
     const handleSearch = useCallback(() => {
         const t = query.trim();
@@ -527,6 +555,9 @@ const BrowseSection: React.FC<BrowseSectionProps> = ({
                     <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
                 </button>
             </div>
+
+            {/* 站点切换（多站点时才有） */}
+            {siteBar}
 
             {/* 当前页面快捷检测 */}
             {isAcgmhoPage && (
@@ -705,11 +736,12 @@ const DetailSection: React.FC<DetailSectionProps> = ({
             {/* 作品详情与解析卡片 */}
             <div className="flex flex-col gap-5 rounded-2xl border border-white/10 bg-white/5 p-6 shadow-xl backdrop-blur-md">
                 <div className="flex gap-6">
-                    {/* 封面预览 */}
+                    {/* 封面预览：优先稳定封面（poster），firstImgUrl 是带签名的直链，
+                        最多 10 分钟就失效 —— 用它当封面会让"从快照恢复的详情页"变成坏图 */}
                     <div className="relative h-44 w-32 shrink-0 overflow-hidden rounded-xl border border-white/10 bg-slate-900 shadow-md">
-                        {probeResult.firstImgUrl ? (
+                        {probeResult.poster || probeResult.firstImgUrl ? (
                             <img
-                                src={probeResult.firstImgUrl}
+                                src={probeResult.poster || probeResult.firstImgUrl}
                                 alt={probeResult.title}
                                 className="h-full w-full object-cover"
                                 loading="lazy"
@@ -947,9 +979,11 @@ export const GalleryPanel: React.FC<GalleryPanelProps> = ({
     onAppendToPlayer,
     onMergeToPlayer,
 }) => {
-    const acgmho = useAcgmho();
     const gallery = useAcgmhoGallery();
     const downloads = useAcgDownloads();
+    // 详情层跟着浏览层的站点走：探测新地址时用它当提示；
+    // 已探测作品的后续操作以 probeResult.site 为准（见 useAcgmho 注释）。
+    const acgmho = useAcgmho(gallery.state.siteId);
 
     const {
         probeResult,
@@ -979,8 +1013,12 @@ export const GalleryPanel: React.FC<GalleryPanelProps> = ({
         resetDetail();
     }, [resetDetail]);
 
-    // 当前作品任务键：/h/123 与 /hentai/123 各自独立，保存进度与 file-done 回写凭此隔离
-    const probeTaskKey = probeResult ? acgTaskKeyOf(probeResult.gid, probeResult.prefix) : '';
+    // 当前作品任务键：站点 + 站点内前缀共同决定（同号 gid 在两站是两本书，
+    // 在 acgmho 站内 /h/123 与 /hentai/123 也是两本）。必须与主进程同口径，
+    // 否则 file-done 回写找不到订阅者，播放列表里那一页永远是远端地址。
+    const probeTaskKey = probeResult
+        ? acgTaskKeyOf(probeResult.gid, probeResult.prefix, probeResult.site)
+        : '';
     // 单页保存完成时原位回写播放列表，将远端 URL 无缝替换为本地 file://
     const probeGid = probeResult?.gid;
     useEffect(() => {
@@ -1090,6 +1128,7 @@ export const GalleryPanel: React.FC<GalleryPanelProps> = ({
         if (res?.pages?.length) {
             void downloads.actions.startSave({
                 gid,
+                site: current.site,
                 title,
                 prefix,
                 sourceUrl,
@@ -1120,6 +1159,7 @@ export const GalleryPanel: React.FC<GalleryPanelProps> = ({
             if (items.length > 0) {
                 void downloads.actions.startSave({
                     gid,
+                    site: probeResult.site,
                     title,
                     prefix: probeResult.prefix,
                     sourceUrl: probeResult.firstPageUrl,
@@ -1150,7 +1190,7 @@ export const GalleryPanel: React.FC<GalleryPanelProps> = ({
                         </div>
                         <span>ACG 画廊工坊</span>
                         <span className="hidden sm:inline text-xs font-normal text-zinc-500">
-                            acgmho.com 漫画、动图与媒体归档
+                            多站点图集归档（ACG 漫画 / E-Hentai）
                         </span>
                     </div>
                 </div>

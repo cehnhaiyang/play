@@ -1,5 +1,5 @@
 import type { AiChatMessage, AiUsage } from '../../../shared/meta';
-import { chat, extractMediaLinks } from '../../../shared/ai/AiService';
+import { chat } from '../../../shared/ai/AiService';
 import type { HostChatRequest, HostEvent, HostRequest } from '../shared/protocol';
 
 /**
@@ -141,27 +141,6 @@ chrome.runtime.onMessage.addListener(
                 entry?.controller.abort();
                 sendResponse({ ok: true, result: { cancelled: !!entry } });
                 return false;
-            }
-
-            /**
-             * AI 深度嗅探。
-             *
-             * 普通请求/应答即可 —— 它一次返回一个数组，没有流式增量，
-             * 不需要 `ai-chat` 那套 requestId 认领与广播。
-             *
-             * `async` 分支要显式 `return true`：`sendResponse` 在 await 之后才调，
-             * 不返回 true 的话响应通道会在函数返回时立刻关闭，调用方拿到 undefined。
-             */
-            case 'ai-extract-links': {
-                void (async () => {
-                    try {
-                        const links = await extractMediaLinks(request.html, request.title, request.aiConfig);
-                        sendResponse({ ok: true, result: { links } });
-                    } catch (e) {
-                        sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) });
-                    }
-                })();
-                return true;
             }
 
             default:

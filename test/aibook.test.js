@@ -5,6 +5,8 @@
  * 覆盖两类最容易静默出错的地方：
  *   1. 模型返回脏 JSON（围栏、寒暄、pages 混入非字符串）时的解析健壮性
  *   2. .aibook 的写出/读回往返，以及坏文件的容错边界
+ *   3. 绘本阅读与播放器共用的播放态判据（canPlayback），以及异步回包的
+ *      时效性守卫（源码级断言，长在组件事件处理函数里，无渲染层测试入口）
  *
  * 这两个函数是纯函数，不需要 Web Audio 模拟层，因此单独成文件。
  */
@@ -373,6 +375,40 @@ const run = () => {
     // 唯一分叉点：末项图集。这是刻意的，不是漏判。
     assert.strictEqual(constMod.isPlayableMedia('image'), true);
     assert.strictEqual(constMod.canPlayback('image', 3, 4), false);
+  });
+
+  /* ---------------- 播放器链路：异步回包必须先认上下文 ---------------- */
+
+  /**
+   * 这一组是**源码级**断言，不是行为断言：守卫长在 React 组件的事件处理函数里，
+   * 仓库没有渲染层测试入口，而为可测性把守卫抽成纯函数就是为测试改生产代码。
+   * 它们钉住的是「同一类缺陷别再加回来」—— 异步回包写回状态之前，必须先确认
+   * 自己出发时的上下文还在。
+   */
+  check('播放器链路: 异步回包都要先确认出发时的上下文还在', () => {
+    const fs = require('fs');
+    const readSrc = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+    const playPanel = readSrc('app/components/PlayPanel.tsx');
+
+    // 朗读：合成期间翻页，回包只能写缓存，不能把上一页的声音挂到新页上播
+    assert.ok(
+      /if \(pageIdRef\.current !== file\.id\) return;/.test(playPanel),
+      '朗读回包缺少「这页还是不是我发起的那页」判据',
+    );
+    // 抓取：弹窗关闭后到达的探测结果整批作废，且成功/失败两条路径都要判
+    assert.ok(/if \(run !== acgRunRef\.current\) return;/.test(playPanel), '抓取回包缺少轮次号比对');
+    assert.strictEqual(
+      (playPanel.match(/if \(run !== acgRunRef\.current\) return;/g) || []).length,
+      2,
+      '成功与失败两条路径都要判，漏一条就会把已取消那轮的红字留给下一次打开',
+    );
+    // 「关闭抓取弹窗」只有一个所有者：取消按钮 / X / 遮罩 / Esc 都得作废在途轮次
+    assert.ok(/acgRunRef\.current \+= 1;/.test(playPanel), '关闭弹窗没有作废在途轮次');
+    assert.ok(/closeAcgModal\(\);/.test(playPanel), 'Esc 关浮层没走 closeAcgModal，在途请求不会作废');
+    // 进度气泡显示拖动中的预览时刻，而不是只在悬停事件里更新的 hoverPosition
+    assert.ok(/\{formatTime\(previewTime\)\}/.test(playPanel), '拖动中的时间气泡没有跟着走');
+    // ACG 音声的艺术家不能在 App 的转发边界被丢掉（音频视图靠它显示署名）
+    assert.ok(/artist: p\.artist,/.test(readSrc('app/App.tsx')), 'handlePlayMediaStreams 丢掉了 artist');
   });
 
   /* --------------------------------- 汇总 -------------------------------- */

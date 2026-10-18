@@ -98,15 +98,6 @@ const loadAiConfig = async (): Promise<AiConfig> => {
     return snapshot.ai;
 };
 
-/**
- * 读配置的入口，供同样要发起模型调用的路径使用（AI 深度嗅探）。
- *
- * 与 `ChatPort.chat` 共用同一份实现：配置只有一个来源，谁也不能自己拼一份
- * 或绕开它 —— 两条路径各读一次是**有意的**（每次调用都要拿最新的），
- * 但"怎么读"只能有一处。
- */
-export const readAiConfig = (): Promise<AiConfig> => loadAiConfig();
-
 export const createChatPort = (ensureOffscreen: () => Promise<void>): ChatPort => ({
     chat: async (options) => {
         // 先取配置再起 offscreen：拿不到配置就没有必要把这次调用发出去

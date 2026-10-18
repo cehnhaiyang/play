@@ -16,7 +16,7 @@
  * 这不只是省事：手抄副本的历史事故是 `.avif` 只进了其中一份，同一个文件
  * 走两条路径结论不同。派生之后"新增后缀要改几处"这个问题从根上消失了。
  */
-import { HLS_SEGMENT_RE_SOURCE, MEDIA_EXTENSIONS, isAcgUrl } from '../../../shared/core';
+import { HLS_SEGMENT_RE_SOURCE, MEDIA_EXTENSIONS, isAcgUrl, isEhentaiUrl } from '../../../shared/core';
 import type { MediaType } from '../../../shared/meta';
 
 /**
@@ -221,6 +221,21 @@ export interface ClassifyInput {
 }
 
 /**
+ * 本站自己管的 ACG / E-Hentai 资源：图集封面、动画预览、有声 —— **不进嗅探列表**。
+ *
+ * 那几类资源走画廊流程；收进来只会让列表被封面刷满（e-hentai 一本 685 页的
+ * 书更甚）。资源本身与它所属的页面**都要看**：直链常常在另一个域名上
+ * （图床、CDN），只看地址会漏掉一整本漫画。
+ *
+ * **两条采集路径共用这一个判据**（网络层、页内扫描）。
+ * 原先它只写在 `classifyResponse` 里，于是只有网络层拦得住：页内扫描照收不误
+ * —— 在 ACG 站上开着嗅探逛一圈，列表就被封面刷满，而"同一个地址走哪条路径
+ * 结论不同"正是这个模块最不该出现的事。
+ */
+export const isSniffExcluded = (url: string | undefined, documentUrl?: string): boolean =>
+    isAcgUrl(url) || isAcgUrl(documentUrl) || isEhentaiUrl(url) || isEhentaiUrl(documentUrl);
+
+/**
  * 判定一条响应是不是可下载的媒体。不是则返回 null。
  *
  * 三级判据，与 `app/main/main.js` 的嗅探回调同序：
@@ -236,9 +251,8 @@ export const classifyResponse = (input: ClassifyInput): ClassifiedMedia | null =
     if (!url || !isSniffableProtocol(url)) return null;
     if (isIgnorableContentType(contentType)) return null;
 
-    // ACG 资源不进嗅探：图集封面/动画/有声走画廊流程，
-    // 否则翻一本漫画就刷几十条封面进嗅探列表。
-    if (isAcgUrl(url) || isAcgUrl(documentUrl)) return null;
+    // ACG / E-Hentai 资源不进嗅探，判据见 isSniffExcluded（两条路径共用一份）
+    if (isSniffExcluded(url, documentUrl)) return null;
 
     const ct = contentType.toLowerCase();
     let type: MediaType | null = null;

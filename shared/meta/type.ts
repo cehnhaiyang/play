@@ -35,10 +35,9 @@ export type AcgCategory = 'manga' | 'animated_gallery' | 'animation' | 'asmr';
 /**
  * 抓取或嗅探资源的数据源渠道
  * - `local`: 本地探测或已存在缓存
- * - `ai`: AI 分析或模型识别解析
  * - `network`: 网络嗅探器或 HTTP 抓取截获
  */
-export type MediaSourceChannel = 'local' | 'ai' | 'network';
+export type MediaSourceChannel = 'local' | 'network';
 
 /**
  * 媒体文件所属的分组分类

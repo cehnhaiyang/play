@@ -1,5 +1,8 @@
 const { app, BrowserWindow, ipcMain, shell, webContents, dialog } = require('electron');
-const { probeGallery, downloadGallery, saveGalleryImages, fetchGalleryPages, normalizeGid, galleryTaskKey, galleryKeyMatches, GALLERY_CHANNELS, fetchChannelList, buildChannelListResult, channelListUrl, deriveListPageUrl, isCloudflareChallengePage, isCloudflareErrorPage, setUserAgent: pushUserAgentToSite } = require('./acgmhoService');
+const { setUserAgent: pushUserAgentToSite } = require('./acgmhoService');
+// 画廊站点注册表：主进程里"哪个站点"只从这里取，不直接 require 某个 provider。
+// 加站点 = 注册表里多一行，main.js 不动。
+const galleryRegistry = require('./galleryRegistry');
 const { getSettings, getPluginSettings, saveProxyPort, saveAiConfig, testAiConnection } = require('./settings');
 const bridge = require('./bridge');
 const orbs = require('./orbs');
@@ -964,7 +967,7 @@ function sanitizeFileName(name) {
 /**
  * 定后缀。优先用渲染层给的 ext，其次从 URL 路径推断，最后回落 mp4。
  *
- * `'unknown'` 必须当作"没有提示"：嗅探的几条路径（页内脚本、AI 提取）在
+ * `'unknown'` 必须当作"没有提示"：嗅探的路径在
  * 认不出后缀时都会显式写 'unknown'，那是**占位符不是后缀** ——
  * 照单全收会落出 `视频标题.unknown` 这种系统认不出类型的文件。
  */
@@ -1318,11 +1321,11 @@ async function handleMediaDownload(_event, payload) {
     // 与 const.ts 的 requiresFfmpeg 同判据（那边是唯一真值，这里是派生副本）。
     //
     // 两个都要看，各自补对方的漏：
-    //  - 只看后缀会漏：AI 提取出的地址常常没有可辨识的路径后缀
-    //    （`/api/play?format=hls`），ext 回落到 mp4，但渲染层已按 type='stream'
-    //    打了「ffmpeg 下载」徽章、并在 ffmpeg 缺失时拦住了下载；
-    //  - 只看 type 会漏：`{"url":"...x.flv","type":"video"}` 这种模型产物，
-    //    类型与后缀不自洽，而后缀才是真正决定能不能直存的东西。
+    //  - 只看后缀会漏：地址可能没有可辨识的路径后缀（`/api/play?format=hls`），
+    //    ext 回落到 mp4，但渲染层已按 type='stream' 打了「ffmpeg 下载」徽章、
+    //    并在 ffmpeg 缺失时拦住了下载；
+    //  - 只看 type 会漏：type 与后缀来自不同的判据，二者不必自洽，
+    //    而后缀才是真正决定能不能直存的东西。
     // 两边判据不一致的后果是"界面说要 ffmpeg、实际裸 HTTP 直存" ——
     // 落盘的 .mp4 里装的是 m3u8 文本，播放器打开是黑的。
     const isStream = STREAM_EXTENSIONS.has(ext) || payload?.type === 'stream';
@@ -1488,7 +1491,7 @@ function cancelMediaDownload(url) {
 
 const activeGalleryTasks = new Set();
 // gid -> runId：同画廊同时只跑一轮解析，新 run 顶掉旧 run，保证推送顺序不交错
-// 键为 galleryTaskKey（prefix:gid），/h/123 与 /hentai/123 是两本不同的作品
+// 键为站点任务键（site:prefix:gid）：两个站点的 gid 空间互不相干，纯数字键会互顶
 const activeFetchRuns = new Map();
 
 // 进度节流：图片分块每 chunk 推一次会洪水式刷 IPC（每秒数百条），
@@ -1558,22 +1561,25 @@ let settingsHandlersReady = false;
 // 搜索限流冷却：站点对搜索接口限流（实测约 10 次连续请求触发，超限返回
 // "搜索过于频繁"提示页，约 20s 后恢复；期间继续重试会不断刷新限流窗口）。
 // 命中后客户端冷却 30s 直接挡下后续请求，避免"重试→继续限流→永远无结果"的恶性循环。
+//
+// 按站点分开计：限流窗口是每个站点各自的，共用一个变量会让 A 站点触发的冷却
+// 把 B 站点的搜索一起挡掉，用户看到的是"另一个站点无故搜不了"。
 const SEARCH_RATE_LIMIT_COOLDOWN_MS = 30000;
-let searchCooldownUntil = 0;
+const searchCooldownUntil = new Map();
 
-// 搜索会话 cookie：www 与 search 子域各取一份（含 cf_clearance），拼成 Cookie 头给 Node 直抓。
+// 搜索会话 cookie：从站点自己声明的域里捞（含 cf_clearance），拼成 Cookie 头给 Node 直抓。
 // 无痕/异常时返回空串，调用方回退裸访。
-// 注意 search 优先：cf_clearance 按域签发、两边同名，去重只留一份；
-// 403 恰恰发生在 search 子域，之前 www 优先会把 search 的凭证挤掉，
-// 导致用户在浏览器里过了验证、直抓依然 403。
-async function readSearchCookieHeader() {
+//
+// 域必须由站点给（galleryRegistry 的 searchCookieOrigins）：曾经这里写死 acgmho 的
+// search/www 两个域，接 e-hentai 之后就把 acgmho 的 cookie 发去了 e-hentai.org ——
+// 既是凭证跨站泄漏，也必然无效（cookie 按域签发），搜索该 403 还是 403。
+async function readSearchCookieHeader(site) {
+    const origins = (site && site.searchCookieOrigins) || [];
+    if (origins.length === 0) return '';
     try {
         const { session } = require('electron');
         const sess = session.defaultSession;
-        const groups = await Promise.all([
-            sess.cookies.get({ url: 'https://search.acgmho.com/' }).catch(() => []),
-            sess.cookies.get({ url: 'https://www.acgmho.com/' }).catch(() => []),
-        ]);
+        const groups = await Promise.all(origins.map((url) => sess.cookies.get({ url }).catch(() => [])));
         const seen = new Set();
         const parts = [];
         for (const c of groups.flat()) {
@@ -1752,43 +1758,86 @@ function parseProxyAddressForChromium(value) {
 function setupGalleryHandlers() {
     if (galleryHandlersReady) return;
     galleryHandlersReady = true;
-    ipcMain.handle('acgmho-probe', async (_event, gidOrUrl) => {
+
+    /* ---------------------------------------------------------------------- */
+    /* 通用画廊端点                                                            */
+    /* ---------------------------------------------------------------------- */
+    // 站点的差异全部收敛在 galleryRegistry：本函数里**不出现任何站点名**。
+    // 加站点只改注册表那一行，IPC、UI、落盘目录都不用动。
+
+    /** 站点选择：缺省走注册表的默认站点；认不出就抛（不静默回落成"另一个站点"） */
+    const siteOf = (site) => galleryRegistry.getSite(site);
+
+    /**
+     * 进度推送出口：带上 site，渲染层凭它把进度归到正确的站点。
+     *
+     * 三个通道各写一次字面量，而不是把通道名当参数传给通用函数 ——
+     * 桥契约测试靠静态扫描源码里的推送调用来核对"每个推送通道都在事件表里"，
+     * 参数化的通道名会让扫描一个都看不到，那张表随之失去校验意义。
+     */
+    const sendGalleryProgress = (siteId, payload) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('gallery-progress', { ...payload, site: siteId });
+        }
+    };
+    const sendGallerySaveProgress = (siteId, payload) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('gallery-save-progress', { ...payload, site: siteId });
+        }
+    };
+    const sendGalleryFetchProgress = (siteId, payload) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('gallery-fetch-progress', { ...payload, site: siteId });
+        }
+    };
+
+    const handleSites = async () => galleryRegistry.listSites();
+
+    const handleChannels = async (_event, options) => {
+        const opts = options || {};
+        // all=true 返回"站点 → 频道"两层结构，UI 一次拿全，切站点不再逐次请求
+        if (opts.all) return galleryRegistry.listChannels();
+        return siteOf(opts.site).channels();
+    };
+
+    const handleProbe = async (_event, options) => {
+        const opts = typeof options === 'string' ? { target: options } : (options || {});
+        const site = siteOf(opts.site);
         try {
             await syncAcgmhoProxy();
-            return await probeGallery(gidOrUrl);
+            return await site.probeGallery(opts.target || opts.gidOrUrl);
         } catch (error) {
-            console.error('acgmho-probe failed:', error);
-            throw new Error(error.message || '探测失败');
+            console.error('gallery-probe[' + site.id + '] failed:', error);
+            throw new Error((error && error.message) || '探测失败');
         }
-    });
+    };
 
-    // 内置浏览画廊：频道表（静态）与频道列表（分页抓取）
-    ipcMain.handle('acgmho-channels', async () => GALLERY_CHANNELS);
-
-    ipcMain.handle('acgmho-channel-list', async (_event, options) => {
+    const handleChannelList = async (_event, options) => {
         const opts = options || {};
+        const site = siteOf(opts.site);
         const q = String(opts.query || '').trim();
         const isSearch = opts.channelId === 'search' || !!q;
-        if (isSearch && Date.now() < searchCooldownUntil) {
-            const waitSec = Math.ceil((searchCooldownUntil - Date.now()) / 1000);
+        const cooldownUntil = searchCooldownUntil.get(site.id) || 0;
+        if (isSearch && Date.now() < cooldownUntil) {
+            const waitSec = Math.ceil((cooldownUntil - Date.now()) / 1000);
             return {
                 success: false,
-                message: `站点提示：搜索过于频繁，请 ${waitSec} 秒后重试（不必更换关键词）`,
+                message: '站点提示：搜索过于频繁，请 ' + waitSec + ' 秒后重试（不必更换关键词）',
                 items: [],
                 hasMore: false,
             };
         }
         try {
-            flowLog('channel-list start', JSON.stringify({ channelId: opts.channelId, q, page: opts.page || 1 }));
-            // 全文搜索会 302 到 search.acgmho.com，其前有 Cloudflare 挑战：
+            flowLog('channel-list start', JSON.stringify({ site: site.id, channelId: opts.channelId, q, page: opts.page || 1 }));
+            // 全文搜索会 302 到搜索子域，其前有 Cloudflare 挑战：
             // 先带上 Electron 会话 cookie（含 cf_clearance）直抓，能过则过。
             await syncAcgmhoProxy();
-            const cookieHeader = await readSearchCookieHeader();
+            const cookieHeader = await readSearchCookieHeader(site);
             flowLog('proxy=', getAcgmhoProxy() || 'DIRECT', '| cookies=', cookieHeader ? cookieHeader.split('; ').map((p) => p.split('=')[0]).join(',') : '(none)');
             const directStartedAt = Date.now();
-            const directPromise = fetchChannelList({ ...opts, cookieHeader: cookieHeader || undefined });
-            // 直抓是快路，不能卡住整个搜索：搜索请求给 20s 预算，超时即转入内置浏览器自动过挑战。
-            // 抛出的文案要能被下面的 netOrChallenge 识别（Timeout fetching）才会触发兜底。
+            const directPromise = site.fetchChannelList({ ...opts, cookieHeader: cookieHeader || undefined });
+            // 直抓是快路，不能卡住整个搜索：搜索请求给 20s 预算，
+            // 超时文案要能被下面识别（Timeout fetching）才会走兜底文案。
             const listResult = isSearch
                 ? await Promise.race([
                     directPromise,
@@ -1801,30 +1850,30 @@ function setupGalleryHandlers() {
             return { success: true, ...listResult };
         } catch (error) {
             // 直抓被挑战拦下或网络层失败（代理环境直连必挂 ETIMEDOUT/ECONNRESET）。
-            //
             // 原先这里会拉起本机真实浏览器再试一次；拆分之后不做了 ——
             // 搜索页本来就该由浏览器插件去取（它就在浏览器里，会话与身份都是原生的）。
             // 应用侧如实报错，让插件那边补上这次请求。
             const message = (error && error.message) || '列表加载失败';
             if (isSearch && /过于频繁/.test(message)) {
-                searchCooldownUntil = Date.now() + SEARCH_RATE_LIMIT_COOLDOWN_MS;
+                searchCooldownUntil.set(site.id, Date.now() + SEARCH_RATE_LIMIT_COOLDOWN_MS);
             }
-            console.error('acgmho-channel-list failed:', error);
+            console.error('gallery-channel-list[' + site.id + '] failed:', error);
             flowLog('channel-list fail:', message);
             return { success: false, message, items: [], hasMore: false };
         }
-    });
+    };
 
-    ipcMain.handle('acgmho-start-download', async (_event, options) => {
-        // 任务键带前缀（prefix:gid）：/h/123 与 /hentai/123 是两本不同的作品，纯数字键会互顶/误取消
+    const handleStartDownload = async (_event, options) => {
         const opts = options || {};
+        const site = siteOf(opts.site);
         if (!opts.gidOrUrl) throw new Error('缺少作品地址或 ID，无法开始下载');
-        const key = galleryTaskKey(opts.gidOrUrl, opts.probe) || String(opts.gidOrUrl);
+        // 任务键带站点前缀（site:…）：两个站点的 gid 空间互不相干，纯数字键会互顶
+        const key = site.taskKeyOf(opts.gidOrUrl, opts.probe) || String(opts.gidOrUrl);
         // 每轮带唯一 runToken：isCancelled 必须凭"本轮是否仍登记在册"判断，
         // 只比对 key 会被同作品的下一轮任务重新登记而永远为真——旧任务停不下来，
         // 两轮并发写同一目录（实测 30 页发出 54 次图片请求、manifest/.gallery 互盖）。
-        const runToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        const runKey = `${key}#${runToken}`;
+        const runToken = Date.now() + '-' + Math.random().toString(36).slice(2);
+        const runKey = key + '#' + runToken;
         // 同作品互顶：开新下载先清掉同键的旧下载/旧落盘（落盘键为 key#runToken，base 相同）
         for (const t of [...activeGalleryTasks]) {
             if (t.split('#')[0] === key) activeGalleryTasks.delete(t);
@@ -1835,16 +1884,11 @@ function setupGalleryHandlers() {
             const downloadOptions = {
                 ...opts,
                 // 不在这里拼默认目录：服务层探测出真实前缀后按 <prefix>-<gid> 落盘。
-                // 此处硬拼纯 gid 会把 /h/123 与 /hentai/123 写进同一目录互踩；
                 // 调用方给了 outDir 则原样透传。
                 outDir: opts.outDir || undefined,
             };
-            const send = throttleProgress((progress) => {
-                if (mainWindow && !mainWindow.isDestroyed()) {
-                    mainWindow.webContents.send('acgmho-progress', progress);
-                }
-            });
-            const result = await downloadGallery(
+            const send = throttleProgress((progress) => sendGalleryProgress(site.id, progress));
+            const result = await site.downloadGallery(
                 downloadOptions,
                 send,
                 // 服务层回传数字 gid：只要本轮已被顶掉/取消（runKey 不在册）就停
@@ -1854,28 +1898,35 @@ function setupGalleryHandlers() {
             return result;
         } catch (error) {
             activeGalleryTasks.delete(runKey);
-            console.error('acgmho-start-download failed:', error);
+            console.error('gallery-start-download[' + site.id + '] failed:', error);
             throw error;
         }
-    });
+    };
 
-    ipcMain.handle('acgmho-cancel-download', async (_event, gid) => {
-        // 粗粒度取消：凡同数字 gid（含各前缀变体）一律清掉，避免误留孤儿任务
+    const handleCancelDownload = async (_event, options) => {
+        // 粗粒度取消：同站点内凡同 gid 一律清掉，避免误留孤儿任务。
+        // 不传 site 时按任务键归属判定 —— 否则 A 站点的取消会把 B 站点同号任务一起杀掉。
+        const opts = typeof options === 'string' ? { gidOrUrl: options } : (options || {});
         for (const t of [...activeGalleryTasks]) {
-            if (galleryKeyMatches(t, gid)) activeGalleryTasks.delete(t);
+            const owner = galleryRegistry.siteOfTaskKey(t);
+            if (opts.site && owner.id !== opts.site) continue;
+            if (owner.keyMatches(t, opts.gidOrUrl)) activeGalleryTasks.delete(t);
         }
         return { success: true };
-    });
+    };
 
-    // 边下边播落盘：同作品单飞，新任务顶掉旧任务（旧循环在下一文件边界停）。
-    // 与 acgmho-start-download 共用 activeGalleryTasks，保证同作品同时只有一个写盘任务。
-    ipcMain.handle('acgmho-save-images', async (_event, options) => {
+    const handleSaveImages = async (_event, options) => {
         const opts = options || {};
-        const baseKey = galleryTaskKey(opts.gid || opts.gidOrUrl, opts) || String(opts.gid || opts.gidOrUrl || '');
+        const site = siteOf(opts.site);
+        const target = opts.gid || opts.gidOrUrl;
+        const baseKey = site.taskKeyOf(target, opts) || String(target || '');
         if (!baseKey) throw new Error('缺少作品 gid，无法开始保存');
-        const key = normalizeGid(opts.gid || opts.gidOrUrl).gid || baseKey;
-        const runToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        const runKey = `${baseKey}#${runToken}`;
+        // gid 必须归一成纯数字：它直接进落盘目录名与画廊徽标。回落成任务键
+        // （ehentai:4262064）会拼出 `g-ehentai4262064` 这种目录，徽标里的 gid 也是脏的。
+        const key = site.gidOf(target);
+        if (!key) throw new Error(`无法从「${target || ''}」解析出作品 ID`);
+        const runToken = Date.now() + '-' + Math.random().toString(36).slice(2);
+        const runKey = baseKey + '#' + runToken;
         // 顶掉同作品的旧任务（含旧式下载，base 相同即删）：旧循环下一次 isCancelled 检查即停
         for (const t of [...activeGalleryTasks]) {
             if (t.split('#')[0] === baseKey) activeGalleryTasks.delete(t);
@@ -1886,18 +1937,12 @@ function setupGalleryHandlers() {
             const saveOptions = {
                 ...opts,
                 gid: key,
-                // 任务键透传：渲染层用 prefix:gid 区分同数字 gid 的不同作品，进度事件原样带回
+                // 任务键透传：渲染层用 site:prefix:gid 区分作品，进度事件原样带回
                 taskKey: opts.taskKey || baseKey,
-                // 默认目录交给服务层按 <prefix>-<gid> 定（opts.prefix 已随 ...opts 透传），
-                // 此处硬拼纯 gid 会把 /h/123 与 /hentai/123 写进同一目录互踩
                 outDir: opts.outDir || undefined,
             };
-            const send = throttleProgress((progress) => {
-                if (mainWindow && !mainWindow.isDestroyed()) {
-                    mainWindow.webContents.send('acgmho-save-progress', progress);
-                }
-            });
-            const result = await saveGalleryImages(
+            const send = throttleProgress((progress) => sendGallerySaveProgress(site.id, progress));
+            const result = await site.saveImages(
                 saveOptions,
                 send,
                 (id) => String(id) === key && !activeGalleryTasks.has(runKey)
@@ -1906,71 +1951,107 @@ function setupGalleryHandlers() {
             return result;
         } catch (error) {
             activeGalleryTasks.delete(runKey);
-            console.error('acgmho-save-images failed:', error);
+            console.error('gallery-save-images[' + site.id + '] failed:', error);
             throw error;
         }
-    });
+    };
 
-    ipcMain.handle('acgmho-cancel-save-images', async (_event, gid) => {
-        const key = String(gid || '');
-        // 精确取消：带前缀的任务键只杀 exact base，纯数字 gid 才做同数字全清（兼容旧调用）
+    const handleCancelSaveImages = async (_event, options) => {
+        const opts = typeof options === 'string' ? { taskKey: options } : (options || {});
+        const key = String(opts.taskKey || opts.gid || '');
+        // 精确取消：带前缀的任务键只杀 exact base，纯数字 gid 才做同号全清（兼容旧调用）
         const exact = key.includes(':') && !key.includes('#');
         for (const t of [...activeGalleryTasks]) {
+            const owner = galleryRegistry.siteOfTaskKey(t);
+            if (opts.site && owner.id !== opts.site) continue;
             const base = t.split('#')[0];
-            if (exact ? base === key : galleryKeyMatches(t, key)) activeGalleryTasks.delete(t);
+            if (exact ? base === key : owner.keyMatches(t, key)) activeGalleryTasks.delete(t);
         }
         return { success: true };
-    });
+    };
 
-    ipcMain.handle('acgmho-open-folder', async (_event, folderPath) => {
+    const handleOpenFolder = async (_event, folderPath) => {
         if (folderPath && fs.existsSync(folderPath)) {
             await shell.openPath(folderPath);
             return { success: true };
         }
         return { success: false, message: '目录不存在' };
-    });
+    };
 
-    ipcMain.handle('acgmho-fetch-pages', async (_event, options) => {
+    const handleFetchPages = async (_event, options) => {
         const opts = options || {};
-        // 任务键带前缀（prefix:gid）：纯数字键会把同数字不同前缀的两个抓取任务互相顶掉
-        const key = galleryTaskKey(opts.gidOrUrl, opts.probe) || String(opts.gidOrUrl || '');
+        const site = siteOf(opts.site);
+        // 任务键带站点前缀：两个站点同号作品不会互相顶掉
+        const key = site.taskKeyOf(opts.gidOrUrl, opts.probe) || String(opts.gidOrUrl || '');
         if (!key) throw new Error('缺少作品地址或 ID，无法开始解析');
         // 单飞：同作品开新 run 直接顶掉旧 run（旧循环在下一页边界停，
         // 且它的进度带旧 runId，渲染层会丢弃，不会再污染播放列表顺序）
-        const runId = opts.runId || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const runId = opts.runId || Date.now() + '-' + Math.random().toString(36).slice(2);
         activeFetchRuns.set(key, runId);
         try {
             await syncAcgmhoProxy();
-            const result = await fetchGalleryPages(
+            const result = await site.fetchGalleryPages(
                 opts,
-                (progress) => {
-                    if (mainWindow && !mainWindow.isDestroyed()) {
-                        mainWindow.webContents.send('acgmho-fetch-progress', { ...progress, runId });
-                    }
-                },
+                (progress) => sendGalleryFetchProgress(site.id, { ...progress, runId }),
                 // 服务层回传的是数字 gid，这里直接比对本轮闭包键，避免键格式耦合
                 () => activeFetchRuns.get(key) !== runId
             );
             return { ...result, runId };
         } catch (error) {
-            console.error('acgmho-fetch-pages failed:', error);
+            console.error('gallery-fetch-pages[' + site.id + '] failed:', error);
             throw error;
         } finally {
             // 只清自己的 key：别把后启动的新 run 误删了
             if (activeFetchRuns.get(key) === runId) activeFetchRuns.delete(key);
         }
-    });
+    };
 
-    ipcMain.handle('acgmho-cancel-fetch-pages', async (_event, gid, runId) => {
-        const opts = typeof gid === 'object' && gid ? gid : { gidOrUrl: gid, runId };
-        // 调用方多为纯数字 gid（无前缀）：扫描所有同数字 gid 的键，带 runId 只杀匹配者
+    const handleCancelFetchPages = async (_event, options) => {
+        const opts = typeof options === 'string' ? { gidOrUrl: options } : (options || {});
+        // 调用方多为纯数字 gid（无前缀）：扫描同站点所有同号键，带 runId 只杀匹配者
         for (const [k, v] of [...activeFetchRuns]) {
-            if (!galleryKeyMatches(k, opts.gidOrUrl)) continue;
+            const owner = galleryRegistry.siteOfTaskKey(k);
+            if (opts.site && owner.id !== opts.site) continue;
+            if (!owner.keyMatches(k, opts.gidOrUrl)) continue;
             if (!opts.runId || v === opts.runId) activeFetchRuns.delete(k);
         }
         return { success: true };
-    });
+    };
+
+    /* ---------------------------------------------------------------------- */
+    /* 注册：新名 + 旧名指向同一个函数                                         */
+    /* ---------------------------------------------------------------------- */
+    // 旧 acgmho-* 这组名字的调用方（preload 的 acgmho 命名空间、插件、旧快照）
+    // 暂时还在。别名注册的是**同一个函数**，不是复制一份逻辑，所以两条路
+    // 永远同一份行为。等调用方全部切到 gallery-* 后，删掉这组别名即可。
+    //
+    // 刻意逐个写 ipcMain.handle 而不是用表驱动循环：桥契约测试靠静态扫描
+    // 源码里的注册调用来核对"每个通道都在归属表里"，循环注册会让所有通道
+    // 从扫描结果里消失，那张表就再也校验不到东西了。
+    ipcMain.handle('gallery-sites', handleSites);
+    ipcMain.handle('gallery-channels', handleChannels);
+    ipcMain.handle('gallery-probe', handleProbe);
+    ipcMain.handle('gallery-channel-list', handleChannelList);
+    ipcMain.handle('gallery-start-download', handleStartDownload);
+    ipcMain.handle('gallery-cancel-download', handleCancelDownload);
+    ipcMain.handle('gallery-save-images', handleSaveImages);
+    ipcMain.handle('gallery-cancel-save-images', handleCancelSaveImages);
+    ipcMain.handle('gallery-open-folder', handleOpenFolder);
+    ipcMain.handle('gallery-fetch-pages', handleFetchPages);
+    ipcMain.handle('gallery-cancel-fetch-pages', handleCancelFetchPages);
+
+    ipcMain.handle('acgmho-channels', handleChannels);
+    ipcMain.handle('acgmho-probe', handleProbe);
+    ipcMain.handle('acgmho-channel-list', handleChannelList);
+    ipcMain.handle('acgmho-start-download', handleStartDownload);
+    ipcMain.handle('acgmho-cancel-download', handleCancelDownload);
+    ipcMain.handle('acgmho-save-images', handleSaveImages);
+    ipcMain.handle('acgmho-cancel-save-images', handleCancelSaveImages);
+    ipcMain.handle('acgmho-open-folder', handleOpenFolder);
+    ipcMain.handle('acgmho-fetch-pages', handleFetchPages);
+    ipcMain.handle('acgmho-cancel-fetch-pages', handleCancelFetchPages);
 }
+
 
 /**
  * 把 LLM 刚生成的 SPG 源码落盘到项目根的 .spg 目录。
@@ -2810,9 +2891,14 @@ function setupSniffer(sess) {
 
     const filter = { urls: ['<all_urls>'] };
 
-    // ACG 专属资源不进嗅探：图集封面/动画/有声走画廊流程，
-    // 否则翻一本漫画就刷几十条封面进嗅探列表。与渲染层 const.ts 的 isAcgUrl 保持同口径
-    const ACG_SNIFF_EXCLUDE_SUFFIXES = ['acgmho.com', 'acgnngca.com', 'acgnfl.com', 'acg-hentai.com'];
+    // ACG 与 E-Hentai 的专属资源不进嗅探：图集封面/动画/有声走画廊流程，
+    // 否则翻一本漫画就刷几十条封面进嗅探列表。
+    // 与 shared/core/acg.ts 的 isAcgUrl / isEhentaiUrl 保持同口径（两个进程不能共享模块）。
+    // e-hentai 的图片页与 hath.network 图床同样要挡：一本 685 页的书会刷 685 条。
+    const ACG_SNIFF_EXCLUDE_SUFFIXES = [
+        'acgmho.com', 'acgnngca.com', 'acgnfl.com', 'acg-hentai.com',
+        'e-hentai.org', 'exhentai.org', 'ehgt.org', 'hath.network',
+    ];
     const isAcgExcluded = (u) => {
         if (!u || typeof u !== 'string') return false;
         try {
@@ -3218,6 +3304,9 @@ function createWindow() {
             ) {
                 // 与嗅探排除口径（ACG_SNIFF_EXCLUDE_SUFFIXES）保持一致：四个镜像站都要补 Referer 防盗链
                 requestHeaders.Referer = 'https://www.acgmho.com/';
+            } else if (/(^|\.)(e-hentai\.org|exhentai\.org|ehgt\.org|hath\.network)$/i.test(hostname)) {
+                // 同上：e-hentai 的图床与图片页都校验来源，缺 Referer 时图片页会回空白
+                requestHeaders.Referer = 'https://e-hentai.org/';
             }
 
             callback({ requestHeaders });

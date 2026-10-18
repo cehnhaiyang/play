@@ -11,6 +11,7 @@ import {
     GallerySaveOptions,
     GallerySaveProgress,
     GallerySavedFile,
+    GallerySiteDef,
     getElectronAPI,
 } from '../../shared/meta';
 import { loadJSON, removeStored, saveJSON } from '../../shared/core';
@@ -19,7 +20,10 @@ interface ChannelCache {
     items: AcgmhoGalleryItem[];
     page: number;
     hasMore: boolean;
-    /** 搜索流上一页规范地址（频道流为空）：翻页时回传主进程 */
+    /**
+     * 翻页基址：频道流的服务端游标（e-hentai 用 ?next=<gid>）或搜索流的规范地址。
+     * 翻页时原样回传主进程 —— 本站点的页码只是本地计数器，地址推不动。
+     */
     baseUrl?: string;
 }
 
@@ -27,8 +31,8 @@ interface StoredCacheEntry extends ChannelCache {
     ts: number;
 }
 
-// 详情快照落盘类型（剔除 firstHtml 大文本，见 GalleryProbeResult 注释）
-type StoredProbe = Omit<GalleryProbeResult, 'firstHtml'>;
+// 详情快照落盘类型（剔除 firstHtml 大文本与 firstImgUrl 签名直链，见 loadStoredProbe）
+type StoredProbe = Omit<GalleryProbeResult, 'firstHtml' | 'firstImgUrl'>;
 
 /* ========================================================================== */
 /*                     2. 全局后台保存任务模块 (Downloads Store)               */
@@ -149,7 +153,7 @@ const upsertTask = (gid: string, patch: Partial<AcgSaveTask>) => {
 
 const applySaveProgress = (p: GallerySaveProgress) => {
     // 任务键优先：同数字 gid 不同前缀的两本书各走各的进度与 file-done 回写
-    const key = String(p?.taskKey || '') || acgTaskKeyOf(String(p?.gid || ''));
+    const key = String(p?.taskKey || '') || acgTaskKeyOf(String(p?.gid || ''), '', p?.site);
     if (!key) return;
     if (p.status === 'file-done' && p.file) {
         const syncs = fileSyncs.get(key);
@@ -197,9 +201,9 @@ const ensureSaveListener = () => {
     if (saveListenerArmed) return;
     try {
         const api = getElectronAPI();
-        if (!api?.acgmho?.onSaveProgress) return;
+        if (!api?.gallery?.onSaveProgress) return;
         saveListenerArmed = true;
-        api.acgmho.onSaveProgress((p: GallerySaveProgress) => {
+        api.gallery.onSaveProgress((p: GallerySaveProgress) => {
             applySaveProgress(p);
         });
     } catch {
@@ -219,15 +223,16 @@ export const useAcgDownloads = () => {
 
     const startSave = useCallback((options: GallerySaveOptions) => {
         const api = getElectronAPI();
-        if (!api?.acgmho?.saveImages) return Promise.resolve(null);
+        if (!api?.gallery?.saveImages) return Promise.resolve(null);
         ensureSaveListener();
         const gid = String(options.gid || '');
         // 空 gid/空直链直接拒掉（先建空任务再报错会留下无处回写的错误态）
         if (!gid || !Array.isArray(options.items) || options.items.length === 0) {
             return Promise.resolve(null);
         }
-        // 任务键带前缀：/h/123 与 /hentai/123 各自独立，主进程原样带回进度
-        const key = acgTaskKeyOf(gid, options.prefix) || gid;
+        // 任务键必须与主进程同口径：主进程在站点内键外面还加了站点前缀
+        // （见 galleryRegistry.taskKeyOf），这里漏掉站点就会"进度回写找不到任务"。
+        const key = acgTaskKeyOf(gid, options.prefix, options.site) || gid;
         upsertTask(key, {
             title: options.title || `作品 ${gid}`,
             totalFiles: options.items.length,
@@ -236,7 +241,7 @@ export const useAcgDownloads = () => {
             status: 'saving',
             message: '正在准备保存…',
         });
-        return api.acgmho.saveImages({ ...options, taskKey: key }).then(
+        return api.gallery.saveImages({ ...options, taskKey: key }).then(
             (res) => res,
             (err: unknown) => {
                 upsertTask(key, {
@@ -253,7 +258,7 @@ export const useAcgDownloads = () => {
         const key = String(gid || '');
         if (!key) return;
         try {
-            void api?.acgmho?.cancelSaveImages?.(key);
+            void api?.gallery?.cancelSaveImages?.({ taskKey: key });
         } catch {
             /* ignore */
         }
@@ -275,8 +280,8 @@ export const useAcgDownloads = () => {
 
     const openFolder = useCallback((outDir?: string) => {
         const api = getElectronAPI();
-        if (outDir && api?.acgmho?.openFolder) {
-            void api.acgmho.openFolder(outDir);
+        if (outDir && api?.gallery?.openFolder) {
+            void api.gallery.openFolder(outDir);
         }
     }, []);
 
@@ -310,6 +315,7 @@ function loadStoredCache(): Map<string, ChannelCache> {
                 items: entry.items.slice(0, GALLERY_CACHE_ITEMS),
                 page: entry.page || 1,
                 hasMore: entry.hasMore !== false,
+                baseUrl: entry.baseUrl,
             });
         }
     } catch {
@@ -327,6 +333,10 @@ function storeCache(map: Map<string, ChannelCache>): void {
             items: entry.items.slice(0, GALLERY_CACHE_ITEMS),
             page: entry.page,
             hasMore: entry.hasMore,
+            // 翻页基址必须一起落盘：e-hentai 的翻页是服务端游标，没法由页码反推。
+            // 丢了它，重启后"加载更多"只能把第 1 页再抓一遍，零增长随即把 hasMore
+            // 收敛成 false —— 按钮消失、用户以为这个频道只有一页。
+            baseUrl: entry.baseUrl,
             ts: Date.now(),
         };
     }
@@ -343,30 +353,47 @@ function storeCacheDebounced(map: Map<string, ChannelCache>): void {
     }, 1000);
 }
 
-// 任务键：/h/123 与 /hentai/123 是两本不同的作品，纯数字 gid 会互顶。
-// 与主进程 galleryTaskKey 同口径：有前缀用 prefix:gid，无则回退纯 gid（兼容旧任务）。
-export const acgTaskKeyOf = (gid: string, prefix?: string): string => {
+/**
+ * 任务键（渲染层口径）：必须与主进程 galleryRegistry.taskKeyOf 逐字一致，
+ * 否则进度事件里的 taskKey 在本地任务表里找不到，表现为"任务栏一直不动"。
+ *
+ * 主进程的规则是 `<site>:<站点内键>`，站点内键由 provider 决定
+ * （acgmho 是 prefix:gid，ehentai 是纯 gid）。这里只能复刻同一套规则：
+ * 站点缺省为 acgmho（旧调用方不传 site）。
+ */
+export const acgTaskKeyOf = (gid: string, prefix?: string, site?: string): string => {
     const g = String(gid || '').trim();
-    const p = String(prefix || '').trim().toLowerCase();
     if (!g) return '';
-    if (!p || p === 'auto') return g;
-    return `${p}:${g}`;
+    const siteId = String(site || '').trim() || 'acgmho';
+    // 站点内键：acgmho 有前缀概念（/h/123 与 /hentai/123 是两本书），
+    // ehentai 的 gid 全局唯一，没有前缀维度。
+    const p = String(prefix || '').trim().toLowerCase();
+    const inner = siteId === 'acgmho' && p && p !== 'auto' ? `${p}:${g}` : g;
+    // 已带站点前缀的原样返回（调用方可能直接把主进程回传的键传回来）
+    return inner.startsWith(`${siteId}:`) ? inner : `${siteId}:${inner}`;
 };
 
-// 条目去重键：/h/123 与 /hentai/123 是两本不同的作品，不能只按 gid 去重
-const itemKey = (i: AcgmhoGalleryItem): string => `${i.prefix || ''}:${i.gid}`;
+// 条目去重键：带站点。两个站点的 gid 空间互不相干（acgmho 的 /h/123 与
+// ehentai 的 /g/123 是两本不同的书），只按 gid 或只按前缀去重都会撞。
+//
+// 详情地址一并进键：e-hentai 的详情页必须带 token（/g/<gid>/<token>/），
+// 同一本被重新上架后 token 会变，只按 gid 去重会把新条目当成旧的丢掉，
+// 用户点开的还是那条已失效的地址。
+const itemKey = (i: AcgmhoGalleryItem, site: string): string =>
+    `${site}:${i.prefix || ''}:${i.gid}:${i.url || ''}`;
 
 // 列表合并（去重保首见顺序）：静默补新时新条目置顶，追加/换频道时旧在前新在后
 const mergeChannelItems = (
     base: AcgmhoGalleryItem[],
     incoming: AcgmhoGalleryItem[],
-    prepend: boolean
+    prepend: boolean,
+    site: string
 ): AcgmhoGalleryItem[] => {
     const seen = new Set<string>();
     const merged: AcgmhoGalleryItem[] = [];
     const ordered = prepend ? [...incoming, ...base] : [...base, ...incoming];
     for (const it of ordered) {
-        const k = itemKey(it);
+        const k = itemKey(it, site);
         if (!seen.has(k)) {
             seen.add(k);
             merged.push(it);
@@ -393,10 +420,20 @@ const extractPrefix = (target: string): string => {
     return p;
 };
 
-// 目标地址与现存探测是否为同一本：gid 相同且前缀不冲突（auto 视为通配）
-const isSameProbeTarget = (target: string, probe: { gid: string; prefix?: string } | null): boolean => {
+// 目标地址与现存探测是否为同一本：站点一致、gid 相同且前缀不冲突（auto 视为通配）。
+//
+// 站点必须参与比较：两个站点的 gid 空间互不相干（ehentai 的 4262064 与 acgmho 的
+// 4262064 是两本书）。只比 gid 时，用户在同一会话里先后打开两站同号作品，
+// 第二本会被判成"还是那一本"，于是复用上一本的 probe 去抓页 —— 抓回来的是
+// 另一本书的内容，且没有任何报错。
+const isSameProbeTarget = (
+    target: string,
+    probe: { gid: string; prefix?: string; site?: string } | null,
+    site: string
+): boolean => {
     if (!probe) return false;
     if (!target) return true;
+    if (String(probe.site || '') !== String(site || '')) return false;
     if (extractGid(target) !== String(probe.gid)) return false;
     const wantPrefix = extractPrefix(target);
     if (wantPrefix === 'auto') return true;
@@ -407,6 +444,8 @@ const isSameProbeTarget = (target: string, probe: { gid: string; prefix?: string
  * useAcgmhoGallery — 画廊浏览流与频道秒切数据层
  */
 export const useAcgmhoGallery = () => {
+    const [sites, setSites] = useState<GallerySiteDef[]>([]);
+    const [siteId, setSiteId] = useState<string>('acgmho');
     const [channels, setChannels] = useState<AcgmhoChannelDef[]>([]);
     const [channelId, setChannelId] = useState<string>('latest');
     const [searchKeyword, setSearchKeyword] = useState<string>('');
@@ -420,10 +459,14 @@ export const useAcgmhoGallery = () => {
     // 缓存 Map 用 useState 懒初始化（写 useRef 实参里会每次渲染都解析一次 localStorage）
     const [cacheMap] = useState<Map<string, ChannelCache>>(loadStoredCache);
     const cacheRef = useRef<Map<string, ChannelCache>>(cacheMap);
+    const siteIdRef = useRef(siteId);
     const channelIdRef = useRef(channelId);
     const searchKeywordRef = useRef(searchKeyword);
     const pageRef = useRef(page);
     // render 期不写 ref（并发模式不安全），统一走 effect 同步；回调内需即时值处手动同步
+    useEffect(() => {
+        siteIdRef.current = siteId;
+    }, [siteId]);
     useEffect(() => {
         channelIdRef.current = channelId;
     }, [channelId]);
@@ -443,21 +486,60 @@ export const useAcgmhoGallery = () => {
         storeCacheDebounced(cacheRef.current);
     }, []);
 
-    // 加载频道列表（主进程唯一源，有兜底保证）
+    // 缓存键：两个站点都有 latest/popular 这类同名频道，键里必须带站点，
+    // 否则切站点会直接看到另一个站点的缓存列表。
+    const cacheKeyOf = useCallback((site: string, channel: string, keyword: string) => (
+        keyword ? `search:${site}:${keyword}` : `${site}:${channel}`
+    ), []);
+
+    // 站点表（主进程 galleryRegistry 是唯一源）：加站点不需要改这里
     useEffect(() => {
         const electronAPI = getElectronAPI();
-        if (!electronAPI?.acgmho?.channels) return;
+        if (!electronAPI?.gallery?.sites) return;
         let cancelled = false;
-        electronAPI.acgmho
-            .channels()
+        electronAPI.gallery
+            .sites()
             .then((list) => {
-                if (!cancelled && Array.isArray(list) && list.length > 0) setChannels(list);
+                if (cancelled || !Array.isArray(list) || list.length === 0) return;
+                setSites(list);
+                // 首屏站点若已不在表里（provider 被移除），落回第一个，避免一直空列表
+                if (!list.some((s) => s.id === siteIdRef.current)) {
+                    setSiteId(list[0].id);
+                    siteIdRef.current = list[0].id;
+                }
             })
             .catch(() => { });
         return () => {
             cancelled = true;
         };
     }, []);
+
+    // 频道表跟着站点走：切站点必须重取，否则会拿上一站点的频道去请求新站点
+    useEffect(() => {
+        const electronAPI = getElectronAPI();
+        if (!electronAPI?.gallery?.channels) return;
+        let cancelled = false;
+        electronAPI.gallery
+            .channels({ site: siteId })
+            .then((list) => {
+                if (cancelled) return;
+                const defs = Array.isArray(list) ? (list as AcgmhoChannelDef[]) : [];
+                if (defs.length === 0) {
+                    setChannels([]);
+                    return;
+                }
+                setChannels(defs);
+                // 当前频道若不在新站点里（如 ehentai 没有 hanime），落到第一个
+                if (!defs.some((c) => c.id === channelIdRef.current)) {
+                    setChannelId(defs[0].id);
+                    channelIdRef.current = defs[0].id;
+                }
+            })
+            .catch(() => { });
+        return () => {
+            cancelled = true;
+        };
+    }, [siteId]);
 
     const loadPage = useCallback(
         async (
@@ -469,7 +551,7 @@ export const useAcgmhoGallery = () => {
             baseUrl = ''
         ) => {
             const electronAPI = getElectronAPI();
-            if (!electronAPI?.acgmho?.channelList) {
+            if (!electronAPI?.gallery?.channelList) {
                 setError('读取不到画廊桥（preload 未加载），请重启应用。');
                 return;
             }
@@ -487,7 +569,8 @@ export const useAcgmhoGallery = () => {
                 setItems([]);
             }
             try {
-                const res = await electronAPI.acgmho.channelList({
+                const res = await electronAPI.gallery.channelList({
+                    site: siteIdRef.current,
                     channelId: targetChannel,
                     page: targetPage,
                     query: keyword,
@@ -500,11 +583,11 @@ export const useAcgmhoGallery = () => {
                     return;
                 }
                 const incoming = res.items || [];
-                const cacheKey = keyword ? `search:${keyword}` : targetChannel;
+                const cacheKey = cacheKeyOf(siteIdRef.current, targetChannel, keyword);
                 // 以缓存（非 setItems updater）为合并数据源：updater 在并发模式下可能延迟/重复执行
                 const base = append || silent ? cacheRef.current.get(cacheKey)?.items ?? [] : [];
                 // 静默补新（第 1 页重拉）新条目置顶；追加/换频道保持"旧在前、新在后"的页序
-                const merged = mergeChannelItems(base, incoming, silent && !append);
+                const merged = mergeChannelItems(base, incoming, silent && !append, siteIdRef.current);
                 // 追加零增长说明服务端已无新内容（如翻页回绕）：直接收敛 hasMore
                 const grew = merged.length > base.length;
                 const cachedPrev = cacheRef.current.get(cacheKey);
@@ -536,7 +619,7 @@ export const useAcgmhoGallery = () => {
                 if (append) loadingMoreRef.current = false;
             }
         },
-        [persistCache]
+        [persistCache, cacheKeyOf]
     );
 
     const selectChannel = useCallback(
@@ -546,7 +629,7 @@ export const useAcgmhoGallery = () => {
             setSearchKeyword('');
             searchKeywordRef.current = '';
             setError(null);
-            const cached = cacheRef.current.get(id);
+            const cached = cacheRef.current.get(cacheKeyOf(siteIdRef.current, id, ''));
             if (cached) {
                 setItems(cached.items);
                 setPage(cached.page);
@@ -555,7 +638,7 @@ export const useAcgmhoGallery = () => {
             }
             void loadPage(id, 1, false, false, '');
         },
-        [loadPage]
+        [loadPage, cacheKeyOf]
     );
 
     const search = useCallback(
@@ -570,7 +653,7 @@ export const useAcgmhoGallery = () => {
             setSearchKeyword(trimmed);
             searchKeywordRef.current = trimmed;
             setError(null);
-            const cacheKey = `search:${trimmed}`;
+            const cacheKey = cacheKeyOf(siteIdRef.current, 'search', trimmed);
             const cached = cacheRef.current.get(cacheKey);
             if (cached) {
                 setItems(cached.items);
@@ -580,36 +663,63 @@ export const useAcgmhoGallery = () => {
             }
             void loadPage('search', 1, false, false, trimmed);
         },
-        [loadPage, selectChannel]
+        [loadPage, selectChannel, cacheKeyOf]
+    );
+
+    /**
+     * 切站点：清空列表并重取该站点的第一个频道。
+     *
+     * 不清列表的话，切过去的头一瞬间会显示上一个站点的封面（点开还是错的
+     * 站点地址），比空白更误导。频道表由 siteId 的 effect 重取，这里只负责
+     * 把"当前频道"落回默认值并发起首页请求。
+     */
+    const selectSite = useCallback(
+        (id: string) => {
+            const next = String(id || '').trim();
+            if (!next || next === siteIdRef.current) return;
+            setSiteId(next);
+            siteIdRef.current = next;
+            setSearchKeyword('');
+            searchKeywordRef.current = '';
+            setError(null);
+            setItems([]);
+            setPage(1);
+            setHasMore(false);
+            // 频道表还没回来之前先用 latest 起手：频道 effect 回来后会校正
+            setChannelId('latest');
+            channelIdRef.current = 'latest';
+            void loadPage('latest', 1, false, false, '');
+        },
+        [loadPage]
     );
 
     const loadMore = useCallback(() => {
         const currentChannel = channelIdRef.current;
         const currentKeyword = searchKeywordRef.current;
-        const cacheKey = currentKeyword ? `search:${currentKeyword}` : currentChannel;
+        const cacheKey = cacheKeyOf(siteIdRef.current, currentChannel, currentKeyword);
         const cached = cacheRef.current.get(cacheKey);
         // 已触底直接返回：无限滚动触底后 observer 仍会触发，无此短路会空转请求
         if (cached && cached.hasMore === false) return;
         // 读 ref 而非 state：actions 容器可稳定 memo，翻页按钮不再每次 page 变化都换身份
         const nextPage = (cached?.page ?? pageRef.current) + 1;
         void loadPage(currentChannel, nextPage, true, false, currentKeyword, cached?.baseUrl);
-    }, [loadPage]);
+    }, [loadPage, cacheKeyOf]);
 
     const refresh = useCallback(() => {
         const currentChannel = channelIdRef.current;
         const currentKeyword = searchKeywordRef.current;
-        const cacheKey = currentKeyword ? `search:${currentKeyword}` : currentChannel;
+        const cacheKey = cacheKeyOf(siteIdRef.current, currentChannel, currentKeyword);
         const cached = cacheRef.current.get(cacheKey);
         // 刷新保留规范翻页基址（搜索第 1 页可不用，但保留无害）；内容缓存清掉重拉
         const baseUrl = cached?.baseUrl;
         cacheRef.current.delete(cacheKey);
         persistCache();
         void loadPage(currentChannel, 1, false, false, currentKeyword, baseUrl);
-    }, [loadPage, persistCache]);
+    }, [loadPage, persistCache, cacheKeyOf]);
 
     // 首屏恢复 latest 缓存并静默补新
     useEffect(() => {
-        const cached = cacheRef.current.get('latest');
+        const cached = cacheRef.current.get(cacheKeyOf(siteIdRef.current, 'latest', ''));
         if (cached && cached.items.length > 0) {
             setItems(cached.items);
             setPage(cached.page);
@@ -618,16 +728,18 @@ export const useAcgmhoGallery = () => {
             return;
         }
         void loadPage('latest', 1, false);
-    }, [loadPage]);
+    }, [loadPage, cacheKeyOf]);
 
     // actions 容器 memo：GalleryCard memo 依赖 onOpen 身份，容器每 render 重建会连带整网重渲染
     const galleryActions = useMemo(
-        () => ({ selectChannel, search, loadMore, refresh }),
-        [selectChannel, search, loadMore, refresh]
+        () => ({ selectSite, selectChannel, search, loadMore, refresh }),
+        [selectSite, selectChannel, search, loadMore, refresh]
     );
 
     return {
         state: {
+            sites,
+            siteId,
             channels,
             channelId,
             searchKeyword,
@@ -649,14 +761,25 @@ export const useAcgmhoGallery = () => {
 const loadStoredProbe = (): GalleryProbeResult | null => {
     const saved = loadJSON<StoredProbe | null>('gallery-detail', null);
     if (!saved || typeof saved.gid !== 'string' || !saved.gid) return null;
-    // 落盘时已剔除 firstHtml，此处无大文本可剥，直接可用
-    return saved;
+    // firstImgUrl 可能是**有时效的签名直链**（e-hentai 的 keystamp 最多 10 分钟），
+    // 跨会话恢复出来必然是过期链接 —— 展示时会是一张坏图，而用户以为作品坏了。
+    // 稳定封面在 poster 里，恢复时把首图清掉，让 UI 走 poster 分支。
+    return { ...saved, firstImgUrl: '' };
 };
 
 /**
  * useAcgmho — 作品详情探测、全本抓取与边下边播核心 Hook
+ *
+ * @param site 当前选中的站点 id。只在**探测新地址**时用作提示：
+ *   已探测作品的后续抓页/落盘一律以 probeResult.site 为准（书自己的来源），
+ *   否则用户切了站点却还停在上一本书时，会把旧地址发到新站点去。
  */
-export const useAcgmho = () => {
+export const useAcgmho = (site = 'acgmho') => {
+    const siteRef = useRef(site);
+    useEffect(() => {
+        siteRef.current = site;
+    }, [site]);
+
     const [inputGid, setInputGid] = useState('');
     const [isProbing, setIsProbing] = useState(false);
     const [probeResult, setProbeResult] = useState<GalleryProbeResult | null>(
@@ -674,11 +797,13 @@ export const useAcgmho = () => {
     const [error, setError] = useState<string | null>(null);
     const [lastDownloadDir, setLastDownloadDir] = useState<string | null>(null);
 
-    // 快照持久化（firstHtml 大文本不落盘，类型上已可选，此处解构剔除）
+    // 快照持久化（firstHtml 大文本与 firstImgUrl 签名直链都不落盘：
+    // 前者体积大，后者最多 10 分钟就失效，见 loadStoredProbe）
     useEffect(() => {
         if (!probeResult) return;
-        const { firstHtml: _drop, ...rest } = probeResult;
-        void _drop;
+        const { firstHtml: _dropHtml, firstImgUrl: _dropImg, ...rest } = probeResult;
+        void _dropHtml;
+        void _dropImg;
         saveJSON('gallery-detail', rest);
     }, [probeResult]);
 
@@ -721,12 +846,14 @@ export const useAcgmho = () => {
         cb: (item: GalleryPageItem) => void;
     } | null>(null);
 
-    // 监听全量下载进度（旧版兼容）
+    // 监听全量下载进度
+    // 用通用通道而不是 acgmho 别名：后者订阅的也是同一条 gallery-progress，
+    // 但写成别名会让"换站点就收不到进度"看起来像主进程没推送。
     useEffect(() => {
         const electronAPI = getElectronAPI();
-        if (!electronAPI?.acgmho?.onProgress) return;
+        if (!electronAPI?.gallery?.onProgress) return;
 
-        const unsubscribe = electronAPI.acgmho.onProgress((data) => {
+        const unsubscribe = electronAPI.gallery.onProgress((data) => {
             setProgress(data);
             if (
                 data.status === 'completed' ||
@@ -743,9 +870,9 @@ export const useAcgmho = () => {
     // 监听在线解析页码进度
     useEffect(() => {
         const electronAPI = getElectronAPI();
-        if (!electronAPI?.acgmho?.onFetchProgress) return;
+        if (!electronAPI?.gallery?.onFetchProgress) return;
 
-        const unsubscribe = electronAPI.acgmho.onFetchProgress(
+        const unsubscribe = electronAPI.gallery.onFetchProgress(
             (data: GalleryFetchProgress) => {
                 if (!data.runId || data.runId !== fetchRunRef.current) return;
                 setFetchProgress({
@@ -787,15 +914,20 @@ export const useAcgmho = () => {
             }
 
             const electronAPI = getElectronAPI();
-            if (!electronAPI?.acgmho?.probe) {
+            if (!electronAPI?.gallery?.probe) {
                 setError('读取不到图集探测桥（preload 未加载），请重启应用。');
                 return null;
             }
 
             setIsProbing(true);
             setError(null);
+            // 探测失败时旧结果必须清掉：留着会让界面继续显示上一本书的标题与页数，
+            // 而用户以为这次探测成功了（错误条还会同时显示，自相矛盾）。
+            setProbeResult(null);
             try {
-                const result = await electronAPI.acgmho.probe(target);
+                // 站点由探测结果自己带回（provider 盖的），这里只需要把用户当前
+                // 选中的站点传下去：同一个 gid 在两个站点是两本书。
+                const result = await electronAPI.gallery.probe({ site: siteRef.current, target });
                 setProbeResult(result);
                 setPageRange(`1-${result.totalPages}`);
                 // 回写探测时的原文（URL 含前缀）：只存数字 gid 会丢前缀，
@@ -821,7 +953,7 @@ export const useAcgmho = () => {
             }
 
             const electronAPI = getElectronAPI();
-            if (!electronAPI?.acgmho?.startDownload) {
+            if (!electronAPI?.gallery?.startDownload) {
                 setError('读取不到下载桥（preload 未加载），请重启应用。');
                 return;
             }
@@ -844,7 +976,10 @@ export const useAcgmho = () => {
             });
 
             try {
-                const res = await electronAPI.acgmho.startDownload({
+                const res = await electronAPI.gallery.startDownload({
+                    // 站点来自探测结果：用户切了站点但详情还停在上一本书时，
+                    // 以书自己的来源为准，否则会拿新站点去解析旧地址。
+                    site: probeResult.site,
                     // 传详情页原文（带前缀）+ 配套 probe：纯数字 gid 重探可能串到同名异帖
                     gidOrUrl: probeResult.firstPageUrl || probeResult.gid,
                     pages: pages || `1-${probeResult.totalPages}`,
@@ -866,9 +1001,12 @@ export const useAcgmho = () => {
 
     const cancelDownload = useCallback(async () => {
         const electronAPI = getElectronAPI();
-        if (probeResult && electronAPI?.acgmho?.cancelDownload) {
+        if (probeResult && electronAPI?.gallery?.cancelDownload) {
             try {
-                await electronAPI.acgmho.cancelDownload(probeResult.gid);
+                await electronAPI.gallery.cancelDownload({
+                    site: probeResult.site,
+                    gidOrUrl: probeResult.firstPageUrl || probeResult.gid,
+                });
             } catch (_err) { }
         }
         setIsDownloading(false);
@@ -887,7 +1025,7 @@ export const useAcgmho = () => {
             }
 
             const electronAPI = getElectronAPI();
-            if (!electronAPI?.acgmho?.fetchPages) {
+            if (!electronAPI?.gallery?.fetchPages) {
                 setError('读取不到在线解析桥（preload 未加载），请重启应用。');
                 return null;
             }
@@ -902,11 +1040,14 @@ export const useAcgmho = () => {
 
             let currentProbe = probeResult;
             try {
-                // 同一本必须 gid+前缀双比（/h/869222 与 /hentai/869222 是两本不同的作品）
-                if (!currentProbe || (target && !isSameProbeTarget(target, currentProbe))) {
-                    currentProbe = await electronAPI.acgmho.probe(
-                        target || currentProbe?.gid || ''
-                    );
+                // 同一本必须「站点 + gid + 前缀」三者都比：两个站点的 gid 空间互不相干，
+                // acgmho 站内 /h/869222 与 /hentai/869222 也是两本不同的作品。
+                if (!currentProbe || (target && !isSameProbeTarget(target, currentProbe, siteRef.current))) {
+                    currentProbe = await electronAPI.gallery.probe({
+                        // 用户在站点条上选的那一站：没有现存 probe 时它是唯一依据
+                        site: currentProbe?.site || siteRef.current,
+                        target: target || currentProbe?.gid || '',
+                    });
                     setProbeResult(currentProbe);
                     setInputGid(target || currentProbe.gid);
                 }
@@ -921,7 +1062,8 @@ export const useAcgmho = () => {
                     message: `开始解析图集: ${currentProbe.title}...`,
                 });
 
-                const res = await electronAPI.acgmho.fetchPages({
+                const res = await electronAPI.gallery.fetchPages({
+                    site: currentProbe.site,
                     // 传详情页原文（带前缀）+ 配套 probe：纯数字 gid 重探可能串到同名异帖
                     gidOrUrl: currentProbe.firstPageUrl || currentProbe.gid,
                     pages,
@@ -953,7 +1095,7 @@ export const useAcgmho = () => {
             const electronAPI = getElectronAPI();
             const lastFailed = failedPagesRef.current;
             const target = probeResult;
-            if (!electronAPI?.acgmho?.fetchPages || !target || lastFailed.length === 0)
+            if (!electronAPI?.gallery?.fetchPages || !target || lastFailed.length === 0)
                 return null;
             fetchSeqRef.current += 1;
             const runId = `${Date.now()}-${fetchSeqRef.current}`;
@@ -961,7 +1103,8 @@ export const useAcgmho = () => {
             setIsFetchingPages(true);
             setError(null);
             try {
-                const res = await electronAPI.acgmho.fetchPages({
+                const res = await electronAPI.gallery.fetchPages({
+                    site: target.site,
                     gidOrUrl: target.firstPageUrl || target.gid,
                     pages: lastFailed.map((f) => f.page).join(','),
                     delayMs,
@@ -988,12 +1131,13 @@ export const useAcgmho = () => {
         const runId = fetchRunRef.current;
         fetchRunRef.current = null;
         onPageStreamRef.current = null;
-        if (probeResult && electronAPI?.acgmho?.cancelFetchPages) {
+        if (probeResult && electronAPI?.gallery?.cancelFetchPages) {
             try {
-                await electronAPI.acgmho.cancelFetchPages(
-                    probeResult.firstPageUrl || probeResult.gid,
-                    runId ?? undefined
-                );
+                await electronAPI.gallery.cancelFetchPages({
+                    site: probeResult.site,
+                    gidOrUrl: probeResult.firstPageUrl || probeResult.gid,
+                    runId: runId ?? undefined,
+                });
             } catch (_err) { }
         }
         setIsFetchingPages(false);
@@ -1003,8 +1147,8 @@ export const useAcgmho = () => {
         async (customPath?: string) => {
             const electronAPI = getElectronAPI();
             const targetPath = customPath || lastDownloadDir;
-            if (targetPath && electronAPI?.acgmho?.openFolder) {
-                await electronAPI.acgmho.openFolder(targetPath);
+            if (targetPath && electronAPI?.gallery?.openFolder) {
+                await electronAPI.gallery.openFolder(targetPath);
             }
         },
         [lastDownloadDir]
@@ -1017,14 +1161,13 @@ export const useAcgmho = () => {
         fetchRunRef.current = null;
         onPageStreamRef.current = null;
         if (probeResult) {
+            const site = probeResult.site;
+            const target = probeResult.firstPageUrl || probeResult.gid;
             try {
-                void electronAPI?.acgmho?.cancelFetchPages?.(
-                    probeResult.firstPageUrl || probeResult.gid,
-                    runId ?? undefined
-                );
+                void electronAPI?.gallery?.cancelFetchPages?.({ site, gidOrUrl: target, runId: runId ?? undefined });
             } catch { /* ignore */ }
             try {
-                void electronAPI?.acgmho?.cancelDownload?.(probeResult.gid);
+                void electronAPI?.gallery?.cancelDownload?.({ site, gidOrUrl: target });
             } catch { /* ignore */ }
         }
         setProbeResult(null);

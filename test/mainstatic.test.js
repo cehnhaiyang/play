@@ -272,11 +272,18 @@ function run() {
     }
 
     // 2) 任何进程都不许再出现硬编码 UA 字面量
+    //
+    // 扫整个 app/main 目录而不是列固定文件名：画廊改成多站点之后新增了
+    // galleryCore / galleryRegistry / ehentaiService，漏扫一个就等于给
+    // "自造一份 UA" 留了一道后门 —— 而 cf_clearance 与 UA 绑定，
+    // 自造的那份会让"浏览器过了验证、Node 直抓仍 403"。
     const uaLiteral = /(["'`])Mozilla\/5\.0[^"'`\n]*Chrome\/\d/;
-    const scannedIdentityFiles = {
-        'app/main/main.js': mainSrc,
-        'app/main/acgmhoService.js': fs.readFileSync(path.join(ELECTRON_DIR, 'acgmhoService.js'), 'utf8'),
-    };
+    const scannedIdentityFiles = {};
+    for (const file of fs.readdirSync(ELECTRON_DIR).filter((f) => f.endsWith('.js'))) {
+        scannedIdentityFiles[`app/main/${file}`] = file === 'main.js'
+            ? mainSrc
+            : fs.readFileSync(path.join(ELECTRON_DIR, file), 'utf8');
+    }
     for (const [name, src] of Object.entries(scannedIdentityFiles)) {
         const m = src.match(uaLiteral);
         if (m) identityProblems.push(`${name} 里有硬编码 UA 字面量：${m[0].slice(0, 72)}…`);

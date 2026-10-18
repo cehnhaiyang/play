@@ -24,7 +24,6 @@ import {
     TerminalIcon,
 } from './orb-kit';
 import type { AgentAction, EngineSnapshot } from './orb-kit';
-import { sameAgentRow } from './agent-row';
 
 /**
  * Agent 球窗口：入口 + 对话面板 + 四个数据页签。
@@ -981,14 +980,41 @@ const MessageRow = ({
     );
 };
 
-/*
- * memo 的比较函数不能省，而且**不能比对象身份**。
+/**
+ * 两条消息画出来是不是一样 —— 消息行 `memo` 的判据。
  *
- * 父组件每次渲染都会新建 onRemove / onRewind 两个箭头函数，默认的浅比较因此
- * 永远判"变了"；而快照过一趟 IPC 会被结构化克隆，`prev.message === next.message`
- * 同样永远为假 —— 每来一份快照，整个列表都要重渲一遍（见 agent-row.ts）。
- * 两个回调的语义完全由 message.id 决定，所以比 canEdit 与画出来的那几个字段
- * 就够了：它们没变，这一行画出来就没变。
+ * ## 为什么不能比对象身份
+ *
+ * 快照是跨进程送进球的（插件 SW → host → 主进程 → preload → 渲染层），每一跳都
+ * 结构化克隆一次：`messages` 数组和里面每一条都是**新对象**，内容一个字没变也一样。
+ * 所以 `prev.message === next.message` 永远为假，`memo` 形同虚设 —— 每来一份快照
+ * （每一步、每次追加）整个列表都要重渲一遍，而画面其实只多了一行。
+ *
+ * ## 为什么逐字段比
+ *
+ * 判据就是"这一行画了什么"：徽标取 notice / label / tool / role，语气取 role 与 ok，
+ * 正文取 result（工具）或 content，另有推理、脚本、用量、压缩摘要。
+ * **改这一行的渲染就要同步改这里** —— 少比一个字段，那一栏此后就再也不会更新，
+ * 而界面不会报错。
+ */
+const sameAgentRow = (a: AgentMessage, b: AgentMessage): boolean =>
+    a.id === b.id
+    && a.role === b.role
+    && a.notice === b.notice
+    && a.content === b.content
+    && a.label === b.label
+    && a.tool === b.tool
+    && a.ok === b.ok
+    && a.result === b.result
+    && a.reasoning === b.reasoning
+    && a.script === b.script
+    && a.usage?.totalTokens === b.usage?.totalTokens
+    && a.compaction?.summary === b.compaction?.summary;
+
+/*
+ * memo 的比较函数不能省：父组件每次渲染都会新建 onRemove / onRewind 两个箭头
+ * 函数，默认的浅比较因此永远判"变了"。两个回调的语义完全由 message.id 决定，
+ * 所以比 canEdit 与上面那几个字段就够了：它们没变，这一行画出来就没变。
  */
 const MessageRowMemo = memo(MessageRow, (prev, next) => (
     prev.canEdit === next.canEdit && sameAgentRow(prev.message, next.message)

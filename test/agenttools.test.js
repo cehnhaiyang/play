@@ -2607,66 +2607,6 @@ const run = async () => {
         assert(h.saves() === 3, `一批只该落一次盘：整轮应 3 次写入，实际 ${h.saves()} 次`);
     });
 
-    /**
-     * 消息行的 memo 判据必须扛得住 IPC 克隆。
-     *
-     * 快照从插件经 host、主进程、preload 到渲染层，每一跳都被结构化克隆一次 ——
-     * 对象身份每次都是新的，而内容一个字没变。按身份比 `memo` 就是个摆设
-     * （每来一份快照整个列表重渲一遍）；按字段比才对，而字段漏掉一个，
-     * 那一栏此后就再也不会更新 —— 界面上不会报错，只是显示的永远是旧值。
-     */
-    await check('消息行的 memo 判据扛得住 IPC 克隆，且覆盖每一栏', async () => {
-        const ROW = require('./build/app/orb/agent-row.js');
-        const h = await buildAgentHarness({ toolCall: true });
-        await h.send('取一下价格');
-        const messages = h.state().messages;
-        assert(messages.length >= 2, `构造前提：应有提问与工具记录，实际 ${messages.length}`);
-
-        for (const message of messages) {
-            const cloned = structuredClone(message);
-            assert(cloned !== message, '构造前提：structuredClone 必须是另一个对象');
-            assert(ROW.sameAgentRow(message, cloned) === true,
-                `内容没变时必须判为同一行（id=${message.id}）`);
-        }
-
-        /*
-         * 每一栏都要能单独把判据翻成 false。归类是**渲染**那一侧的说法：
-         * 徽标 = notice / label / tool / role，语气 = role / ok，正文 = result / content。
-         */
-        const row = messages.find((m) => m.role === 'tool');
-        const patches = {
-            提示标记: { notice: !row.notice },
-            正文: { content: '改了' },
-            返回值: { result: '改了' },
-            脚本: { script: '改了' },
-            推理: { reasoning: '改了' },
-            工具名: { tool: 'storage' },
-            徽标: { label: '改了' },
-            角色: { role: 'assistant' },
-            成败: { ok: !row.ok },
-            用量: { usage: { totalTokens: (row.usage?.totalTokens || 0) + 1 } },
-            压缩摘要: { compaction: { summary: '改了' } },
-        };
-        for (const [field, patch] of Object.entries(patches)) {
-            assert(ROW.sameAgentRow(row, structuredClone({ ...row, ...patch })) === false,
-                `${field} 变了却没判出不同 —— 那一栏此后不会再更新`);
-        }
-
-        /*
-         * 反向核对：界面里读到的每一个 `message.xxx` 都必须进了判据。
-         * 这条才是防漏的那一半 —— 上面那张表是人手列的，加了新栏目它不会知道。
-         */
-        const orbSrc = fs.readFileSync(path.join(ROOT, 'app', 'orb', 'agent.tsx'), 'utf8');
-        const rowSrc = fs.readFileSync(path.join(ROOT, 'app', 'orb', 'agent-row.ts'), 'utf8');
-        const compared = new Set([...rowSrc.matchAll(/\ba\.(\w+)/g)].map((m) => m[1]));
-        const rendered = new Set([...orbSrc.matchAll(/message\.(\w+)/g)].map((m) => m[1]));
-        assert(rendered.size >= 8, `构造前提：消息行应读到多个字段，实际 ${[...rendered].join(',')}`);
-        for (const field of rendered) {
-            assert(compared.has(field),
-                `消息行读了 message.${field}，判据却没比它 —— 加到 sameAgentRow 里`);
-        }
-    });
-
     /** 只有一个调用时不加批次头：多数回复只有一个，多一层是纯 token 开销 */
     await check('单个调用不加批次头（措辞与从前一致）', async () => {
         const h = await buildAgentHarness({ toolCall: true });

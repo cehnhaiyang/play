@@ -50,22 +50,43 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getCookies: (url) => ipcRenderer.invoke('get-cookies', url),
     setCookie: (details) => ipcRenderer.invoke('set-cookie', details),
     removeCookie: (url, name) => ipcRenderer.invoke('remove-cookie', url, name),
-    // --- ACGMHO 图集下载与在线浏览 API ---
+    // --- 画廊（多站点：ACG 漫画 / E-Hentai 等）---
+    //
+    // 站点差异全在主进程的 galleryRegistry 里，渲染层只传 site 字段。
+    // 旧的 acgmho 命名空间保留为"默认站点"的别名（同一次 invoke，不复制逻辑），
+    // 老调用方不必跟着改；新代码一律走 gallery。
+    gallery: {
+        sites: () => ipcRenderer.invoke('gallery-sites'),
+        /** all=true 返回"站点 → 频道"两层结构 */
+        channels: (options) => ipcRenderer.invoke('gallery-channels', options),
+        channelList: (options) => ipcRenderer.invoke('gallery-channel-list', options),
+        probe: (options) => ipcRenderer.invoke('gallery-probe', options),
+        startDownload: (options) => ipcRenderer.invoke('gallery-start-download', options),
+        cancelDownload: (options) => ipcRenderer.invoke('gallery-cancel-download', options),
+        openFolder: (folderPath) => ipcRenderer.invoke('gallery-open-folder', folderPath),
+        onProgress: (callback) => subscribe('gallery-progress', callback),
+        fetchPages: (options) => ipcRenderer.invoke('gallery-fetch-pages', options),
+        cancelFetchPages: (options) => ipcRenderer.invoke('gallery-cancel-fetch-pages', options),
+        onFetchProgress: (callback) => subscribe('gallery-fetch-progress', callback),
+        saveImages: (options) => ipcRenderer.invoke('gallery-save-images', options),
+        cancelSaveImages: (options) => ipcRenderer.invoke('gallery-cancel-save-images', options),
+        onSaveProgress: (callback) => subscribe('gallery-save-progress', callback),
+    },
+    // --- 兼容别名：默认站点（acgmho）---
     acgmho: {
-        probe: (gidOrUrl) => ipcRenderer.invoke('acgmho-probe', gidOrUrl),
-        channels: () => ipcRenderer.invoke('acgmho-channels'),
-        channelList: (options) => ipcRenderer.invoke('acgmho-channel-list', options),
-        startDownload: (options) => ipcRenderer.invoke('acgmho-start-download', options),
-        cancelDownload: (gid) => ipcRenderer.invoke('acgmho-cancel-download', gid),
-        openFolder: (folderPath) => ipcRenderer.invoke('acgmho-open-folder', folderPath),
-        onProgress: (callback) => subscribe('acgmho-progress', callback),
-        fetchPages: (options) => ipcRenderer.invoke('acgmho-fetch-pages', options),
-        cancelFetchPages: (gid, runId) => ipcRenderer.invoke('acgmho-cancel-fetch-pages', gid, runId),
-        onFetchProgress: (callback) => subscribe('acgmho-fetch-progress', callback),
-        // 边下边播落盘：按直链保存，单页落盘即推 file-done 事件
-        saveImages: (options) => ipcRenderer.invoke('acgmho-save-images', options),
-        cancelSaveImages: (gid) => ipcRenderer.invoke('acgmho-cancel-save-images', gid),
-        onSaveProgress: (callback) => subscribe('acgmho-save-progress', callback),
+        probe: (gidOrUrl) => ipcRenderer.invoke('gallery-probe', { target: gidOrUrl }),
+        channels: () => ipcRenderer.invoke('gallery-channels', {}),
+        channelList: (options) => ipcRenderer.invoke('gallery-channel-list', options),
+        startDownload: (options) => ipcRenderer.invoke('gallery-start-download', options),
+        cancelDownload: (gid) => ipcRenderer.invoke('gallery-cancel-download', { gidOrUrl: gid }),
+        openFolder: (folderPath) => ipcRenderer.invoke('gallery-open-folder', folderPath),
+        onProgress: (callback) => subscribe('gallery-progress', callback),
+        fetchPages: (options) => ipcRenderer.invoke('gallery-fetch-pages', options),
+        cancelFetchPages: (gid, runId) => ipcRenderer.invoke('gallery-cancel-fetch-pages', { gidOrUrl: gid, runId }),
+        onFetchProgress: (callback) => subscribe('gallery-fetch-progress', callback),
+        saveImages: (options) => ipcRenderer.invoke('gallery-save-images', options),
+        cancelSaveImages: (gid) => ipcRenderer.invoke('gallery-cancel-save-images', { taskKey: gid }),
+        onSaveProgress: (callback) => subscribe('gallery-save-progress', callback),
     },
     // --- 应用设置（代理端口、AI 服务配置等，主进程持久化） ---
     settings: {

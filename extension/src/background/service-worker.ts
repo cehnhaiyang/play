@@ -23,6 +23,7 @@ import {
     classifyByExt,
     classifyResponse,
     deriveTitle,
+    isSniffExcluded,
     pathExtOf,
     pathnameOf,
     AUDIO_EXTS,
@@ -41,7 +42,6 @@ import {
 } from '../shared/protocol';
 import type { MediaType } from '../../../shared/meta';
 import { agentBridge } from './agent-bridge';
-import { readAiConfig } from './chat-port';
 import { emitBridgeEvent, ensureBridge, setDispatcher } from './bridge-port';
 import { pageHost } from '../offscreen/page-host';
 import { saveRules, loadRules, injectRules } from './tamper';
@@ -235,10 +235,10 @@ const mergeTabIds = (a?: number[], b?: number[]): number[] => {
  *
  * ## 按 URL 合并，不是无脑追加
  *
- * 同一个地址会被**多条路径**发现：网络层看到它被请求、页内扫描在 DOM 里读到它、
- * AI 又把它挑出来一次。而每一条路径拿到的标题质量不同 —— 网络层只有 URL 末段
- * （`index.m3u8`），页内扫描有页面标题。无脑追加的话列表里会出现三条一模一样的
- * 地址，其中两条标题是文件名，用户完全分不清该点哪一条。
+ * 同一个地址会被**两条路径**发现：网络层看到它被请求、页内扫描在 DOM 里读到它。
+ * 而每一条路径拿到的标题质量不同 —— 网络层只有 URL 末段
+ * （`index.m3u8`），页内扫描有页面标题。无脑追加的话列表里会出现两条一模一样的
+ * 地址，其中一条标题是文件名，用户完全分不清该点哪一条。
  *
  * 所以这里以 URL 为键做 upsert，与旧实现（`useBrowse.ts` 的 `addLinks`）
  * 同一套语义：
@@ -251,13 +251,19 @@ const mergeTabIds = (a?: number[], b?: number[]): number[] => {
  * `isGenericTitle` 在 `shared/core/sniff.ts`，界面与插件读同一份。判据分叉过：
  * 新增那条用较全的、更新那条只看 `startsWith('Media_')`，于是标题是文件名
  * （`index.m3u8`，入库时页面标题还没拿到）的条目**永远升不了级**。
+ *
+ * ## 返回**入库后的那一份**，事件里必须发它
+ *
+ * 传进来的只是"这次发现"，而合并（标签页归属取并集、标题只升不降）发生在
+ * 下面。发原始的那份，球上的副本就与这里分叉 —— 而且是两边都"成功"的那种
+ * 分叉：条目从另一个标签页的筛选里消失、好标题被文件名顶掉、计数对不上。
  */
-const pushItem = (item: SniffedMedia): void => {
+const pushItem = (item: SniffedMedia): SniffedMedia => {
     const index = sniffItems.findIndex((existing) => existing.url === item.url);
     if (index < 0) {
         sniffItems = [item, ...sniffItems].slice(0, MAX_SNIFFED_ITEMS);
         flushItems();
-        return;
+        return item;
     }
 
     const existing = sniffItems[index];
@@ -265,7 +271,7 @@ const pushItem = (item: SniffedMedia): void => {
      * 标签页归属是**并集**，不是覆盖。
      *
      * 同一个地址会被两个标签页请求（同一个视频站开两个页、或共用的 CDN 资源），
-     * 也会被三条采集路径先后发现。直接 `{...existing, ...item}` 会让归属变成
+     * 也会被两条采集路径先后发现。直接 `{...existing, ...item}` 会让归属变成
      * "最后一个发现它的那个标签页"，于是切到另一个标签页就看不到它 ——
      * 而那个标签页确实请求过它。用户看到的是"这个页面的资源怎么少了一条"。
      */
@@ -279,7 +285,7 @@ const pushItem = (item: SniffedMedia): void => {
         sniffItems = [...sniffItems];
         sniffItems[index] = merged;
         flushItems();
-        return;
+        return merged;
     }
 
     /*
@@ -290,10 +296,14 @@ const pushItem = (item: SniffedMedia): void => {
      * 归属却停在第一个标签页上。
      */
     if (tabIds.length !== (existing.tabIds || []).length) {
+        const merged = { ...existing, tabIds };
         sniffItems = [...sniffItems];
-        sniffItems[index] = { ...existing, tabIds };
+        sniffItems[index] = merged;
         flushItems();
+        return merged;
     }
+
+    return existing;
 };
 
 const clearItems = (): void => {
@@ -419,7 +429,7 @@ chrome.tabs.onUpdated.addListener((_tabId, changeInfo) => {
  * 解析要操作哪个标签页。
  *
  * 球跑在 Electron 里，它**不知道** chrome 的 tabId（那是浏览器的概念），
- * 除非用户明确选了某一个标签页。传了就用传的（自检脚本与「AI 分析此页」要指定）。
+ * 除非用户明确选了某一个标签页。传了就用传的（自检脚本要指定）。
  */
 const resolveTabId = async (tabId?: number): Promise<number | null> => {
     if (typeof tabId === 'number' && tabId >= 0) return tabId;
@@ -641,8 +651,7 @@ const handleResponse = async (details: chrome.webRequest.OnResponseStartedDetail
         foundAt: now,
     };
 
-    pushItem(item);
-    emitBridgeEvent('sniffed-media', item);
+    emitBridgeEvent('sniffed-media', pushItem(item));
 };
 
 /* ========================================================================== */
@@ -682,6 +691,9 @@ const itemFromCandidate = (
 ): SniffedMedia | null => {
     const { url, hint } = candidate;
     if (!url) return null;
+    // 与网络层共用 isSniffExcluded 这一个判据：只拦网络层的话，在 ACG 站上
+    // 开着嗅探逛一圈，列表就被封面刷满
+    if (isSniffExcluded(url, pageUrl)) return null;
 
     const classified = classifyByExt(url, pathExtOf(pathnameOf(url)));
     const fallbackType: MediaType | null = hint === 'video' || hint === 'playinfo-video'
@@ -790,8 +802,7 @@ const scanTab = async (tabId: number): Promise<{ added: number }> => {
         // 页内扫描与网络层共用同一张去重表：同一个地址两条路径都发现时只留一条
         if (!markRecent(item.url, Date.now())) continue;
 
-        pushItem(item);
-        emitBridgeEvent('sniffed-media', item);
+        emitBridgeEvent('sniffed-media', pushItem(item));
         added += 1;
     }
 
@@ -849,106 +860,6 @@ const scanTabs = async (tabIds: number[]): Promise<{ added: number; scanned: num
         scanned += 1;
     }
     return { added, scanned };
-};
-
-/**
- * AI 深度嗅探：把页面源码交给模型，让它挑出结构化资源。
- *
- * ## 与页内扫描的分工
- *
- * 页内扫描是**确定性**的（正则 + API），它捞的是"页面上已经存在的地址"。
- * 有些站点的直链不在页面里，而在接口返回的 JSON 里、或者被拼装出来 ——
- * 那种只能靠模型读源码猜。所以这两条是互补的，不是替代关系。
- *
- * ## 走 offscreen 而不是在 SW 里 fetch
- *
- * 与 Agent 的模型调用同一条约束：一次补全可能十几秒到几分钟，而 SW 空闲
- * 约 30 秒被回收。所以这里复用 Agent 那条 `ChatPort`，让 offscreen 文档
- * 去发请求 —— 不另开一条通道，否则"模型调用在哪发"这件事会有两个答案。
- *
- * ## 页面源码从哪来
- *
- * 用页内扫描的同一个注入通道取 `documentElement.outerHTML`，不在 SW 里
- * `fetch` 页面地址：那会丢掉登录态渲染出来的内容（SPA 尤其明显），
- * 而"已登录页面上有什么"正是这个功能的用途。
- */
-const AI_SNIFF_HTML_LIMIT = 80_000;
-
-const aiSniffTab = async (tabId: number): Promise<{ added: number }> => {
-    let html = '';
-    let pageUrl = '';
-    let pageTitle = '';
-    try {
-        const results = await chrome.scripting.executeScript({
-            target: { tabId, frameIds: [0] },
-            // 同 scanTab：页面自己的全局（`__playinfo__` 一类）只在主世界可见
-            world: 'MAIN',
-            func: (limit: number) => ({
-                html: document.documentElement.outerHTML.slice(0, limit),
-                pageUrl: location.href,
-                pageTitle: (document.title || '').trim(),
-            }),
-            args: [AI_SNIFF_HTML_LIMIT],
-        });
-        const result = results?.[0]?.result;
-        if (!result) return { added: 0 };
-        html = result.html;
-        pageUrl = result.pageUrl;
-        pageTitle = result.pageTitle;
-    } catch (e) {
-        void e;
-        return { added: 0 };
-    }
-
-    if (!html.trim()) return { added: 0 };
-
-    /*
-     * 模型调用交给 offscreen 文档。
-     *
-     * SW 里**不能** import `shared/ai/AiService.ts`：它顶层 import 了
-     * `shared/core/storage.ts`，那个模块碰 `localStorage` —— 而 SW 里没有。
-     * 表现是"插件装上就崩"，且崩在模块顶层、没有任何指向性错误信息。
-     * `test/extsniffer.test.js` 有一条沙箱断言正是盯着这类问题。
-     */
-    await agentBridge.ensureOffscreen();
-    // 配置与 Agent 走同一条读取路径：它是唯一来源（应用 settings.json），
-    // 直接调 offscreen 会拿到一份谁也没配过的内置默认值
-    const aiConfig = await readAiConfig();
-    const response = (await chrome.runtime.sendMessage({
-        target: 'host',
-        kind: 'ai-extract-links',
-        html,
-        title: pageTitle,
-        aiConfig,
-    })) as ExtensionResponse<{ links: Array<Pick<SniffedMedia, 'url' | 'title' | 'type' | 'ext'>> }> | undefined;
-
-    if (!response) throw new Error('offscreen 宿主无响应（可能创建失败）');
-    if (!response.ok) throw new Error(response.error || 'AI 提取失败');
-    const extracted = response.result?.links || [];
-
-    let added = 0;
-    for (const link of extracted) {
-        const now = Date.now();
-        if (!markRecent(link.url, now)) continue;
-
-        const item: SniffedMedia = {
-            url: link.url,
-            title: link.title,
-            type: link.type,
-            ext: link.ext,
-            // 来源标 'ai'：与页内扫描（'local'）、网络层（'network'）分开，
-            // 用户能看出这条是模型猜的还是页面里确实有的
-            source: 'ai',
-            referer: pageUrl,
-            pageUrl,
-            tabIds: [tabId],
-            foundAt: now,
-        };
-        pushItem(item);
-        emitBridgeEvent('sniffed-media', item);
-        added += 1;
-    }
-    return { added };
 };
 
 /* ========================================================================== */
@@ -1111,9 +1022,6 @@ const dispatchBridge = async (method: string, params: unknown): Promise<unknown>
             if (typeof only === 'number' && only >= 0) return scanTab(only);
             return scanTabs(await scanTargets());
         }
-
-        case 'sniffer-ai-scan':
-            return aiSniffTab(await requireTabId((args as { tabId?: number }).tabId));
 
         case 'downloads-start': {
             const p = args as unknown as { url: string; filename?: string };
@@ -1357,9 +1265,6 @@ const dispatchBall = async (message: BallRequest): Promise<unknown> => {
 
         case 'sniffer-scan':
             return dispatchBridge('sniffer-scan', { tabId: message.tabId });
-
-        case 'sniffer-ai-scan':
-            return dispatchBridge('sniffer-ai-scan', { tabId: message.tabId });
 
         /*
          * 嗅探已经不用它了，但 **Agent 球还在用**：规则 / 请求头 / 存储 / JWT

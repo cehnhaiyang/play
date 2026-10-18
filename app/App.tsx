@@ -64,13 +64,16 @@ const PlayerLayout: React.FC = () => {
 
   // 纯媒体直推（视频 / 音频）：不建画廊分组，不带 groupId/groupType/page。
   // 只有多图集才有"标题 + 子内容"结构，单个视频/音轨直接进播放列表。
-  const handlePlayMediaStreams = useCallback((pages: { url: string; title: string; mediaType?: MediaType }[]) => {
+  // artist 必须原样带过去：它只存在于探测结果里，在这个边界丢掉之后，
+  // 音频视图就只能显示一条裸地址（同一条音轨从播放器入口进来是带署名的）。
+  const handlePlayMediaStreams = useCallback((pages: { url: string; title: string; mediaType?: MediaType; artist?: string }[]) => {
     if (pages.length === 0) return;
     const streamItems = pages.map((p) => ({
       url: p.url,
       name: p.title,
       title: p.title,
       mediaType: p.mediaType || getMediaType(p.title, undefined, p.url),
+      artist: p.artist,
     }));
     player.methods.addMultipleStreams(streamItems, true);
     setView('player');

@@ -23,7 +23,6 @@
     "../app/services/LogService.ts",
     "../app/services/SearchService.ts",
     "../app/hooks/useAudio.ts",
-    "../app/orb/agent-row.ts",
     "../shared/ai/AiService.ts",
     "../shared/core/**/*.ts",
     "../shared/meta/**/*.ts",

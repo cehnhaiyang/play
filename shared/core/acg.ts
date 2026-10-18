@@ -12,15 +12,36 @@ import type {
 /** ACG 专属资源判定（与主进程 setupSniffer 同口径）：站点 + 图床域名 */
 const ACG_HOST_SUFFIXES = ['acgmho.com', 'acgnngca.com', 'acgnfl.com', 'acg-hentai.com'];
 
-/** 命中者不进嗅探列表，一律走画廊流程 */
-export const isAcgUrl = (url: string | undefined | null): boolean => {
+/** e-hentai 站点域名（含图集页与图床） */
+const EHENTAI_HOST_SUFFIXES = ['e-hentai.org', 'exhentai.org', 'ehgt.org', 'hath.network'];
+
+const hostMatches = (url: string | undefined | null, suffixes: string[]): boolean => {
     if (!url || typeof url !== 'string') return false;
     try {
         const host = new URL(url.trim()).hostname.toLowerCase();
-        return ACG_HOST_SUFFIXES.some((s) => host === s || host.endsWith(`.${s}`));
+        return suffixes.some((s) => host === s || host.endsWith(`.${s}`));
     } catch {
         return false;
     }
+};
+
+/** 命中者不进嗅探列表，一律走画廊流程 */
+export const isAcgUrl = (url: string | undefined | null): boolean => hostMatches(url, ACG_HOST_SUFFIXES);
+
+/** 是否为 e-hentai 地址（同样走画廊流程，不进嗅探列表） */
+export const isEhentaiUrl = (url: string | undefined | null): boolean => hostMatches(url, EHENTAI_HOST_SUFFIXES);
+
+/**
+ * 从地址反推站点 id，用于"粘贴链接直接抓取"这类没有站点选择器的入口。
+ *
+ * 判据只能是主机名：gid 在两个站点都是数字，光看数字分不出是哪本书。
+ * 认不出返回空串，由调用方按默认站点处理 —— 静默猜成某个站点会让
+ * "贴了 e-hentai 链接却报 acgmho 解析失败"这种错误极难定位。
+ */
+export const siteIdOfUrl = (url: string | undefined | null): string => {
+    if (isEhentaiUrl(url)) return 'ehentai';
+    if (isAcgUrl(url)) return 'acgmho';
+    return '';
 };
 
 /**
@@ -95,7 +116,8 @@ export const resolveProbeMedia = (probe: GalleryProbeResult | null | undefined):
                     name: a.name || `${title} - 音轨 ${idx + 1}`,
                     title: a.name || `${title} - 音轨 ${idx + 1}`,
                     mediaType: 'audio',
-                    // 艺术家与封面一并透出：音频视图凭此展示署名与封面，不再裸奔 URL
+                    // 艺术家随条目透出，播放器的音频视图靠它显示署名。
+                    // poster 只是透传到条目上，播放器尚未渲染封面（封面目前只在画廊详情页用）
                     artist: a.artist,
                     poster: a.cover,
                 })),
@@ -120,7 +142,7 @@ export const resolveProbeMedia = (probe: GalleryProbeResult | null | undefined):
  * 首屏已展示：失败直接抛错，调用方记日志即可，不打断阅读。
  */
 export const fetchAcgRemainingPages = async (
-    fetchPages: (opts: { gidOrUrl: string; pages: string; delayMs: number; runId: string; probe: GalleryProbeResult }) => Promise<{ runId?: string; pages?: { url: string; title?: string; page?: number }[]; errors?: unknown[] } | null | undefined>,
+    fetchPages: (opts: { gidOrUrl: string; pages: string; delayMs: number; runId: string; probe: GalleryProbeResult; site?: string }) => Promise<{ runId?: string; pages?: { url: string; title?: string; page?: number }[]; errors?: unknown[] } | null | undefined>,
     probe: GalleryProbeResult,
     tag: string,
 ): Promise<AcgRemainingPages> => {
@@ -128,6 +150,9 @@ export const fetchAcgRemainingPages = async (
     // 漏传时主进程会自造 runId，下面的比对永远不相等，后续页会被整批当作旧轮丢弃。
     const runId = `${tag}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const res = await fetchPages({
+        // site 必须来自探测结果：主进程按它选 provider，缺了就回落到默认站点，
+        // 表现为"e-hentai 的书抓回来的是 acgmho 的页"（或直接解析失败）。
+        site: probe.site,
         gidOrUrl: probe.firstPageUrl || probe.gid,
         pages: `1-${probe.totalPages}`,
         delayMs: 100,

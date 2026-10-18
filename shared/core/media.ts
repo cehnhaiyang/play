@@ -130,9 +130,10 @@ export const isHlsSegmentPath = (pathname: string): boolean =>
  * 这条资源是否**必须交给 ffmpeg** 才能得到可用文件。
  *
  * 判据取或，两个都要看：
- *  - `type === 'stream'`：渲染层已经把它归类为流（页内脚本按后缀判、AI 提取按模型给的类型判）；
- *  - 后缀属 stream 类：`ext='flv'` 但 `type='video'` 是真实存在的组合 ——
- *    AI 提取时模型给的 type 与 URL 后缀不必自洽（`{"url":"...x.flv","type":"video"}`）。
+ *  - `type === 'stream'`：渲染层已经把它归类为流；
+ *  - 后缀属 stream 类：`type` 与 `ext` 来自不同的判据（分类看 content-type，
+ *    条目构造看 URL 后缀），两者不必自洽，也可能只给得出一个 ——
+ *    只按 type 判会让一个 .flv 条目走裸 HTTP 下载。
  *
  * **三处必须同源**，否则界面与实际行为对不上：
  *  - 主进程 handleMediaDownload 的 isStream（决定走 ffmpeg 还是裸 HTTP）；

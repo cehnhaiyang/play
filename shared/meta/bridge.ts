@@ -104,10 +104,6 @@ export const BRIDGE_ENDPOINTS = {
         reason: '页内扫描要 chrome.scripting 把代码送进目标标签页，应用没有这个能力；'
             + '扫描结果也直接进插件的列表，不过桥。',
     },
-    'sniffer-ai-scan': {
-        route: 'extension',
-        reason: '同 sniffer-scan：取页面源码靠 chrome.scripting，模型调用走插件的 offscreen 文档。',
-    },
     'sniffer-active-page': {
         route: 'extension',
         reason: '"当前是哪个标签页"是浏览器的事实，只有 chrome.tabs 知道。'
@@ -169,6 +165,69 @@ export const BRIDGE_ENDPOINTS = {
         route: 'extension',
         reason: '暂停/继续/取消/定位都是 chrome.downloads 的原生动作。',
     },
+    /* ---------------------------------------------------------------------- */
+    /* 画廊（多站点）：应用侧持有全部实现                                      */
+    /* ---------------------------------------------------------------------- */
+
+    /**
+     * 这组通道归应用，不归插件 —— 与上面那组 acgmho-* 的历史归类相反。
+     *
+     * 原因是一次真实的返工：那组通道当年归给插件，理由是"纯网络读取，
+     * 插件 fetch 自带会话与代理"。但画廊的其余部分（逐页解析、批量落盘、
+     * 断点续传、manifest 徽标）全都只能在应用侧做，于是一本作品的流程被
+     * 劈成两半：列表在插件取、图片在应用下。两边各自维护一套站点解析，
+     * 接第二个站点时立刻分叉。
+     *
+     * 现在的判据是**整条流程的归属**，不是单次请求的性质：抓取、解析、
+     * 落盘必须同侧，否则站点解析会分裂成两份。所以画廊端点一律归应用。
+     */
+    'gallery-sites': {
+        route: 'app',
+        reason: '站点表由主进程的 galleryRegistry 持有（它才知道装了哪些 provider）。',
+    },
+    'gallery-channels': {
+        route: 'app',
+        reason: '频道表跟着 provider 走，provider 只在应用侧。',
+    },
+    'gallery-probe': {
+        route: 'app',
+        reason: '探测结果要直接被应用侧的抓取/落盘复用（firstHtml、token、galleryUrl），'
+            + '放在插件里就得跨进程传一大段 HTML。',
+    },
+    'gallery-channel-list': {
+        route: 'app',
+        reason: '同 gallery-probe：列表条目要直接喂给应用侧的探测与落盘。',
+    },
+    'gallery-start-download': {
+        route: 'app',
+        reason: '批量落盘：任意路径写入 + 并发控制 + 断点续传状态，都是 Node 侧能力。',
+    },
+    'gallery-cancel-download': {
+        route: 'app',
+        reason: '要中止应用侧的写盘任务。',
+    },
+    'gallery-save-images': {
+        route: 'app',
+        reason: '边下边播落盘：写文件 + 写 manifest 与 .gallery 徽标。',
+    },
+    'gallery-cancel-save-images': {
+        route: 'app',
+        reason: '要中止应用侧的写盘并清理已落地的半套文件。',
+    },
+    'gallery-open-folder': {
+        route: 'app',
+        reason: '打开资源管理器需要 shell API。',
+    },
+    'gallery-fetch-pages': {
+        route: 'app',
+        reason: '逐页解析与应用侧下载器共用同一套 provider（含图床直连策略），'
+            + '拆到插件就会有两份站点解析。',
+    },
+    'gallery-cancel-fetch-pages': {
+        route: 'app',
+        reason: '取消的是应用侧的 run 登记表。',
+    },
+
     'acgmho-probe': {
         route: 'extension',
         reason: '纯网络读取。插件 fetch 天然带上会话 cookie 与用户已配好的代理，'
@@ -331,18 +390,26 @@ export const BRIDGE_EVENTS = {
         reason: '跟随 download-media：直链由 chrome.downloads.onChanged 报，'
             + '流媒体由应用解析 ffmpeg 的 -progress 输出后过桥。',
     },
+    'gallery-fetch-progress': {
+        route: 'app',
+        reason: '逐页解析在应用侧执行（Node 直抓），插件里没有这条路。'
+            + '与 acgmho-fetch-progress 的区别：那条是插件内抓取，这条是应用内抓取。',
+    },
+    'gallery-progress': {
+        route: 'app',
+        reason: '批量下载在应用侧执行。',
+    },
+    'gallery-save-progress': {
+        route: 'app',
+        reason: '落盘在应用侧执行。',
+    },
     'acgmho-fetch-progress': {
         route: 'extension',
         reason: '抓取在插件内进行，进度不出浏览器。',
     },
-    'acgmho-progress': {
-        route: 'app',
-        reason: '批量下载在应用侧执行。',
-    },
-    'acgmho-save-progress': {
-        route: 'app',
-        reason: '落盘在应用侧执行。',
-    },
+    // acgmho-progress / acgmho-save-progress 已随画廊多站点改造退役：
+    // 事件改由 gallery-* 推送（带 site 字段）。旧名字留在 RETIRED_CHANNELS 里，
+    // 免得有人以为"改回去就能恢复兼容" —— 渲染层已同步改订阅名。
     'torrent-progress': {
         route: 'app',
         reason: 'BT 引擎在应用侧。',
@@ -372,6 +439,11 @@ export const RETIRED_CHANNELS = [
     'browser-command',
     'edge-detect',
     'edge-import',
+    // 画廊多站点改造：进度事件统一改叫 gallery-*（带 site 字段），旧名不再推送。
+    // 放进这张表而不是留在事件表里 —— 留在表里会让"事件表里 app 路由都有真实
+    // 推送点"那条断言长期红着，最终被人无视。
+    'acgmho-progress',
+    'acgmho-save-progress',
 ] as const;
 
 /* ========================================================================== */

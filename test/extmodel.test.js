@@ -94,15 +94,11 @@ const installFetchStub = (bodies) => {
     globalThis.fetch = async (url, init) => {
         const body = init && init.body ? JSON.parse(init.body) : {};
         bodies.push({ url, body });
-        // 深度嗅探要一个数组才走完解析；普通补全给一个对象
-        const content = /Extract direct media URLs/.test(JSON.stringify(body.messages))
-            ? '[{"url":"https://x/y.mp4","title":"y","type":"video"}]'
-            : '{"final":"ok"}';
         return {
             ok: true,
             status: 200,
             headers: { get: () => 'application/json' },
-            text: async () => JSON.stringify({ choices: [{ message: { content } }] }),
+            text: async () => JSON.stringify({ choices: [{ message: { content: '{"final":"ok"}' } }] }),
         };
     };
     return () => { globalThis.fetch = original; };
@@ -183,21 +179,6 @@ const runAsync = async () => {
             eq(bodies.length, 2, '第二次调用应当再发一次请求');
             eq(bodies[1].body.model, 'model-changed-by-user', '改了设置之后必须用新模型');
             eq(bodies[1].url, `${changed.baseUrl}/chat/completions`, '地址也应随之改变');
-        });
-
-        await step('AI 深度嗅探走的是同一份配置（两条路径不能各读一份）', async () => {
-            const before = bodies.length;
-            await new Promise((resolve) => {
-                listener(
-                    { target: 'host', kind: 'ai-extract-links', html: '<a href="https://x/y.mp4">y</a>', title: 't', aiConfig: APP_CONFIG },
-                    {},
-                    () => resolve(),
-                );
-            });
-            // 等实际请求落地（宿主内部是异步的）
-            for (let i = 0; i < 100 && bodies.length === before; i++) await new Promise((r) => setTimeout(r, 20));
-            assert(bodies.length > before, '深度嗅探没有发出请求');
-            eq(bodies[bodies.length - 1].body.model, APP_CONFIG.model, '深度嗅探也必须用设置里的模型');
         });
     } finally {
         restoreFetch();

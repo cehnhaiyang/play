@@ -169,14 +169,6 @@ export type BallRequest =
      */
     | { target: 'sw'; kind: 'sniffer-scan'; tabId?: number }
     /**
-     * AI 深度嗅探：把页面源码交给模型挑结构化资源。
-     *
-     * 与 `sniffer-scan` 不同，这一条**必须有一个目标标签页**（不传则取当前
-     * 活动的那个）：一次调用就是一整份页面源码加一次模型往返，点一下就把
-     * 几十个标签页全发出去不是这个按钮该有的行为。
-     */
-    | { target: 'sw'; kind: 'sniffer-ai-scan'; tabId?: number }
-    /**
      * 当前活动标签页。
      *
      * **嗅探不再用它** —— 嗅探的作用域已经是"浏览器里打开的全部标签页"，
@@ -268,18 +260,7 @@ export type HostRequest =
     | HostChatRequest
     | { target: 'host'; kind: 'ai-ready' }
     /** 用户点了停止：中止在途的那次补全 */
-    | { target: 'host'; kind: 'ai-cancel'; requestId: string }
-    /**
-     * AI 深度嗅探：把页面源码交给模型挑出结构化资源。
-     *
-     * 与 `ai-chat` 分开而不是复用它：这一条**不需要流式**（一次返回一个数组），
-     * 所以走普通的请求/应答就够，不必套上增量广播与 requestId 认领那一套。
-     *
-     * 它必须落在 offscreen 的理由与 ai-chat 完全相同：SW 空闲约 30 秒被回收，
-     * 而一次提取可能要十几秒。SW 侧不 import AiService —— 那个模块会拖进
-     * 整个服务商预设表与 fetch 封装，而 SW 里连 `localStorage` 都没有。
-     */
-    | { target: 'host'; kind: 'ai-extract-links'; html: string; title: string; aiConfig: AiConfig };
+    | { target: 'host'; kind: 'ai-cancel'; requestId: string };
 
 /**
  * 宿主文档推给 SW 里 chat-port 的流式增量与终局。

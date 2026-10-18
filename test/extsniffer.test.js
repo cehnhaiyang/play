@@ -187,6 +187,30 @@ const run = () => {
         assert(classify('https://notacgmho.com/x.jpg', 'image/jpeg') !== null, 'notacgmho.com 不是 ACG 域');
     });
 
+    check('E-Hentai 域名与图床被排除', () => {
+        // 一本 685 页的书会把 685 条图片刷进嗅探列表 —— 比 ACG 的封面更严重。
+        // 图床域名（hath.network）必须一起挡：图片直链就在那个域上。
+        for (const host of [
+            'e-hentai.org', 'www.e-hentai.org', 'exhentai.org',
+            'ehgt.org', 'vejxhvl.ocodorckuliu.hath.network',
+        ]) {
+            eq(classify(`https://${host}/x.jpg`, 'image/jpeg'), null, `${host} 属 E-Hentai，走画廊流程`);
+        }
+    });
+
+    check('E-Hentai 页面下挂的第三方资源也被排除（documentUrl 命中）', () => {
+        eq(classify('https://cdn.other.com/x.jpg', 'image/jpeg', 'https://e-hentai.org/g/1/abc/'), null);
+    });
+
+    check('站点判定按主机名，不按 gid（两站 gid 都是数字）', () => {
+        // "粘贴链接直接抓取"这个入口没有站点选择器，只能靠域名反推站点。
+        // 猜错的表现是"贴 e-hentai 链接却报 acgmho 解析失败"，极难定位。
+        eq(CONST.siteIdOfUrl('https://e-hentai.org/g/4262064/ecdb568beb/'), 'ehentai');
+        eq(CONST.siteIdOfUrl('https://www.acgmho.com/h/4262064.html'), 'acgmho');
+        eq(CONST.siteIdOfUrl('https://example.com/x'), '', '认不出要返回空串，不能瞎猜');
+        eq(CONST.siteIdOfUrl(''), '');
+    });
+
     /* ====================================================================== */
     /* 5. 标题推导                                                              */
     /* ====================================================================== */
@@ -542,7 +566,7 @@ const run = () => {
             'sniffer-set-enabled', 'sniffer-get-state', 'sniffer-clear',
             'sniffer-clear-tab', 'sniffer-tabs', 'sniffer-close-tab',
             'sniffer-scan', 'sniffer-active-page',
-            'sniffer-ai-scan', 'downloads-start', 'agent-snapshot', 'agent-action',
+            'downloads-start', 'agent-snapshot', 'agent-action',
             // 面板的「规则 / 请求头 / 存储 / JWT」四个页签走的就是这几条
             'tamper-get', 'tamper-set', 'tamper-inject',
             'page-storage-read', 'page-storage-write',
@@ -559,7 +583,7 @@ const run = () => {
         }
 
         // 反向：转发之后不该再碰那些内部函数（碰了说明只转了一半）
-        for (const fn of ['clearItems(', 'scanTab(', 'aiSniffTab(', 'clearTab(', 'getItems(']) {
+        for (const fn of ['clearItems(', 'scanTab(', 'clearTab(', 'getItems(']) {
             assert(!body.includes(fn),
                 `dispatchBall 里直接调了 ${fn} —— 与桥重叠的操作必须整条转发，`
                 + '只转一半等于又造了一份实现。');
@@ -751,6 +775,85 @@ const run = () => {
         // 失败要落在一个能显示出来的状态上，而不是只 setTabs([])
         assert(/setTabsError\(/.test(src), 'refreshTabs 没有把失败记进 tabsError');
         assert(/标签栏不可用/.test(src), '失败原因没有画到界面上');
+    });
+
+    /* ====================================================================== */
+    /* 8.7 ACG 排除：三条采集路径共用一份判据                                     */
+    /* ====================================================================== */
+
+    /**
+     * 判据本身能直接调，就**直接调**（不是 grep 源码）：一个恒返回 false 的
+     * `isSniffExcluded` 在文本断言下照样全绿 —— 那样钉住的只是名字。
+     *
+     * 覆盖三态：资源地址命中、宿主页面命中、两条都不命中。
+     */
+    check('isSniffExcluded：资源地址与宿主页面两条都要看', () => {
+        const { isSniffExcluded } = C;
+        assert(typeof isSniffExcluded === 'function', 'classify.ts 没有导出 isSniffExcluded');
+
+        // 直链就在 ACG 域上（含子域）
+        eq(isSniffExcluded('https://acgmho.com/x.jpg'), true, 'ACG 直链');
+        eq(isSniffExcluded('https://cdn.acgnngca.com/x.jpg'), true, 'ACG 子域');
+        // 直链在别处、页面在 ACG 站：只看地址会漏掉一整本漫画
+        eq(isSniffExcluded('https://cdn.other.com/x.jpg', 'https://acgmho.com/g/123'), true,
+            '宿主页面是 ACG 站时第三方直链也要挡');
+        // e-hentai 的图床（一本 685 页的书，图片直链全在那个域上）
+        eq(isSniffExcluded('https://vejxhvl.ocodorckuliu.hath.network/x.jpg'), true, 'hath 图床');
+        eq(isSniffExcluded('https://cdn.other.com/x.jpg', 'https://e-hentai.org/g/1/abc/'), true,
+            '宿主页面是 e-hentai 时也要挡');
+
+        // 三态齐全：普通站点、普通资源一律放行
+        eq(isSniffExcluded('https://a.com/x.mp4', 'https://a.com/page'), false, '普通资源不该被挡');
+        eq(isSniffExcluded('https://notacgmho.com/x.jpg'), false, '子域判据不能过宽');
+        eq(isSniffExcluded(undefined), false, '没有地址时不能当成命中');
+        eq(isSniffExcluded(''), false, '空串同理');
+    });
+
+    /**
+     * 结构性守卫（这段代码在 service worker 里，Node 里 require 不了）。
+     *
+     * 实测过的漏洞：这条判据原先只写在 `classifyResponse` 里，于是**只有网络层
+     * 拦得住** —— 页内扫描照收不误。在 ACG 站上开着嗅探逛一圈，列表就被封面
+     * 刷满，而这正是那道闸存在的理由。
+     */
+    check('页内扫描也调 isSniffExcluded', () => {
+        const src = fs.readFileSync(
+            path.join(ROOT, 'extension', 'src', 'background', 'service-worker.ts'), 'utf8');
+
+        const start = src.indexOf('const itemFromCandidate');
+        assert(start > 0, '找不到页内扫描的 itemFromCandidate');
+        // 取到函数结束：下一个顶层 `};` 收尾（内部函数的收尾都有缩进）
+        const body = src.slice(start, src.indexOf('\n};', start));
+        assert(/isSniffExcluded\(/.test(body),
+            'itemFromCandidate 没有排除 ACG / E-Hentai 资源 —— 网络层拦得住，页内扫描会把封面刷进列表');
+    });
+
+    /* ====================================================================== */
+    /* 8.8 事件里发的是**入库后的那一份**                                        */
+    /* ====================================================================== */
+
+    /**
+     * 插件是嗅探结果的权威，球上的列表只是它的副本 —— 而副本靠事件更新。
+     *
+     * `pushItem` 里发生两件合并：标签页归属取**并集**、标题**只升不降**。
+     * 事件里发"这次发现"（合并前的那份）而不是入库后的那份，副本就会分叉，
+     * 而且是两边都"成功"的那种分叉：条目从另一个标签页的筛选里消失、
+     * 好标题被文件名顶掉、标签栏计数对不上。
+     *
+     * 判据：`pushItem` 的返回值**一处都不能丢** —— 每次调用都必须是事件参数。
+     */
+    check('嗅探事件发的是 pushItem 入库后的那份', () => {
+        const src = fs.readFileSync(
+            path.join(ROOT, 'extension', 'src', 'background', 'service-worker.ts'), 'utf8');
+
+        const bare = src.match(/(?:^|\n)\s*pushItem\(item\);$/gm) || [];
+        eq(bare.length, 0,
+            'pushItem(item) 的返回值被丢掉了 —— 事件里发的是合并前的那份，'
+            + '球上的副本会与插件分叉（标签页归属停在最后一个标签页）');
+
+        const emits = src.match(/emitBridgeEvent\('sniffed-media', pushItem\(item\)\)/g) || [];
+        assert(emits.length >= 2,
+            `只有 ${emits.length} 条采集路径发了入库后的那份，应有 2 条（网络层、页内扫描）`);
     });
 
     /* ====================================================================== */

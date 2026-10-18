@@ -790,7 +790,7 @@ const SettingsFloating: React.FC = () => {
                         2. <strong className="text-slate-300">密钥存在主进程</strong>
                         ：落盘在 userData/settings.json，不写入浏览器 localStorage。
                     </p>
-                    <p>3. 资源嗅探的 AI 深度分析与音频工作台的代码生成共用这份配置。</p>
+                    <p>3. Agent 与音频工作台的代码生成共用这份配置。</p>
                 </div>
             </section>
         </div>

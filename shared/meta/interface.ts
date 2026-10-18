@@ -82,7 +82,7 @@ export interface FoundLink {
     type: MediaType;
     /** 文件扩展名 (如 mp4, m3u8, png) */
     ext: string;
-    /** 嗅探来源渠道 ('local' | 'ai' | 'network') */
+    /** 嗅探来源渠道 ('local' | 'network') */
     source: MediaSourceChannel;
     /** 触发嗅探的宿主页面 URL */
     pageUrl?: string;
@@ -1047,7 +1047,99 @@ export interface AcgmhoChannelListResult {
 }
 
 /**
+ * 画廊站点描述（主进程 galleryRegistry 产出，UI 的站点选择按它渲染）
+ */
+export interface GallerySiteDef {
+    /** 站点 id：acgmho | ehentai | … */
+    id: string;
+    /** 中文展示名 */
+    label: string;
+    /** 是否为成人内容站点（UI 可据此默认折叠） */
+    adult: boolean;
+    /** 该站点支持的内容类型 */
+    kinds: AcgmhoChannelKind[];
+}
+
+/** 一个站点的频道表（UI 切站点时按 site 取） */
+export interface GallerySiteChannels {
+    site: string;
+    label: string;
+    adult: boolean;
+    channels: AcgmhoChannelDef[];
+}
+
+/** 带站点的探测/列表/下载参数：site 缺省时主进程用默认站点 */
+export interface GallerySiteScoped {
+    /** 站点 id；不传 = 默认站点（acgmho），传了但认不出会明确报错 */
+    site?: string;
+}
+
+/** 频道列表请求（含站点） */
+export type GalleryChannelListOptions = GallerySiteScoped & {
+    channelId: string;
+    page?: number;
+    query?: string;
+    baseUrl?: string;
+};
+
+/** 抓页请求（含站点） */
+export type GalleryFetchPagesOptions = GallerySiteScoped & {
+    gidOrUrl: string;
+    pages?: string;
+    delayMs?: number;
+    runId?: string;
+    skipPages?: number[];
+    probe?: GalleryProbeResult;
+};
+
+/**
+ * Electron 注入到渲染层的**通用**画廊 API。
+ *
+ * 与 ElectronAcgmhoAPI 的关系：这是按站点分发的通用版，`acgmho` 那个命名空间
+ * 保留为"默认站点"的别名（同一次 invoke，不是另一份实现）。新代码一律用 gallery。
+ */
+export interface ElectronGalleryAPI {
+    /** 站点表（UI 的站点选择按它渲染，加站点不需要改 UI） */
+    sites: () => Promise<GallerySiteDef[]>;
+    /** 频道表：不传 all 只返回该站点的频道；all=true 返回全部站点的两层结构 */
+    channels: (options?: GallerySiteScoped & { all?: boolean }) => Promise<AcgmhoChannelDef[] | GallerySiteChannels[]>;
+    channelList: (options: GalleryChannelListOptions) => Promise<{ success: boolean; message?: string } & AcgmhoChannelListResult>;
+    probe: (options: GallerySiteScoped & { target: string }) => Promise<GalleryProbeResult>;
+    startDownload: (options: GalleryDownloadOptions & GallerySiteScoped) => Promise<{
+        success: boolean;
+        message?: string;
+        outDir?: string;
+        manifestPath?: string;
+    }>;
+    cancelDownload: (options: GallerySiteScoped & { gidOrUrl: string }) => Promise<{ success: boolean }>;
+    openFolder: (folderPath: string) => Promise<{ success: boolean; message?: string }>;
+    onProgress: (callback: (progress: GalleryDownloadProgress & { site?: string }) => void) => () => void;
+    fetchPages: (options: GalleryFetchPagesOptions) => Promise<{
+        gid: string;
+        title: string;
+        totalPages: number;
+        pages: GalleryPageItem[];
+        errors?: { page: number; error: string }[];
+        runId?: string;
+    }>;
+    cancelFetchPages: (options: GallerySiteScoped & { gidOrUrl: string; runId?: string }) => Promise<{ success: boolean }>;
+    onFetchProgress: (callback: (progress: GalleryFetchProgress & { site?: string }) => void) => () => void;
+    saveImages: (options: GallerySaveOptions & GallerySiteScoped) => Promise<{
+        success: boolean;
+        outDir?: string;
+        manifestPath?: string;
+        galleryMarkerPath?: string;
+        savedFiles?: string[];
+    }>;
+    cancelSaveImages: (options: GallerySiteScoped & { taskKey?: string; gid?: string }) => Promise<{ success: boolean }>;
+    onSaveProgress: (callback: (progress: GallerySaveProgress & { site?: string }) => void) => () => void;
+}
+
+/**
  * Electron 注入到渲染层的 ACGMHO 专属画册下载与爬虫 API
+ *
+ * 注意：这是**默认站点（acgmho）**的别名视图。多站点能力见 ElectronGalleryAPI，
+ * 两者在主进程里走同一批 handler，不存在第二份实现。
  */
 export interface ElectronAcgmhoAPI {
     /** 探测画册基础信息及元数据 */
@@ -1463,7 +1555,9 @@ export interface ElectronAPI {
     setCookie: (details: any) => Promise<void>;
     /** 移除指定名称的 Cookie */
     removeCookie: (url: string, name: string) => Promise<void>;
-    /** ACGMHO 画册下载服务 API (可选模块) */
+    /** 画廊（多站点）API：按 site 分发，站点差异在主进程 registry 里 */
+    gallery?: ElectronGalleryAPI;
+    /** 默认站点（acgmho）的别名视图；与 gallery 走同一批 handler */
     acgmho?: ElectronAcgmhoAPI;
     /** 应用设置 API (可选模块) */
     settings?: ElectronSettingsAPI;
@@ -1555,15 +1649,28 @@ export const getElectronAPI = (): ElectronAPI | undefined => {
 export interface GalleryProbeResult {
     /** 画册 ID (GID) */
     gid: string;
+    /**
+     * 来源站点 id（acgmho / ehentai …）。
+     *
+     * 必须由 provider 自己带上：后续的抓页、落盘、取消都要拿它回指同一个站点。
+     * 缺了它就只能靠 gid 猜，而两个站点的 gid 空间互不相干（同号是两本书）。
+     */
+    site?: string;
     /** 画册标题名称 */
     title: string;
     /** 总页数 */
     totalPages: number;
-    /** 第一页图片缩略图或直链 */
+    /**
+     * 第一页图片缩略图或直链。
+     *
+     * 可能是**有时效的签名直链**（e-hentai 的 keystamp 最多 10 分钟失效）。
+     * 因此它只用于"刚探测完的这一屏"，不能当封面长期展示、也不能跨会话复用：
+     * 快照恢复后应改用 `poster`（稳定封面）。
+     */
     firstImgUrl: string;
     /** 资源路径前缀 */
     prefix: string;
-    /** 第一页页面地址 */
+    /** 第一页页面地址（作品页，不是图片页） */
     firstPageUrl: string;
     /**
      * 第一页 HTML 原文（仅内存传递：下载/抓取复用它免去重下一遍第 1 页）。
@@ -1580,7 +1687,7 @@ export interface GalleryProbeResult {
     isAnimated?: boolean;
     /** 关联视频流地址 (若有) */
     videoUrl?: string;
-    /** 封面海报地址 */
+    /** 封面海报地址（稳定地址，可长期展示与跨会话复用） */
     poster?: string;
     /** 音轨列表 (若有) */
     audioList?: Array<{ name: string; url: string; artist?: string; cover?: string; type?: string }>;
@@ -1692,6 +1799,8 @@ export interface GallerySavedFile {
 export interface GallerySaveOptions {
     /** 作品数字 ID */
     gid: string;
+    /** 来源站点 id：落盘目录按站点分根（不同站点同号 gid 是两本书） */
+    site?: string;
     /** 任务键（prefix:gid，缺省由渲染层按 prefix 推导，主进程回传进度时原样带回） */
     taskKey?: string;
     /** 作品标题（用于目录徽标/manifest） */
@@ -1714,6 +1823,8 @@ export interface GallerySaveOptions {
 export interface GallerySaveProgress {
     /** 作品数字 ID */
     gid: string;
+    /** 来源站点 id（多站点下同号 gid 是两本书，进度必须能区分） */
+    site?: string;
     /** 任务键（prefix:gid）：同数字 gid 不同前缀的两本作品凭此区分进度 */
     taskKey?: string;
     /** 作品标题 */
@@ -2203,8 +2314,10 @@ export interface GalleryPanelProps {
      * mediaType 必须原样带过去：ACG 音声作品的「音轨」是 HLS（.m3u8）地址，
      * 下游若按 URL 重新推断只会看到 .m3u8，会把 mp3 音轨判成流媒体、
      * 进而被播放器的「视频」筛选吞掉。类型由探测结果决定，不由扩展名决定。
+     * artist 同理必须带过去：艺术家只在探测结果里，在这一层丢掉之后，
+     * 音频视图的署名一行就永远是空的。
      */
-    onPlayMediaStreams?: (pages: { url: string; title: string; mediaType?: MediaType }[]) => void;
+    onPlayMediaStreams?: (pages: { url: string; title: string; mediaType?: MediaType; artist?: string }[]) => void;
     onAppendToPlayer?: (
         pages: { url: string; title: string; page?: number }[],
         gid?: string

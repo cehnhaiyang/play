@@ -24,6 +24,7 @@ import {
     sanitizeBookName,
     sanitizePackName,
     saveStr,
+    siteIdOfUrl,
     toDataUrl,
 } from '../../shared/core';
 // gallery 刻意不在 shared/core 的索引里导出（它拖着 JSZip），按具体路径引
@@ -146,6 +147,10 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
     const progressPercent = validDuration > 0 ? Math.min(100, Math.max(0, (activeTime / validDuration) * 100)) : 0;
     const bufferedPercent = validDuration > 0 ? Math.min(100, Math.max(0, (bufferedEnd / validDuration) * 100)) : 0;
 
+    // 时间气泡显示哪个时刻：拖动中必须跟着手指/光标走。hoverPosition 只在悬停事件里更新，
+    // 触屏（没有 hover 事件）与「拖出轨道」两种情形下它会停在按下点，而填充条已跑到拖动点。
+    const previewTime = isSeeking ? seekPreviewTime : hoverPosition;
+
     const calculateTimeFromEvent = useCallback((clientX: number): number => {
         if (!barRef.current || validDuration <= 0) return 0;
         const rect = barRef.current.getBoundingClientRect();
@@ -257,14 +262,14 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
             onTouchStart={handleTouchStart}
         >
             {/* 悬停时间预览 Tooltip 气泡 */}
-            {(isHovered || isSeeking) && hoverPosition !== null && validDuration > 0 && (
+            {previewTime !== null && (isHovered || isSeeking) && validDuration > 0 && (
                 <div
                     className="absolute -top-7 -translate-x-1/2 px-2 py-0.5 rounded bg-slate-900/95 border border-white/20 text-[11px] font-mono text-white pointer-events-none shadow-xl backdrop-blur transition-all duration-75 z-30"
                     style={{
-                        left: `${Math.min(96, Math.max(4, (hoverPosition / validDuration) * 100))}%`,
+                        left: `${Math.min(96, Math.max(4, (previewTime / validDuration) * 100))}%`,
                     }}
                 >
-                    {formatTime(hoverPosition)}
+                    {formatTime(previewTime)}
                 </div>
             )}
 
@@ -1227,6 +1232,10 @@ const StoryReader: React.FC<StoryReaderProps> = ({ file, pages, onCacheAudio, on
 
     const pageIndex = Math.max(0, pages.findIndex((p) => p.id === file.id));
     const text = file.description || '';
+    // 渲染期同步当前页码：朗读要等网络合成几秒，回包时必须能认出
+    // 「我发起的那一页还是不是屏幕上的这一页」
+    const pageIdRef = useRef(file.id);
+    pageIdRef.current = file.id;
 
     // 停止当前朗读：卸载/翻页时调用，防止上一页声音继续
     const stop = useCallback(() => {
@@ -1286,6 +1295,10 @@ const StoryReader: React.FC<StoryReaderProps> = ({ file, pages, onCacheAudio, on
                 base64 = generated;
                 onCacheAudio(file.id, base64);
             }
+
+            // 合成期间用户可能已经翻页：缓存照写（这一页下次点朗读不必再请求），
+            // 但上一页的声音绝不能挂到新页上播 —— 它没有任何入口能停下来
+            if (pageIdRef.current !== file.id) return;
 
             const buffer = pcmToAudioBuffer(base64, ctx);
             const source = ctx.createBufferSource();
@@ -1470,6 +1483,15 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, isVisible, onOpenG
     const [acgInput, setAcgInput] = useState('');
     const [isAcgLoading, setIsAcgLoading] = useState(false);
     const [acgStatus, setAcgStatus] = useState<string | null>(null);
+    /**
+     * 在途抓取的轮次号：弹窗一关就作废。
+     *
+     * 探测要花几秒，用户完全可能在这期间点「取消」。少了这道闸，回包照样会把
+     * 整部作品塞进播放列表（甚至把重新打开的弹窗一并关掉）—— 用户看到的是
+     * 「我取消了，列表却多了一部作品」。判据必须是轮次号而不是 isAcgLoading
+     * 那种共享布尔：取消后立刻重新抓取时，旧回包会把新一轮的加载态清掉。
+     */
+    const acgRunRef = useRef(0);
 
     // 播放列表分类过滤
     const [playlistFilter, setPlaylistFilter] = useState<'all' | 'video' | 'stream' | 'audio' | 'image' | 'gallery' | 'book' | 'document'>('all');
@@ -1574,9 +1596,14 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, isVisible, onOpenG
     // ACG 状态含失败关键词时按错误着色
     const acgStatusIsError = !!acgStatus && /失败|异常|不支持|未解析|错误/.test(acgStatus);
 
+    // 关闭弹窗的**唯一**入口（取消按钮 / X / 遮罩 / Esc 都走这里）：作废在途轮次
+    // 并复位加载态。少了作废，取消只是把界面藏起来，作品随后仍会自己进列表；
+    // 少了复位，重新打开时按钮卡在「解析中…」且点不动。
     const closeAcgModal = useCallback(() => {
+        acgRunRef.current += 1;
         setShowAcgModal(false);
         setAcgStatus(null);
+        setIsAcgLoading(false);
     }, []);
 
     // 智能导入：先解 .aibook，再解单文件 .gallery 包，其余原样走 addFiles
@@ -1894,14 +1921,21 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, isVisible, onOpenG
         const target = acgInput.trim();
         if (!target) return;
         const electronAPI = getElectronAPI();
-        if (!electronAPI?.acgmho?.probe) {
+        if (!electronAPI?.gallery?.probe) {
             setAcgStatus('读取不到直连抓取桥（preload 未加载），请重启应用');
             return;
         }
+        // 本轮抓取的轮次号：弹窗关闭会把它推进一格，回包凭它自认作废
+        const run = (acgRunRef.current += 1);
         setIsAcgLoading(true);
         setAcgStatus('正在解析作品媒体资源...');
         try {
-            const probe = await electronAPI.acgmho.probe(target);
+            // 站点按地址反推：这个入口没有站点选择器，写死 acgmho 会让
+            // "贴 e-hentai 链接"永远解析失败（gid 在两个站点都是数字，猜不出来）。
+            const site = siteIdOfUrl(target) || undefined;
+            const probe = await electronAPI.gallery.probe({ site, target });
+            // 探测期间弹窗被关掉（取消）：这轮回包整批作废，一个字都不写回界面
+            if (run !== acgRunRef.current) return;
             const resolved = resolveProbeMedia(probe);
             if (resolved.kind === 'none' || resolved.streams.length === 0) {
                 setAcgStatus(resolved.status || '作品中未解析到可播放的媒体资源');
@@ -1922,8 +1956,8 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, isVisible, onOpenG
             setAcgStatus(null);
 
             // 图集后续页异步续抓追加（旧轮次回包直接丢弃）
-            if (resolved.kind === 'image' && resolved.totalPages > 1 && electronAPI.acgmho.fetchPages) {
-                fetchAcgRemainingPages(electronAPI.acgmho.fetchPages, probe, 'playpanel').then(({ runId, pages }) => {
+            if (resolved.kind === 'image' && resolved.totalPages > 1 && electronAPI.gallery.fetchPages) {
+                fetchAcgRemainingPages(electronAPI.gallery.fetchPages, probe, 'playpanel').then(({ runId, pages }) => {
                     if (!runId || pages.length === 0) return;
                     methods.appendStreams(pages.map((p) => ({
                         url: p.url,
@@ -1941,6 +1975,8 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, isVisible, onOpenG
                 });
             }
         } catch (err: any) {
+            // 已取消的那一轮连错误都不该留下：重新打开弹窗会看到上一轮的红字
+            if (run !== acgRunRef.current) return;
             setAcgStatus(err?.message || '抓取解析发生异常');
             setIsAcgLoading(false);
         }
@@ -1973,8 +2009,7 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, isVisible, onOpenG
     const closeOverlaysRef = useRef(() => { });
     closeOverlaysRef.current = () => {
         setShowUrlModal(false);
-        setShowAcgModal(false);
-        setAcgStatus(null);
+        closeAcgModal();
         setShowShortcuts(false);
         setShowRateMenu(false);
     };
@@ -3496,14 +3531,14 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, isVisible, onOpenG
                         <input
                             id="tp-acg-input"
                             type="text"
-                            placeholder="https://www.acgmho.com/h/12345 或作品 ID"
+                            placeholder="https://www.acgmho.com/h/12345 或 https://e-hentai.org/g/123/abcdef/"
                             value={acgInput}
                             onChange={(e) => setAcgInput(e.target.value)}
                             onKeyDown={(e) => { if (e.key === 'Enter') handleFetchAcg(); }}
                             disabled={isAcgLoading}
                             className="w-full bg-slate-950 border border-white/10 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-rose-500 font-mono disabled:opacity-60 transition"
                         />
-                        <p className="text-[11px] text-slate-500 mt-1.5">支持漫画、动图、动画视频与有声音频，免下载直接推送到播放器</p>
+                        <p className="text-[11px] text-slate-500 mt-1.5">支持 ACG 漫画/动图/动画/音声与 E-Hentai 图集，按链接域名自动识别站点，免下载直接推送到播放器</p>
                     </div>
 
                     {acgStatus && (

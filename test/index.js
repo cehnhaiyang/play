@@ -77,9 +77,13 @@ const main = async () => {
   console.log('\n=== 开发脚本自检 ===');
   const scriptsOk = require('./scripts.test.js').run();
 
+  console.log('\n=== E-Hentai 站点适配 ===');
+  const ehentaiOk = require('./ehentai.test.js').run();
+
   if (!engineOk || !compatOk || !aibookOk || !aiproviderOk || !searchSyncOk || !searchAsyncOk
     || !mainStaticOk || !agentToolsOk
-    || !logsOk || !bridgeOk || !bridgeAppOk || !extSnifferOk || !extModelOk || !manifestOk || !scriptsOk) {
+    || !logsOk || !bridgeOk || !bridgeAppOk || !extSnifferOk || !extModelOk || !manifestOk || !scriptsOk
+    || !ehentaiOk) {
     process.exitCode = 1;
     console.log('\n存在失败用例。');
   } else {

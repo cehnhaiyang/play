@@ -69,14 +69,13 @@ const FILTERS: { value: MediaType | 'all'; label: string }[] = [
 /**
  * 嗅探来源的角标文案。
  *
- * 三个来源对用户有实质区别：`network` 是页面真的请求过的（一定能下），
- * `local` 是页内扫描找到的地址，`ai` 是模型从源码里挑的（**可能是猜的**）。
- * 不标出来的话，用户分不清"这条下载失败"是站点的问题还是模型编的地址。
+ * 两个来源对用户有实质区别：`network` 是页面真的请求过的（一定能下），
+ * `local` 是页内扫描在 DOM / Performance / 源码里找到的地址（可能从没被请求过）。
+ * 不标出来的话，用户分不清"这条下载失败"是站点的问题还是那个地址本来就没被用过。
  */
 const SOURCE_LABEL: Record<MediaSourceChannel, string> = {
     network: '网络',
     local: '页面',
-    ai: 'AI',
 };
 
 /** 一组：同一个页面来的结果 */
@@ -138,7 +137,7 @@ const SniffOrb = () => {
     const [error, setError] = useState('');
     const [connected, setConnected] = useState(true);
     const [busy, setBusy] = useState(false);
-    /** 页内扫描或 AI 分析在途。与 busy 分开：那两个可能几秒到几十秒，要给得出反馈 */
+    /** 页内扫描在途。与 busy 分开：一次扫描可能几秒到几十秒，要给得出反馈 */
     const [scanning, setScanning] = useState('');
     const [filter, setFilter] = useState<MediaType | 'all'>('all');
     /**
@@ -235,8 +234,8 @@ const SniffOrb = () => {
         /*
          * 按 URL 去重后再插入。
          *
-         * 插件的去重窗口只有 5 秒，而同一个地址可能被三条路径先后发现
-         * （网络层、页内扫描、AI）—— 间隔超过 5 秒就会各推一条。球这一层
+         * 插件的去重窗口只有 5 秒，而同一个地址可能被两条路径先后发现
+         * （网络层、页内扫描）—— 间隔超过 5 秒就会各推一条。球这一层
          * 按 URL 合并，与插件侧的 `pushItem` 同一语义：列表里一个地址只出现一次。
          */
         setItems((prev) => {
@@ -288,27 +287,14 @@ const SniffOrb = () => {
      *
      * 扫的是**全部标签页**，与嗅探本身的作用域一致。
      */
-    const scan = useCallback(async (kind: 'sniffer-scan' | 'sniffer-ai-scan') => {
+    const scan = useCallback(async () => {
         setError('');
-        const isAi = kind === 'sniffer-ai-scan';
-        setScanning(isAi ? 'AI 正在分析页面…' : '正在扫描全部标签页…');
+        setScanning('正在扫描全部标签页…');
         try {
-            /*
-             * AI 那条**只扫选中的那一个**（没选就是当前活动的）。
-             *
-             * 一次 AI 分析是一整份页面源码加一次模型往返；把几十个标签页
-             * 一起发出去不是点一下按钮该有的后果，用户也没法知道钱花在哪。
-             * 页内扫描是纯本地的，扫全部才符合"嗅探浏览器里的一切"。
-             */
-            const result = await bridge<{ added: number; scanned?: number }>(
-                kind,
-                isAi ? { tabId: activeTabId ?? undefined } : undefined,
-            );
+            const result = await bridge<{ added: number; scanned?: number }>('sniffer-scan');
             setConnected(true);
             if (result.added === 0) {
-                setError(isAi
-                    ? 'AI 没有从页面里找出新的媒体地址。'
-                    : '这次扫描没有发现新的媒体地址（页面可能没有可嗅探的内容，或该页面不允许注入）。');
+                setError('这次扫描没有发现新的媒体地址（页面可能没有可嗅探的内容，或该页面不允许注入）。');
             }
         } catch (e) {
             setError(e instanceof Error ? e.message : String(e));
@@ -316,7 +302,7 @@ const SniffOrb = () => {
         } finally {
             setScanning('');
         }
-    }, [activeTabId]);
+    }, []);
 
     const clear = useCallback(async () => {
         setError('');
@@ -407,6 +393,13 @@ const SniffOrb = () => {
      * `isPlayableMedia` 挡掉文档、画廊占位、other —— 它们进播放列表只会是
      * 一条点了没反应的条目。判据与主窗口入列时用的是同一份（`shared/core`），
      * 这里先挡一道只是为了让提示说得出原因，不是第二套真值。
+     *
+     * ## `sent` 不是"进列表的条数"
+     *
+     * 主进程回的是"交给了主窗口多少条"（主窗口没建好时回 0）；而主窗口会按 URL
+     * 挡掉已在播放列表里的那些，且不回包。所以这里报不出"其余几条已在列表里"
+     * —— 原先那句 `sent < playable.length` 永远不成立。要报准，得让主窗口
+     * 把接收条数传回来（那是一条新的回包路径）。
      */
     const push = useCallback(async (items: SniffedMedia[]) => {
         setError('');
@@ -423,13 +416,7 @@ const SniffOrb = () => {
         }));
         try {
             const sent = await pushToPlayer(payload);
-            if (sent === 0) {
-                setError('主窗口没有接收（应用主窗口可能还没打开）。');
-                return;
-            }
-            if (sent < playable.length) {
-                setError(`已推送 ${sent} 条，其余 ${playable.length - sent} 条已在播放列表里。`);
-            }
+            if (sent === 0) setError('主窗口没有接收（应用主窗口可能还没打开）。');
         } catch (e) {
             setError(e instanceof Error ? e.message : String(e));
         }
@@ -466,29 +453,16 @@ const SniffOrb = () => {
         return counts;
     }, [items]);
 
-    const activeTab = activeTabId === null ? null : tabs.find((tab) => tab.id === activeTabId) || null;
-
     const toolbar = (
         <>
             <button
                 type="button"
-                onClick={() => void scan('sniffer-scan')}
+                onClick={() => void scan()}
                 disabled={!!scanning || busy}
                 title="扫描全部标签页的 DOM / Performance / 播放器全局对象与源码"
                 className="shrink-0 rounded-lg bg-white/[0.06] px-2 py-1 text-[10px] font-medium text-slate-300 transition hover:bg-white/[0.12] hover:text-white disabled:opacity-40"
             >
                 嗅探
-            </button>
-            <button
-                type="button"
-                onClick={() => void scan('sniffer-ai-scan')}
-                disabled={!!scanning || busy}
-                title={activeTab
-                    ? `把「${tabLabel(activeTab)}」的源码交给模型挑结构化资源`
-                    : '把当前活动标签页的源码交给模型挑结构化资源（比扫描慢，但能找出页面里没写的直链）'}
-                className="shrink-0 rounded-lg bg-white/[0.06] px-2 py-1 text-[10px] font-medium text-fuchsia-300 transition hover:bg-white/[0.12] disabled:opacity-40"
-            >
-                AI
             </button>
             <button
                 type="button"
@@ -660,7 +634,7 @@ const SniffOrb = () => {
 
             {/*
               批量推送。放在筛选栏下方而不是标题栏：标题栏只有 380px，
-              已经塞了「嗅探 / AI / 持续 / 收起」四个按钮。
+              已经塞了「嗅探 / 持续 / 收起」三个按钮。
               推的是**当前筛选出来的**那批 —— 用户先筛出想要的范围再推，
               比"推全部"更接近实际用法，且不必先清空列表。
             */}
@@ -722,15 +696,13 @@ const SniffOrb = () => {
                                                 {item.ext}
                                             </span>
                                             {/*
-                                              来源角标。三条采集路径的可信度不同：
-                                              AI 挑出来的地址可能是编的，用户据此决定要不要点下载。
+                                              来源角标。两条采集路径的可信度不同：
+                                              页内扫描找到的地址可能从没被请求过，用户据此决定要不要点下载。
                                             */}
                                             <span
                                                 className={`shrink-0 rounded px-1 py-0.5 text-[9px] ${item.source === 'network'
                                                     ? 'bg-emerald-500/15 text-emerald-300/80'
-                                                    : item.source === 'ai'
-                                                        ? 'bg-fuchsia-500/15 text-fuchsia-300/80'
-                                                        : 'bg-white/[0.06] text-slate-500'
+                                                    : 'bg-white/[0.06] text-slate-500'
                                                     }`}
                                             >
                                                 {SOURCE_LABEL[item.source] || item.source}
