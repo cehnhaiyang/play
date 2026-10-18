@@ -131,15 +131,30 @@ const send = (message) => {
 /* 2. 与 Electron 的 TCP 通道                                                 */
 /* ========================================================================== */
 
+/**
+ * 应用还没连上时的排队上限。
+ *
+ * 队列的意义只有一个：撑过"本进程起来了、TCP 还没连上"这段间隙（通常毫秒级，
+ * 应用重启时最多一秒多）。而应用长时间不在时插件仍在推东西（嗅探结果、
+ * Agent 的流式增量），无上限地攒下去就是让这个进程一直吃内存 ——
+ * 而 Chrome 会一直留着它。
+ *
+ * 超限丢**最旧的**：这些都是状态推送，越新越有用；且应用一连上就会自己拉一次
+ * 全量快照（与 `app`/插件侧"事件不排队"是同一套理由，见 bridge-port.ts）。
+ */
+const MAX_QUEUE = 200;
+
 const relay = {
     socket: null,
-    /** 应用还没连上时，先把插件发来的消息排队 —— 丢消息比延迟更糟 */
+    /** 应用还没连上时，先把插件发来的消息排队 —— 短间隙里丢消息比延迟更糟 */
     queue: [],
     buffer: Buffer.alloc(0),
 
     toExtension(message) {
         if (!this.socket) {
             this.queue.push(message);
+            // 只保留最近 MAX_QUEUE 条，见上面
+            if (this.queue.length > MAX_QUEUE) this.queue.shift();
             return;
         }
         this.socket.write(`${JSON.stringify(message)}\n`);

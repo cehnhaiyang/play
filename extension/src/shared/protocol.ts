@@ -46,8 +46,8 @@ export interface ExtensionResponse<T = unknown> {
 /**
  * 一条嗅探结果。
  *
- * 形状与 `shared/meta/interface.ts` 的 `FoundLink` 对齐，这样将来交给播放器时
- * 不需要再转一次。
+ * 字段与球推给播放器的 `PlayMediaItem` 对应（`type` 到那边叫 `mediaType`），
+ * 另外多两个嗅探自己用的：`tabIds`（归属哪个标签页）与 `foundAt`（排序）。
  */
 export interface SniffedMedia {
     url: string;
@@ -57,10 +57,10 @@ export interface SniffedMedia {
     /**
      * 这条是怎么来的。
      *
-     * 三个值对用户有实质区别，不是同义标签：
+     * 两个值对用户有实质区别，不是同义标签：
      *   · `network` —— webRequest 观察到的真实请求（最可信，一定能下）；
-     *   · `local` —— 页内扫描（DOM / Performance / 源码正则）找到的地址；
-     *   · `ai` —— 模型从页面源码里挑出来的候选（**可能是猜的**）。
+     *   · `local` —— 页内扫描（DOM / Performance / 源码正则）找到的地址，
+     *     可能从没被请求过。
      */
     source: MediaSourceChannel;
     /** 防盗链 Referer。Chrome 的 webRequest **不提供** referrer，靠请求头捕获 */
@@ -104,9 +104,6 @@ export interface BrowserTab {
 
 /** 嗅探列表上限。超过后丢最旧的：这是工作列表不是归档 */
 export const MAX_SNIFFED_ITEMS = 500;
-
-/** 嗅探列表上限在界面上也要用（面板与悬浮球各自裁剪本地副本） */
-export const SNIFF_RENDER_MAX = 300;
 
 /** chrome.storage 键名 */
 export const STORAGE_KEYS = {

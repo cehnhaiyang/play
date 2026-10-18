@@ -6,13 +6,8 @@
  * 不是副本 —— 分类逻辑如果只能靠"打开浏览器点一下"验证，`.ts` 分片、
  * query 藏后缀、content-type 与后缀互相矛盾这几类错就会长期潜伏。
  *
- * 另有三组**跨端同源**断言：
- *   · 后缀表派生自 const.ts（不是手抄），比对它与应用侧 main.js 副本；
- *   · MIME→后缀表与 main.js 的第二份副本逐条比对；
- *   · 分片正则与 const.ts 的源码字符串一致。
- *
- * 迁移期这三条都必须绿。等自建浏览器外壳删掉、main.js 那份副本消失后，
- * 前两组断言会失去比对对象，届时连同本文件一起简化（不是删掉分类测试）。
+ * 另有两组**跨端同源**断言：后缀表派生自 const.ts（不是手抄）、
+ * 分片正则与 const.ts 的源码字符串一致。
  */
 const fs = require('fs');
 const path = require('path');
@@ -38,7 +33,6 @@ const run = () => {
 
     const C = require('./build/extension/src/shared/classify.js');
     const CONST = require('./build/shared/core/index.js');
-    const MAIN_SRC = fs.readFileSync(path.join(ROOT, 'app', 'main', 'main.js'), 'utf8');
 
     const classify = (url, contentType, documentUrl) =>
         C.classifyResponse({ url, contentType: contentType || '', documentUrl });
@@ -254,52 +248,10 @@ const run = () => {
     });
 
     /* ====================================================================== */
-    /* 7. 跨端同源：与 main.js 的手抄副本比对                                    */
+    /* 7. 跨端同源：分片正则派生自 shared/core                                   */
     /* ====================================================================== */
 
-    check('插件后缀表与 main.js 副本逐条一致（迁移期）', () => {
-        const block = (name) => {
-            const start = MAIN_SRC.indexOf(`const ${name} = [`);
-            assert(start > 0, `main.js 里找不到 ${name}`);
-            const end = MAIN_SRC.indexOf('];', start);
-            return MAIN_SRC.slice(start, end);
-        };
-        const pairs = [
-            ['streamExts', C.STREAM_EXTS],
-            ['videoExts', C.VIDEO_EXTS],
-            ['audioExts', C.AUDIO_EXTS],
-            ['imageExts', C.IMAGE_EXTS],
-        ];
-        for (const [name, ours] of pairs) {
-            const src = block(name);
-            for (const ext of ours) {
-                assert(new RegExp(`'${ext}'`).test(src), `${name} 缺 '${ext}'：插件有而 main.js 没有`);
-            }
-        }
-    });
-
-    check('MIME→后缀两张表与 main.js 逐条一致（迁移期）', () => {
-        const grab = (name) => {
-            const start = MAIN_SRC.indexOf(`const ${name} = {`);
-            assert(start > 0, `main.js 里找不到 ${name}`);
-            const end = MAIN_SRC.indexOf('};', start);
-            const body = MAIN_SRC.slice(start, end);
-            const out = {};
-            for (const m of body.matchAll(/'([^']+)':\s*'([^']+)'/g)) out[m[1]] = m[2];
-            return out;
-        };
-        const video = grab('VIDEO_MIME_EXTS');
-        const audio = grab('AUDIO_MIME_EXTS');
-        for (const [k, v] of Object.entries(C.VIDEO_MIME_EXTS)) {
-            eq(video[k], v, `VIDEO_MIME_EXTS['${k}']`);
-        }
-        for (const [k, v] of Object.entries(C.AUDIO_MIME_EXTS)) {
-            eq(audio[k], v, `AUDIO_MIME_EXTS['${k}']`);
-        }
-    });
-
     check('分片正则与 shared/core 的源码字符串一致', () => {
-        // 插件用 shared/core/media.ts 的源码字符串构造正则，main.js 是逐字复制的一份。
         // 这里确认插件侧真的用了共享源码（不是自己又写了一遍）。
         const src = fs.readFileSync(
             path.join(ROOT, 'extension', 'src', 'shared', 'classify.ts'), 'utf8');
@@ -372,6 +324,53 @@ const run = () => {
         // 页内扫描捞到的地址常常没有路径后缀（`/api/play?file=movie.mp4`）
         eq(C.classifyByExt('https://a.com/get?file=movie.mp4', '')?.type, 'video');
         eq(C.classifyByExt('https://a.com/get?url=a%2Fb.m3u8', '')?.type, 'stream');
+    });
+
+    /**
+     * 分片判据本身能直接调，就**直接调**（一个恒 false 的版本在文本断言下
+     * 照样全绿）。覆盖三态：分片、整段 ts、非 ts。
+     *
+     * 它存在的理由是"认不出"与"明确否掉"在 `classifyByExt` 里都是 null，
+     * 而页内扫描对 null 的处置是"用元素标签兜底" —— 不问这一句，
+     * `<video src=".../seg001.ts">` 就被兜底捞回来了。
+     */
+    check('isSegmentCandidate：分片 / 整段 ts / 非 ts 三态', () => {
+        const { isSegmentCandidate } = C;
+        assert(typeof isSegmentCandidate === 'function', 'classify.ts 没有导出 isSegmentCandidate');
+
+        eq(isSegmentCandidate('https://a.com/seg/000.ts', 'ts'), true, '命名成 segNNN 的就是分片');
+        eq(isSegmentCandidate('https://a.com/ts/1.ts', 'ts'), true, 'ts/1.ts');
+        eq(isSegmentCandidate('https://a.com/x/12.ts', 'ts'), true, '纯数字命名');
+        eq(isSegmentCandidate('https://a.com/seg/000.TS', 'TS'), true, '大小写不敏感');
+        // 整段 .ts 是可下载的视频，不能被丢掉
+        eq(isSegmentCandidate('https://a.com/video/2024/lecture.ts', 'ts'), false, '整段 ts');
+        // 播放列表是"可下载的流"的入口，必须留下
+        eq(isSegmentCandidate('https://a.com/hls/playlist.ts', 'ts'), false, 'playlist');
+        // 非 ts 后缀一律不问正则：`…/segment1/` 那一条对任何后缀都成立，
+        // 不加这道前提会误杀 https://cdn/segment1/movie.mp4
+        eq(isSegmentCandidate('https://cdn/segment1/movie.mp4', 'mp4'), false, 'mp4 不参与分片判据');
+        eq(isSegmentCandidate('https://cdn/segment1/x', ''), false, '没有后缀时不猜');
+    });
+
+    /**
+     * 结构性守卫（这段代码在 service worker 里，Node 里 require 不了）。
+     *
+     * 判据是**顺序**：分片那一问必须排在兜底之前。排在之后等于没问 ——
+     * `classified?.type ?? fallbackType` 会把已经否决的分片又填上类型。
+     */
+    check('页内扫描在 hint 兜底之前先问分片', () => {
+        const src = fs.readFileSync(
+            path.join(ROOT, 'extension', 'src', 'background', 'service-worker.ts'), 'utf8');
+        const start = src.indexOf('const itemFromCandidate');
+        assert(start > 0, '找不到页内扫描的 itemFromCandidate');
+        const body = src.slice(start, src.indexOf('\n};', start));
+
+        const at = body.indexOf('isSegmentCandidate(');
+        const fallback = body.indexOf('fallbackType');
+        assert(at > 0, 'itemFromCandidate 没有问 isSegmentCandidate —— 带 hint 的分片会被兜底捞回来');
+        assert(fallback > 0, '找不到 hint 兜底（判据本身可能改了名）');
+        assert(at < fallback,
+            'isSegmentCandidate 排在了 hint 兜底之后 —— 已经否决的分片又会被填上类型');
     });
 
     /* ====================================================================== */

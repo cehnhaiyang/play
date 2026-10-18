@@ -282,7 +282,6 @@ const run = () => {
         'get-cookies',
         'set-cookie',
         'remove-cookie',
-        'sniffer-set-enabled',
         'acgmho-probe',
         'acgmho-channels',
         'acgmho-channel-list',

@@ -51,10 +51,6 @@ export const IMAGE_EXTS = extsOfType('image');
  *
  * 两张表而不是一张：`ogg` 在主类型下含义不同 —— video/ogg 是 `.ogv`、
  * audio/ogg 是 `.ogg`。合成一张必然把其中一个映射错。
- *
- * ⚠️ 这是 `app/main/main.js` 同名表的**第二份**。迁移期由
- * `test/extsniffer.test.js` 逐条比对两边，避免"插件判 mkv、应用判 matroska"。
- * 主进程那份随自建浏览器外壳一起删除后，这里就是唯一一份。
  */
 export const VIDEO_MIME_EXTS: Record<string, string> = {
     'mp4': 'mp4', 'mpeg': 'mpg', 'mpg': 'mpg',
@@ -158,6 +154,25 @@ export const isHlsSegment = (url: string, pathname: string): boolean => {
     return new RegExp(HLS_SEGMENT_RE_SOURCE, 'i').test(pathname);
 };
 
+/**
+ * 这条**页内扫描候选**是不是 HLS 分片 —— 是则一律不要。
+ *
+ * ## 为什么不直接调 `isHlsSegment`
+ *
+ * 那条只做正则，前提是"后缀已经是 ts 一类"，而正则里 `…/seg1/` 那一条对任何
+ * 后缀都成立：不加前提就会误杀 `https://cdn/segment1/movie.mp4`。前提写在这里
+ * 一次，两个调用方（`classifyByExt` 与页内扫描的兜底）就不会各写一遍再漂移。
+ *
+ * ## 为什么它必须能被单独问
+ *
+ * `classifyByExt` 对"分片"与"认不出"**都返回 null**，而页内扫描对 null 的处置是
+ * "用元素标签兜底"。`<video src=".../seg001.ts">` 恰好带 hint，于是分片闸门被
+ * 兜底整个绕过 —— 一次扫描又灌进几百条分片，而闸门看着还在（它确实在，
+ * 只是结论被兜底覆盖了）。所以兜底之前必须先问这一句。
+ */
+export const isSegmentCandidate = (url: string, pathExt: string): boolean =>
+    (pathExt || '').toLowerCase() === 'ts' && isHlsSegment(url, pathnameOf(url));
+
 /** 分类结果 */
 export interface ClassifiedMedia {
     type: MediaType;
@@ -188,7 +203,7 @@ export const classifyByExt = (url: string, ext: string): ClassifiedMedia | null 
          * `segNNN.ts`，少了这道闸一次扫描就能灌进几百条噪声 —— 而网络层那条路
          * 已经拦了，同一个页面走两条路径不该得出不同结论。
          */
-        if (e === 'ts' && isHlsSegment(url, pathnameOf(url))) return null;
+        if (isSegmentCandidate(url, e)) return null;
         if (STREAM_EXTS.includes(e)) return { type: 'stream', ext: e };
         if (VIDEO_EXTS.includes(e)) return { type: 'video', ext: e };
         if (AUDIO_EXTS.includes(e)) return { type: 'audio', ext: e };

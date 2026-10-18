@@ -313,17 +313,16 @@ function run() {
     }
 
     /**
-     * 后缀分类跨进程一致性。
+     * 主进程那份"要交给 ffmpeg"的后缀表与 const.ts 的分类必须一致。
      *
-     * 主进程不能 import const（TS），所以嗅探后缀表是**派生副本**。
-     * 副本一旦漂移，同一个地址会被两条路径判成不同类型 ——
-     * 实测事故：`ts` 在主进程属 videoExts、在 const.ts 属 stream，
-     * 于是 .ts 地址被标成"视频"，筛选栏归错类，
-     * 且下载判定 `type !== 'stream'` 让它跳过 ffmpeg 检查
-     * （而 .ts 分片恰恰需要 ffmpeg 才能合成可用文件）。
+     * 主进程不能 import const（TS），所以 `STREAM_EXTENSIONS` 是**派生副本**。
+     * 少列一个的后果不是"少一个后缀"：同一个文件会"界面说要 ffmpeg、实际走裸
+     * HTTP 直存"，落盘的 .ts / .flv 是播放器（靠 hls.js / flv.js 才认）打不开的裸流。
+     * 实测事故：`ts` 曾在主进程属 video，而下载判定 `type !== 'stream'`
+     * 让它跳过了 ffmpeg 检查。
      *
-     * 只比对**两边都有**的后缀：主进程刻意只列媒体后缀
-     * （document 类与 aibook/gallery 从不推送），缺项不算漂移，分类不同才算。
+     * 两个方向都查：副本里多出来的（const.ts 不认它是 stream）与漏掉的
+     * （const.ts 说是 stream 而副本没有）都算漂移。
      */
     checks += 1;
     const constSrc = fs.readFileSync(path.join(ROOT, 'shared', 'core', 'media.ts'), 'utf8');
@@ -331,31 +330,32 @@ function run() {
         constSrc.indexOf('export const MEDIA_EXTENSIONS'),
         constSrc.indexOf('};', constSrc.indexOf('export const MEDIA_EXTENSIONS')));
 
-    const constExt = {};
-    for (const m of extTable.matchAll(/'([a-z0-9]+)':\s*'([a-z]+)'/g)) constExt[m[1]] = m[2];
-
-    const grabList = (name) => {
-        const i = mainSrc.indexOf(`const ${name} = [`);
-        if (i < 0) return null;
-        const j = mainSrc.indexOf('];', i);
-        return (mainSrc.slice(i, j).match(/'([a-z0-9]+)'/g) || []).map((s) => s.slice(1, -1));
-    };
-    const mainExt = {};
-    for (const [name, type] of [['streamExts', 'stream'], ['videoExts', 'video'],
-        ['audioExts', 'audio'], ['imageExts', 'image']]) {
-        const list = grabList(name);
-        if (list) for (const e of list) mainExt[e] = type;
+    const constStream = new Set();
+    for (const m of extTable.matchAll(/'([a-z0-9]+)':\s*'([a-z]+)'/g)) {
+        if (m[2] === 'stream') constStream.add(m[1]);
     }
 
+    const streamDecl = mainSrc.indexOf('const STREAM_EXTENSIONS = new Set([');
+    const streamBlock = streamDecl < 0 ? '' : mainSrc.slice(streamDecl);
+    const mainStream = new Set(
+        (streamBlock.slice(0, streamBlock.indexOf('])')).match(/'([a-z0-9]+)'/g) || [])
+            .map((s) => s.slice(1, -1)));
+
     const drift = [];
-    for (const [ext, type] of Object.entries(mainExt)) {
-        if (constExt[ext] && constExt[ext] !== type) {
-            drift.push(`          ${ext.padEnd(8)} const.ts=${constExt[ext].padEnd(9)} main.js=${type}`);
+    if (mainStream.size === 0) drift.push('          main.js 里读不到 STREAM_EXTENSIONS');
+    for (const ext of mainStream) {
+        if (!constStream.has(ext)) {
+            drift.push(`          ${ext.padEnd(8)} main.js 有它、而 const.ts 里它不是 stream`);
+        }
+    }
+    for (const ext of constStream) {
+        if (!mainStream.has(ext)) {
+            drift.push(`          ${ext.padEnd(8)} const.ts 里是 stream，main.js 少了它`);
         }
     }
     if (drift.length > 0) {
         failed += 1;
-        console.log('  FAIL  后缀分类跨进程不一致（同一个地址会被判成不同类型）：');
+        console.log('  FAIL  STREAM_EXTENSIONS 与 const.ts 的 stream 分类不一致：');
         for (const d of drift) console.log(d);
     }
 
@@ -373,8 +373,8 @@ function run() {
      *   · webviewTag 必须关掉。外壳没了却还开着它，等于给渲染层留一个
      *     能加载任意远程页面的口子，而没有任何地方需要 —— 而且一旦有人
      *     真用起来，上面那条"每个 session 只留最后一个监听器"的坑会立刻复现；
-     *   · 主窗口的 session 必须两样都挂上（嗅探 + 请求头改写），
-     *     且请求头改写要带幂等记账：将来若再加第二个 session，
+     *   · 主窗口的 session 必须挂上请求头改写（防盗链 Referer 全靠它），
+     *     且要带幂等记账：将来若再加第二个 session，
      *     重复注册会把先注册的顶掉，而不是叠加。
      */
     checks += 1;
@@ -384,9 +384,6 @@ function run() {
     }
     if (!/applyRequestHeaderRules\(mainWindow\.webContents\.session\)/.test(mainSrc)) {
         coverageProblems.push('主窗口 session 没有挂请求头改写（防盗链 Referer 会全部失效）');
-    }
-    if (!/setupSniffer\(session\.defaultSession\)/.test(mainSrc)) {
-        coverageProblems.push('默认 session 没有挂 setupSniffer');
     }
     // 幂等记账必须**真的被用上**：只断言 `new WeakSet()` 存在是空断言 ——
     // 把 has/add 两行删掉、留下声明，一样能通过。三条都要查。

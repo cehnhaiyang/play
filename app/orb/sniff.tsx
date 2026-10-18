@@ -49,7 +49,13 @@ import type { BrowserTab, SniffedMedia } from './orb-kit';
  * 共用件（外壳、桥、图标）在 `orb-kit.tsx`。
  */
 
-/** 列表渲染上限。与插件的 SNIFF_RENDER_MAX 同一口径，超出的不画 */
+/**
+ * 列表渲染上限。
+ *
+ * 写在这里而不是从插件拿：插件那侧不截断（它只有入库上限 `MAX_SNIFFED_ITEMS`，
+ * 而那是 500），而应用的编译单元不包含 `extension/`，跨过来取一个常量会让
+ * 两边绑在一起。画不下就不画 —— 超过这个数的那部分是列表末尾最旧的。
+ */
 const RENDER_MAX = 300;
 
 /**
@@ -136,8 +142,16 @@ const SniffOrb = () => {
     const [tabsError, setTabsError] = useState('');
     const [error, setError] = useState('');
     const [connected, setConnected] = useState(true);
-    const [busy, setBusy] = useState(false);
-    /** 页内扫描在途。与 busy 分开：一次扫描可能几秒到几十秒，要给得出反馈 */
+    /**
+     * 在途操作数。**工具栏按钮禁不禁用只看它**，与提示行显示哪句话无关。
+     *
+     * 扫描、开/关持续、下载三件事共用一个"有没有人在跑"的判断，原先那是一个
+     * `scanning` 字符串，三处各自 set、各自在 `finally` 里清空 —— 扫描途中点一次
+     * 直链下载，下载那一步立刻把它清成空串，于是"正在扫描全部标签页…"当场消失、
+     * 按钮重新可点，用户可以在第一次扫描还在跑的时候再点一次。
+     */
+    const [pendingOps, setPendingOps] = useState(0);
+    /** 正在跑的那件事的文案。归最后进入的操作，清空由条数归零推导（见下面那个 effect） */
     const [scanning, setScanning] = useState('');
     const [filter, setFilter] = useState<MediaType | 'all'>('all');
     /**
@@ -258,25 +272,44 @@ const SniffOrb = () => {
         if (!tabs.some((tab) => tab.id === activeTabId)) setActiveTabId(null);
     }, [tabs, activeTabId]);
 
+    /**
+     * 登记一件在途操作。
+     *
+     * `label` 为空表示这件事不占提示行（例如交给浏览器的直链下载，它一瞬间
+     * 就返回，占着提示行只会盖掉别的操作）。计数归零时提示行由下面那个 effect 清空。
+     */
+    const trackOp = useCallback(async (label: string, run: () => Promise<void>) => {
+        setPendingOps((n) => n + 1);
+        if (label) setScanning(label);
+        try {
+            await run();
+        } finally {
+            // 下限钳到 0：正常结束、早退、抛异常都会走到这里，计成负数就永远禁着按钮
+            setPendingOps((n) => Math.max(0, n - 1));
+        }
+    }, []);
+
+    /** "什么时候清空提示行"只由这一个地方决定，任何单个操作都清不掉别人的 */
+    useEffect(() => {
+        if (pendingOps === 0) setScanning('');
+    }, [pendingOps]);
+
     const toggle = useCallback(async () => {
         const next = !enabled;
-        setError('');
-        setBusy(true);
-        setScanning(next ? '正在扫描全部标签页…' : '');
-        try {
-            await bridge('sniffer-set-enabled', { enabled: next });
-            setEnabled(next);
-            setConnected(true);
-            // 打开开关时插件会扫一遍全部标签页，那批结果走事件推过来，
-            // 所以这里不必再拉一次全量
-        } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
-            setConnected(await bridgeConnected());
-        } finally {
-            setBusy(false);
-            setScanning('');
-        }
-    }, [enabled]);
+        await trackOp(next ? '正在扫描全部标签页…' : '', async () => {
+            setError('');
+            try {
+                await bridge('sniffer-set-enabled', { enabled: next });
+                setEnabled(next);
+                setConnected(true);
+                // 打开开关时插件会扫一遍全部标签页，那批结果走事件推过来，
+                // 所以这里不必再拉一次全量
+            } catch (e) {
+                setError(e instanceof Error ? e.message : String(e));
+                setConnected(await bridgeConnected());
+            }
+        });
+    }, [enabled, trackOp]);
 
     /**
      * 手动嗅探一次。
@@ -287,9 +320,8 @@ const SniffOrb = () => {
      *
      * 扫的是**全部标签页**，与嗅探本身的作用域一致。
      */
-    const scan = useCallback(async () => {
+    const scan = useCallback(() => trackOp('正在扫描全部标签页…', async () => {
         setError('');
-        setScanning('正在扫描全部标签页…');
         try {
             const result = await bridge<{ added: number; scanned?: number }>('sniffer-scan');
             setConnected(true);
@@ -299,10 +331,8 @@ const SniffOrb = () => {
         } catch (e) {
             setError(e instanceof Error ? e.message : String(e));
             setConnected(await bridgeConnected());
-        } finally {
-            setScanning('');
         }
-    }, []);
+    }), [trackOp]);
 
     const clear = useCallback(async () => {
         setError('');
@@ -367,17 +397,17 @@ const SniffOrb = () => {
      * 分岔在 `orb-kit.tsx` 的 `downloadMedia` 里：直链交给浏览器
      * （Ctrl+J 能看到进度、能暂停续传），流媒体交给应用侧 ffmpeg。
      */
-    const download = useCallback(async (item: SniffedMedia) => {
-        setError('');
-        setScanning(requiresFfmpeg(item.type, item.ext) ? '正在用 ffmpeg 下载…' : '');
-        try {
-            await downloadMedia(item);
-        } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
-        } finally {
-            setScanning('');
-        }
-    }, []);
+    const download = useCallback((item: SniffedMedia) => trackOp(
+        requiresFfmpeg(item.type, item.ext) ? '正在用 ffmpeg 下载…' : '',
+        async () => {
+            setError('');
+            try {
+                await downloadMedia(item);
+            } catch (e) {
+                setError(e instanceof Error ? e.message : String(e));
+            }
+        },
+    ), [trackOp]);
 
     /**
      * 推进应用播放器。
@@ -458,7 +488,7 @@ const SniffOrb = () => {
             <button
                 type="button"
                 onClick={() => void scan()}
-                disabled={!!scanning || busy}
+                disabled={pendingOps > 0}
                 title="扫描全部标签页的 DOM / Performance / 播放器全局对象与源码"
                 className="shrink-0 rounded-lg bg-white/[0.06] px-2 py-1 text-[10px] font-medium text-slate-300 transition hover:bg-white/[0.12] hover:text-white disabled:opacity-40"
             >
@@ -467,7 +497,7 @@ const SniffOrb = () => {
             <button
                 type="button"
                 onClick={() => void toggle()}
-                disabled={busy || !!scanning}
+                disabled={pendingOps > 0}
                 className={`shrink-0 rounded-lg px-2 py-1 text-[10px] font-bold transition ${enabled
                     ? 'bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30'
                     : 'bg-white/[0.06] text-slate-400 hover:bg-white/[0.12] hover:text-slate-200'

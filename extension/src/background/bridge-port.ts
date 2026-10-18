@@ -26,7 +26,12 @@ import type { BridgeResponse } from '../../../shared/meta/bridge';
  * Chrome 杀掉，连 TCP 都断）。这正是本文件存在的理由 ——
  * 它要保证 Port 一直开着。
  *
- * 见 `keepAlive` 的注释：MV3 里"有打开的 Port"本身就会延长 SW 的生命。
+ * MV3 里"有打开的 Port"本身就会延长 SW 的生命 —— 只要这条 Port 在，SW 就不会
+ * 因为空闲被回收，而断开后重连（`scheduleReconnect`）维持的正是这件事。
+ *
+ * ⚠️ 但它挡不住"SW 已经被回收"：那时没有代码在跑，重连逻辑也不会执行。所以
+ *    球关着、应用也没在跑时攒下的结果**只有落盘副本这一条恢复路径**
+ *    （见 service-worker 的 `flushItems` 与 `loadItems`）。
  */
 
 /* ========================================================================== */

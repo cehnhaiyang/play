@@ -5,7 +5,6 @@ import type {
     ObjectFitMode,
     ExpandedOscillatorType,
     AcgCategory,
-    MediaSourceChannel,
     MediaGroupType,
     LFOTarget,
     ArpPattern,
@@ -70,25 +69,6 @@ export interface VideoFile {
     acgCategory?: AcgCategory;
 }
 
-/**
- * 网络嗅探器截获的媒体资源信息
- */
-export interface FoundLink {
-    /** 嗅探到的媒体直链 URL */
-    url: string;
-    /** 资源标题或从页面提取的名称 */
-    title: string;
-    /** 媒体类别 */
-    type: MediaType;
-    /** 文件扩展名 (如 mp4, m3u8, png) */
-    ext: string;
-    /** 嗅探来源渠道 ('local' | 'network') */
-    source: MediaSourceChannel;
-    /** 触发嗅探的宿主页面 URL */
-    pageUrl?: string;
-    /** 请求该资源所需的 Referer 头，用于防盗链处理 */
-    referer?: string;
-}
 
 /**
  * 推送到播放器的一条媒体。
@@ -1530,10 +1510,6 @@ export interface ElectronTorrentAPI {
  * Electron 主进程与渲染进程桥接暴露的统一 API (preload 注入)
  */
 export interface ElectronAPI {
-    /** 监听网络层嗅探到的媒体流或文件 */
-    onSniffedMedia: (callback: (media: FoundLink) => void) => () => void;
-    /** 打开/关闭主进程网络层嗅探推送（默认关闭，由"持续嗅探"开关控制） */
-    setSnifferEnabled: (enabled: boolean) => Promise<{ success: boolean; armed: boolean }>;
     /** 获取当前宿主转码与下载能力 (如 FFmpeg) */
     getDownloadCapabilities: () => Promise<DownloadCapabilities>;
     /** 调用原生下载引擎保存媒体文件 */

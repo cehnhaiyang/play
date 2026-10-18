@@ -16,11 +16,12 @@
  *
  * `MEDIA_EXTENSIONS` 是这张表的唯一定义处。派生方：`getMediaType` 的查表、
  * 插件嗅探的后缀清单（`extension/src/shared/classify.ts`）、画廊页码识别、
- * 主进程嗅探表（独立进程不能 import TS，是逐字副本，由 test/mainstatic.test.js
- * 盯着不漂移）。
+ * 主进程的 `STREAM_EXTENSIONS`（独立进程不能 import TS，是派生副本，
+ * 由 test/mainstatic.test.js 盯着不漂移 —— 它决定下载走 ffmpeg 还是裸 HTTP）。
  *
- * 曾经这几处各写一份，结果 `.avif` 只进了主进程那张 —— 页内嗅探扫到它归为
- * other 后直接丢弃，同一个文件走两条路径结论不同。新增后缀只改这里。
+ * 曾经这几处各写一份，结果 `.avif` 只补了一处、漏了另一处 —— 页内嗅探扫到它
+ * 归为 other 后直接丢弃，同一个文件走两条路径结论不同。新增后缀只改这里，
+ * 但**每一个派生方都要跟着**（漏一处就是这个后果，而两边各自都"成功"）。
  */
 import type { MediaType } from '../meta';
 
@@ -96,9 +97,7 @@ export const MEDIA_EXTENSIONS: Record<string, MediaType> = {
  *
  * 导出字符串而不是正则对象：页内嗅探脚本整体是一个模板字符串、注入浏览器执行，
  * 它没法 import 一个正则对象，只能把源码插值进去自己 new RegExp。
- * 三处共用这一份语义：页内脚本（插值源码）、文本兜底提取（isHlsSegmentPath）、
- * 主进程网络层（独立进程不能 import TS，是逐字副本，由 test/mainstatic.test.js
- * 盯着不漂移）。
+ * 两处共用这一份语义：页内脚本（插值源码）与文本兜底提取（isHlsSegmentPath）。
  *
  * 用途：判断一个 **.ts** 地址是 HLS 分片（丢弃）还是整段视频（保留）。
  * 判据只在 ext === 'ts' 时被调用，所以每条分支都锚在 .ts 上 ——

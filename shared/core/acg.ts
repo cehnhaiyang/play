@@ -9,7 +9,7 @@ import type {
     ResolvedProbeMedia,
 } from '../meta';
 
-/** ACG 专属资源判定（与主进程 setupSniffer 同口径）：站点 + 图床域名 */
+/** ACG 专属资源判定：站点 + 图床域名。嗅探过滤（isSniffExcluded）与画廊流程读的是这一份 */
 const ACG_HOST_SUFFIXES = ['acgmho.com', 'acgnngca.com', 'acgnfl.com', 'acg-hentai.com'];
 
 /** e-hentai 站点域名（含图集页与图床） */

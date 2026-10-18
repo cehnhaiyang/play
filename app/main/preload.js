@@ -20,10 +20,6 @@ const subscribe = (channel, callback) => {
 
 // 暴露 IPC 通信接口
 contextBridge.exposeInMainWorld('electronAPI', {
-    // 监听网络嗅探结果
-    onSniffedMedia: (callback) => subscribe('sniffed-media', callback),
-    /** 打开/关闭主进程网络层嗅探推送（默认关闭，由"持续嗅探"开关控制） */
-    setSnifferEnabled: (enabled) => ipcRenderer.invoke('sniffer-set-enabled', enabled),
     getDownloadCapabilities: () => ipcRenderer.invoke('get-download-capabilities'),
     downloadMedia: (payload) => ipcRenderer.invoke('download-media', payload),
     /** 取消正在进行的媒体下载（kill 子进程/请求，并删掉半成品文件） */

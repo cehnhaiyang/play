@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, webContents, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
 const { setUserAgent: pushUserAgentToSite } = require('./acgmhoService');
 // 画廊站点注册表：主进程里"哪个站点"只从这里取，不直接 require 某个 provider。
 // 加站点 = 注册表里多一行，main.js 不动。
@@ -876,14 +876,14 @@ pushUserAgentToSite(USER_AGENT);
 /**
  * 必须交给 ffmpeg 才能得到可用文件的后缀。
  *
- * 与嗅探的 stream 分类**同一份清单**（const.ts 的 MEDIA_EXTENSIONS stream 类），
- * 也就是 const.ts 里 requiresFfmpeg 判据"后缀"那一半的派生副本：
- * 嗅探把 m3u8 / m3u / mpd / ts / flv / f4v 归为 stream，界面据此打上
+ * 主进程是独立进程、不能 import TS，所以这是 const.ts 的 MEDIA_EXTENSIONS 里
+ * stream 那一类的**派生副本**（也是 requiresFfmpeg 判据"后缀"那一半）：
+ * 插件把 m3u8 / m3u / mpd / ts / flv / f4v 归为 stream，界面据此打上
  * 「ffmpeg 下载」徽章、并在 ffmpeg 缺失时拦住下载。这里少列一个，
  * 同一个文件就会"界面说要 ffmpeg、实际走裸 HTTP 直存"——
  * 落盘的 .ts / .flv 是播放器（本应用靠 hls.js / flv.js 才认）打不开的裸流。
  *
- * test/sniffer.test.js 会比对这张表与 const.ts 的分类，漂移即失败。
+ * test/mainstatic.test.js 会比对这张表与 const.ts 的分类，漂移即失败。
  */
 const STREAM_EXTENSIONS = new Set(['m3u8', 'm3u', 'mpd', 'ts', 'flv', 'f4v']);
 const MEDIA_HTTP_HEADERS = {
@@ -915,45 +915,6 @@ function getDownloadCapabilities() {
             : '项目内 ffmpeg 不可用，当前无法下载流媒体资源。',
     };
 }
-
-/**
- * content-type 的 MIME 子类型 → 规范后缀。
- *
- * 不能直接把子类型当后缀用：MIME 里大量子类型是**编码名而不是容器名**，
- * 照搬会产出系统与播放器都不认的"后缀"：
- *   video/x-matroska  → matroska（真实后缀 mkv）
- *   video/quicktime   → quicktime（真实后缀 mov）
- *   video/mp2t        → mp2t（真实后缀 ts，已在上游单独处理）
- *   audio/x-mpeg      → mpeg（真实后缀 mp3）
- *   audio/mp4         → mp4（真实后缀 m4a）
- * 这些后缀会一路带到下载：文件名变成 `片子.matroska`，
- * 而本应用的下载判定、播放器类型判定都按 MEDIA_EXTENSIONS 查表，全都落空。
- *
- * 两张表而不是一张：`ogg` 在主类型下含义不同 —— video/ogg 是 `.ogv`、
- * audio/ogg 是 `.ogg`。合成一张表必然把其中一个映射错。
- * 表里没有的（含 `video/mp4` 这种子类型恰好等于后缀的常见情形）回落默认值。
- */
-const VIDEO_MIME_EXTS = {
-    'mp4': 'mp4', 'mpeg': 'mpg', 'mpg': 'mpg',
-    'x-matroska': 'mkv', 'matroska': 'mkv',
-    'quicktime': 'mov', 'x-msvideo': 'avi', 'avi': 'avi',
-    'webm': 'webm', 'ogg': 'ogv', 'x-ms-wmv': 'wmv', '3gpp': '3gp',
-};
-
-const AUDIO_MIME_EXTS = {
-    'x-mpeg': 'mp3', 'mpeg': 'mp3', 'mp3': 'mp3', 'mpeg3': 'mp3',
-    'wav': 'wav', 'x-wav': 'wav', 'wave': 'wav',
-    'aac': 'aac', 'x-aac': 'aac', 'mp4': 'm4a', 'm4a': 'm4a',
-    'flac': 'flac', 'x-flac': 'flac', 'opus': 'opus',
-    'x-ms-wma': 'wma', 'x-ms-asf': 'wma', 'ogg': 'ogg',
-};
-
-function canonicalExtFromMime(contentType, fallback) {
-    const sub = String(contentType).split('/')[1]?.split(';')[0]?.trim() || '';
-    const table = String(contentType).startsWith('audio/') ? AUDIO_MIME_EXTS : VIDEO_MIME_EXTS;
-    return table[sub] || fallback;
-}
-
 function sanitizeFileName(name) {
     const fallbackName = 'media';
     const cleanName = String(name || fallbackName)
@@ -2855,345 +2816,6 @@ function setupTamperHandlers(sess) {
     // 注意：sess 绑定只做首次（多窗口共用默认 session 时 cookies 句柄等价），重复绑定会叠加监听
 }
 
-const sniffedSessions = new WeakSet();
-const recentSniffedUrls = new Map();
-
-/**
- * 网络层嗅探总开关，默认关闭 —— 由嗅探面板的"持续嗅探"开关控制：
- * 打开时持续推送捕获到的媒体，关闭时一条不推。
- * 开关只管"推不推送"：webRequest 监听器本身常驻不摘，
- * Electron 每个事件只保留最后一个监听器，摘掉重装反而会
- * 和请求头改写互相顶掉，且常驻监听的开销只是每次回调多一次判断。
- */
-let snifferEnabled = false;
-
-// 只注册一次：setupSniffer 是按 session 调用的，放里面会重复注册
-// （ipcMain.handle 重复注册同一通道会抛），所以挂在模块顶层。
-ipcMain.handle('sniffer-set-enabled', async (_event, enabled) => {
-    snifferEnabled = enabled === true;
-    return { success: true, armed: snifferEnabled };
-});
-
-setInterval(() => {
-    const now = Date.now();
-    for (const [url, time] of recentSniffedUrls.entries()) {
-        if (now - time > 15000) {
-            recentSniffedUrls.delete(url);
-        }
-    }
-}, 30000);
-
-function setupSniffer(sess) {
-    if (!sess || sniffedSessions.has(sess)) {
-        return;
-    }
-    sniffedSessions.add(sess);
-
-    const filter = { urls: ['<all_urls>'] };
-
-    // ACG 与 E-Hentai 的专属资源不进嗅探：图集封面/动画/有声走画廊流程，
-    // 否则翻一本漫画就刷几十条封面进嗅探列表。
-    // 与 shared/core/acg.ts 的 isAcgUrl / isEhentaiUrl 保持同口径（两个进程不能共享模块）。
-    // e-hentai 的图片页与 hath.network 图床同样要挡：一本 685 页的书会刷 685 条。
-    const ACG_SNIFF_EXCLUDE_SUFFIXES = [
-        'acgmho.com', 'acgnngca.com', 'acgnfl.com', 'acg-hentai.com',
-        'e-hentai.org', 'exhentai.org', 'ehgt.org', 'hath.network',
-    ];
-    const isAcgExcluded = (u) => {
-        if (!u || typeof u !== 'string') return false;
-        try {
-            const host = new URL(u).hostname.toLowerCase();
-            return ACG_SNIFF_EXCLUDE_SUFFIXES.some((s) => host === s || host.endsWith(`.${s}`));
-        } catch (_e) {
-            return false;
-        }
-    };
-
-    /**
-     * 后缀表。主进程是独立进程、不能 import const.ts，所以这里是**派生副本**。
-     *
-     * 与 const.ts 的 MEDIA_EXTENSIONS 的分工：
-     *  - 只列"媒体"后缀：嗅探的目的就是发现可下载媒体，
-     *    document 类（md/txt/pdf/json）与 aibook/gallery 不在此列，也从不推送；
-     *  - **分类必须与 const.ts 一致**。曾经 `ts` 被放在 videoExts 里，
-     *    于是同一个 .ts 地址：网络层推 type='video'、页内扫描判 'stream'。
-     *    后果是筛选栏里它出现在"视频"下、徽章文案错，
-     *    且下载时 `type !== 'stream'` 让它**跳过 ffmpeg 检查** ——
-     *    而 .ts 分片恰恰需要 ffmpeg 才能合成可用文件。
-     *    test/sniffer.test.js 会比对两边都有后缀的分类，漂移即失败。
-     */
-    const streamExts = ['m3u8', 'm3u', 'mpd', 'flv', 'f4v', 'ts'];
-    const videoExts = ['mp4', 'mkv', 'webm', 'avi', 'mov', 'wmv', 'ogv', '3gp', 'mpg', 'mpeg', 'm4s'];
-    const audioExts = ['mp3', 'wav', 'aac', 'm4a', 'ogg', 'flac', 'opus', 'wma'];
-    const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico', 'tiff', 'heic', 'avif'];
-
-    /**
-     * HLS 分片路径判据。与 const.ts 的 HLS_SEGMENT_RE_SOURCE **逐字同源**
-     * （独立进程不能 import TS，只能复制；test/sniffer.test.js 盯着不漂移）。
-     *
-     * 单独一份而不是内联在回调里：分片判据只对 .ts 生效，但它决定了
-     * "一个页面播 HLS 时会不会推几十上百条 segNNN.ts 刷满列表"。
-     */
-    const hlsSegmentRe = new RegExp(
-        '(?:^|/)(?:segment|seg|chunk|slice|frag|part|track|ts)[-_]?\\d*/'
-        + '|(?:^|/)(?:segment|seg|chunk|slice|frag|part|track)[-_]?\\d*\\.ts$'
-        + '|(?:^|/)\\d+\\.ts$'
-        + '|[-_]\\d+\\.ts$',
-        'i'
-    );
-
-    /**
-     * 从查询参数值里认出媒体后缀（`?file=movie.mp4`、`?url=a%2Fb.m3u8`）。
-     *
-     * 后缀必须**成词**，不能用裸 includes：`component.tsx` 里含 `.ts`、
-     * `backup.mpd2` 里含 `.mpd` —— 那是源码与备份文件，不是流媒体。
-     * 裸 includes 会把它们推成 stream，界面据此打上「ffmpeg 下载」徽章，
-     * 用户点了才发现下回来一个文本文件。
-     * 成词判据是"后缀后面不能再跟字母数字"（`?`、`&`、`#`、`/` 都算边界）。
-     *
-     * 返回命中的**真实后缀**而不是写死的 m3u8/mp4：`?file=movie.mpd` 的扩展名
-     * 是 mpd，写死 m3u8 会让徽章、下载命名与 ffmpeg 判定三处都用错后缀。
-     */
-    const matchExtInValue = (value, exts) => {
-        const lower = String(value).toLowerCase();
-        for (const e of exts) {
-            if (new RegExp(`\\.${e}(?![a-z0-9])`).test(lower)) return e;
-        }
-        return '';
-    };
-
-    sess.webRequest.onResponseStarted(filter, (details) => {
-        // 总开关没打开时直接丢弃："持续嗅探"关闭中，网络层不推送任何结果。
-        // 放第一行，后面的 ACG/后缀判定都省了。
-        if (!snifferEnabled) return;
-        const { url, responseHeaders, method, statusCode } = details;
-        if (!url || (statusCode !== 200 && statusCode !== 206) || method === 'OPTIONS' || method === 'HEAD') {
-            return;
-        }
-
-        // ACG 资源直接丢弃：资源直链在 ACG 域名，或请求挂在 ACG 页面下（referrer）
-        if (isAcgExcluded(url) || isAcgExcluded(details.referrer)) {
-            return;
-        }
-
-        if (
-            url.startsWith('chrome-extension:') ||
-            url.startsWith('devtools:') ||
-            url.startsWith('blob:') ||
-            url.startsWith('data:') ||
-            url.startsWith('file:')
-        ) {
-            // file: 必须排除：嗅探是为了发现远端媒体以下载，本地文件进列表零作用；
-            // 且 ACG 落盘页正是 file://（hostname 为空，走不进上面的域名排除，
-            // img 又是 no-referrer），否则保存完成后轮播每翻一页就往嗅探列表推一条。
-            return;
-        }
-
-        const getHeader = (headers, name) => {
-            if (!headers) return '';
-            const key = Object.keys(headers).find((k) => k.toLowerCase() === name.toLowerCase());
-            if (!key) return '';
-            const val = headers[key];
-            return Array.isArray(val) ? val[0] : String(val);
-        };
-
-        const contentType = getHeader(responseHeaders, 'content-type').toLowerCase();
-
-        // 快速过滤不需要的普通网页文本文件
-        if (
-            contentType.includes('text/html') ||
-            contentType.includes('text/css') ||
-            contentType.includes('javascript') ||
-            contentType.includes('application/json')
-        ) {
-            return;
-        }
-
-        let detectedType = null;
-        let ext = '';
-
-        // 1. 基于 Content-Type 判定
-        if (
-            contentType.includes('mpegurl') ||
-            contentType.includes('dash+xml') ||
-            contentType.includes('vnd.ms-sstr') ||
-            contentType.includes('application/x-mpegurl')
-        ) {
-            detectedType = 'stream';
-            ext = contentType.includes('dash') ? 'mpd' : 'm3u8';
-        } else if (contentType.startsWith('video/')) {
-            if (contentType.includes('x-flv')) {
-                detectedType = 'stream';
-                ext = 'flv';
-            } else if (contentType.includes('mp2t')) {
-                // MPEG-TS。必须与 const.ts 同口径判成 stream、后缀归一为 'ts'：
-                // const.ts 的 MEDIA_EXTENSIONS 里 'ts' 属 stream，若这里照搬 content-type
-                // 的字面量（'mp2t'）判成 video，同一个地址就会两条路径两个结论 ——
-                // 筛选栏归错类，界面按 type 判 ffmpeg 徽章而主进程按 ext 判下载方式。
-                detectedType = 'stream';
-                ext = 'ts';
-            } else {
-                detectedType = 'video';
-                ext = canonicalExtFromMime(contentType, 'mp4');
-            }
-        } else if (contentType.startsWith('audio/')) {
-            detectedType = 'audio';
-            ext = canonicalExtFromMime(contentType, 'mp3');
-        } else if (contentType.startsWith('image/')) {
-            let imgExt = contentType.split('/')[1]?.split(';')[0];
-            if (imgExt === 'svg+xml') {
-                imgExt = 'svg';
-            }
-            if (imageExts.includes(imgExt)) {
-                detectedType = 'image';
-                ext = imgExt;
-            }
-        }
-
-        // 2. 基于 URL 路径拓展名判定
-        let urlObj = null;
-        let pathname = '';
-        try {
-            urlObj = new URL(url);
-            pathname = urlObj.pathname.toLowerCase();
-        } catch (_e) {
-            pathname = url.split('?')[0].split('#')[0].toLowerCase();
-        }
-
-        const pathMatch = pathname.match(/\.([a-zA-Z0-9]+)$/);
-        const pathExt = pathMatch ? pathMatch[1] : '';
-
-        if (!detectedType) {
-            if (streamExts.includes(pathExt)) {
-                detectedType = 'stream';
-                ext = pathExt;
-            } else if (videoExts.includes(pathExt)) {
-                detectedType = 'video';
-                ext = pathExt;
-            } else if (audioExts.includes(pathExt)) {
-                detectedType = 'audio';
-                ext = pathExt;
-            } else if (imageExts.includes(pathExt)) {
-                detectedType = 'image';
-                ext = pathExt;
-            }
-        }
-
-        // 3. 基于 Query 参数中嵌套媒体拓展名探测
-        if (!detectedType && urlObj) {
-            for (const [, val] of urlObj.searchParams.entries()) {
-                const hitStream = matchExtInValue(val, streamExts);
-                if (hitStream) {
-                    detectedType = 'stream';
-                    ext = hitStream;
-                    break;
-                }
-                const hitVideo = matchExtInValue(val, videoExts);
-                if (hitVideo) {
-                    detectedType = 'video';
-                    ext = hitVideo;
-                    break;
-                }
-                const hitAudio = matchExtInValue(val, audioExts);
-                if (hitAudio) {
-                    detectedType = 'audio';
-                    ext = hitAudio;
-                    break;
-                }
-            }
-        }
-
-        // 过滤 TS 切片分段。
-        //
-        // 判据同时看 ext 与 contentType：HLS 分片的响应头是 video/mp2t，
-        // 而步骤 1 现在把它归一成 ext='ts'（见上面的 mp2t 分支），
-        // 步骤 2 只在 !detectedType 时才跑 —— 所以 ext 与 content-type 两条都要开门。
-        //
-        // 第三条门（pathExt === 'ts'）不能省：部分 CDN 把分片标成
-        // application/octet-stream，既不是 video/mp2t 也不进 streamExts 的
-        // content-type 分支，只靠前两条门会让整页 segNNN.ts 全被推给渲染层。
-        //
-        // 不写成"任何 .ts 都算分片"：整段的 .ts 视频同样可下载，不该被丢，
-        // 所以最终判据仍然交给路径正则（它只认分片命名）。
-        if (ext === 'ts' || ext === 'mp2t' || pathExt === 'ts' || contentType.includes('mp2t')) {
-            const isSegment = contentType.includes('mp2t') || hlsSegmentRe.test(pathname);
-            // 播放列表本身要留下（它是"可下载的流"入口），只丢分片
-            if (isSegment && !url.includes('playlist')) {
-                return;
-            }
-        }
-
-        if (!detectedType || !mainWindow || mainWindow.isDestroyed()) {
-            return;
-        }
-
-        // 去重检查 (5 秒内相同 URL 不重复推送)
-        const now = Date.now();
-        const lastSeen = recentSniffedUrls.get(url);
-        if (lastSeen && now - lastSeen < 5000) {
-            return;
-        }
-        recentSniffedUrls.set(url, now);
-
-        // 提取文件名与安全标题
-        let filename = '';
-        const dispositionHeader = getHeader(responseHeaders, 'content-disposition');
-        if (dispositionHeader) {
-            const match = dispositionHeader.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
-            if (match && match[1]) {
-                filename = match[1];
-            }
-        }
-
-        if (!filename && urlObj) {
-            const parts = urlObj.pathname.split('/').filter(Boolean);
-            filename = parts.pop() || '';
-        }
-
-        if (!filename || filename.length > 80) {
-            filename = `Media_${ext || 'stream'}`;
-        }
-
-        let safeTitle = filename;
-        try {
-            safeTitle = decodeURIComponent(filename);
-        } catch (_err) {
-            safeTitle = filename;
-        }
-
-        let senderUrl = '';
-        if (details.webContentsId) {
-            try {
-                const sender = webContents.fromId(details.webContentsId);
-                if (sender && !sender.isDestroyed()) {
-                    senderUrl = sender.getURL() || '';
-                }
-            } catch (_e) { }
-        }
-
-        const referer = details.referrer || senderUrl || '';
-        const pageUrl = senderUrl || details.referrer || '';
-
-        // 二次兜底：宿主页面在 ACG 站（senderUrl）但 referrer 为空时，早期拦截拦不住，
-        // 这里按最终 pageUrl/referer 再拦一次，与渲染层 addLinks 同口径
-        if (isAcgExcluded(referer) || isAcgExcluded(pageUrl)) {
-            return;
-        }
-
-        try {
-            mainWindow.webContents.send('sniffed-media', {
-                url,
-                title: safeTitle,
-                type: detectedType,
-                ext: ext || 'unknown',
-                source: 'network',
-                referer,
-                pageUrl,
-            });
-        } catch (_e) { }
-    });
-}
-
 function createWindow() {
     mainWindow = new BrowserWindow({
         width: 1280,
@@ -3302,7 +2924,7 @@ function createWindow() {
                 /(^|\.)acgnfl\.com$/i.test(hostname) ||
                 /(^|\.)acg-hentai\.com$/i.test(hostname)
             ) {
-                // 与嗅探排除口径（ACG_SNIFF_EXCLUDE_SUFFIXES）保持一致：四个镜像站都要补 Referer 防盗链
+                // 与 shared/core/acg.ts 的 isAcgUrl 同一批域名：四个镜像站都要补 Referer 防盗链
                 requestHeaders.Referer = 'https://www.acgmho.com/';
             } else if (/(^|\.)(e-hentai\.org|exhentai\.org|ehgt\.org|hath\.network)$/i.test(hostname)) {
                 // 同上：e-hentai 的图床与图片页都校验来源，缺 Referer 时图片页会回空白
@@ -3314,12 +2936,6 @@ function createWindow() {
     };
 
     applyRequestHeaderRules(mainWindow.webContents.session);
-
-    const { session } = require('electron');
-    setupSniffer(session.defaultSession);
-    if (mainWindow.webContents.session !== session.defaultSession) {
-        setupSniffer(mainWindow.webContents.session);
-    }
 
     setupTamperHandlers(mainWindow.webContents.session);
     setupDownloadHandlers();

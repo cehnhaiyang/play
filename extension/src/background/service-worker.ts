@@ -24,6 +24,7 @@ import {
     classifyResponse,
     deriveTitle,
     isSniffExcluded,
+    isSegmentCandidate,
     pathExtOf,
     pathnameOf,
     AUDIO_EXTS,
@@ -91,7 +92,19 @@ const FLUSH_DEBOUNCE_MS = 200;
  * `sniffer-get-state` 得拿得到东西。所以盘上那份还是要写，只是不再由它当权威。
  */
 let sniffItems: SniffedMedia[] = [];
-let sniffLoaded = false;
+
+/**
+ * 首次读盘合并的进行状态。**全模块唯一一处表示"镜像是否已由盘上那份播种"。**
+ *
+ * 是 promise 而不是布尔标志：标志只答得上"这一次跑完了没有"，而两个使用方
+ * 问的是不同的问题 —— "要不要等它"（并发的调用方）与"现在能不能写盘"
+ * （`flushItems`）。原先这里是一个 `sniffLoaded`，它在读盘**开始**时就置 true，
+ * 而写盘按"已经装载完"理解它 —— 于是 SW 被回收后重来的那一次生命周期里，
+ * 第一条结果会在读盘回来之前就把盘上那份整份覆盖掉（见 `flushItems`）。
+ *
+ * `null` = 还没开始；失败时会重新置空，让下一次调用重试。
+ */
+let seeding: Promise<void> | null = null;
 
 /**
  * 去重表：URL → 上次记录时间。
@@ -154,20 +167,36 @@ let flushTimer: ReturnType<typeof setTimeout> | null = null;
  *
  * 一次页面加载能出几十条结果，逐条写就是几十次全量序列化，而中间那些状态
  * 没有任何人会看到 —— 球拿的是内存镜像推过去的事件，不是盘上那份。
+ *
+ * ## 为什么写之前必须等播种（`loadItems`）
+ *
+ * 镜像与盘上那份是两个东西：SW 被回收后重来时镜像是**空的**，而盘上那份是
+ * 上一次生命周期攒下的全部结果，恢复它的唯一路径是 `loadItems` —— 而那条路
+ * 只挂在"球问状态"（`sniffer-get-state`）上，球关着时永远轮不到它。
+ * 所以写回不能无条件发生：它自己先等播种（`loadItems` 幂等，已播种时只是一次
+ * 微任务），否则第一条结果就足以把整份历史抹成"这次才发现的那几条"。
+ *
+ * 播种失败就不写 —— 条目还在镜像里，下一次发现新结果时会再试一次；
+ * 拿一个空镜像去写，比晚写一次坏得多。
  */
 const flushItems = (): void => {
     if (flushTimer !== null) return;
     flushTimer = setTimeout(() => {
         flushTimer = null;
-        void chrome.storage.session.set({ [STORAGE_KEYS.SNIFFED_ITEMS]: sniffItems });
+        void loadItems().then(
+            () => {
+                void chrome.storage.session.set({ [STORAGE_KEYS.SNIFFED_ITEMS]: sniffItems });
+            },
+            // 播种失败：这次不写，条目留在镜像里等下一次触发
+            () => undefined,
+        );
     }, FLUSH_DEBOUNCE_MS);
 };
 
 /**
  * 首次读盘，把镜像填上。
  *
- * 只做一次：SW 被回收后重新求值本文件时镜像会重建，
- * 那时盘上那份就是上次去抖写下去的结果。
+ * 每个生命周期只做一次：重复调用共用同一个 promise（见 `loadItems`）。
  *
  * ## 为什么是**合并**而不是覆盖
  *
@@ -193,9 +222,7 @@ const flushItems = (): void => {
  */
 let clearedAt = 0;
 
-const loadItems = async (): Promise<void> => {
-    if (sniffLoaded) return;
-    sniffLoaded = true;
+const readPersisted = async (): Promise<void> => {
     const startedAt = clearedAt;
     const got = await chrome.storage.session.get(STORAGE_KEYS.SNIFFED_ITEMS);
     if (clearedAt !== startedAt) return;
@@ -211,6 +238,22 @@ const loadItems = async (): Promise<void> => {
     sniffItems = [...sniffItems, ...restored]
         .sort((a, b) => b.foundAt - a.foundAt)
         .slice(0, MAX_SNIFFED_ITEMS);
+};
+
+/**
+ * 保证镜像已由盘上那份播种，等它做完。
+ *
+ * **这是"镜像播种好了没有"的唯一入口**：写盘（`flushItems`）与改动镜像之前
+ * 都要先经过它。失败时把 memo 置空并原样抛出 —— 置空是为了让下一次调用重试
+ * 而不是记成"已经播种过"（那会让紧接着的写回拿空镜像覆盖盘上那份）；
+ * 抛出则由调用方各自处置：`getItems` 让它冒到界面上，`flushItems` 跳过这次写。
+ */
+const loadItems = (): Promise<void> => {
+    seeding ??= readPersisted().catch((error: unknown) => {
+        seeding = null;
+        throw error;
+    });
+    return seeding;
 };
 
 /**
@@ -308,8 +351,12 @@ const pushItem = (item: SniffedMedia): SniffedMedia => {
 
 const clearItems = (): void => {
     sniffItems = [];
-    sniffLoaded = true;
-    // 盖时间戳：读盘在途时它会让那次读盘放弃合并，见 loadItems
+    /*
+     * 清空 = "镜像即权威"：盘上那份不必再读 —— 读回来也只会被合并掉，
+     * 而用户要的正是它消失。在途的那次读盘由下面的时间戳挡下。
+     */
+    seeding = Promise.resolve();
+    // 盖时间戳：读盘在途时它会让那次读盘放弃合并，见 readPersisted
     clearedAt = Date.now();
     // 去重表记的是"这个地址已经在列表里了"，列表空了它就得跟着空
     recentUrls.clear();
@@ -333,7 +380,14 @@ const clearItems = (): void => {
  * 换成 `filter` 会把"两个标签页都请求过的地址"整条删掉 —— 另一个标签页下
  * 它就凭空消失了，而那个标签页并没有被清。
  */
-const clearTab = (tabId: number): number => {
+const clearTab = async (tabId: number): Promise<number> => {
+    /*
+     * 先播种再动手。它清的是"一个标签页"，不能拿一个空镜像去比对：SW 刚被回收
+     * 时镜像里一条都没有，那样 removed 会是 0（球却已经把那些行从界面上删了），
+     * 而紧接着的写回会把**别的标签页**那些条目一起写成这份空列表。
+     */
+    await loadItems();
+
     let removed = 0;
     /** 整条被删掉的地址。只有它们要从去重表里摘 */
     const dropped: string[] = [];
@@ -695,7 +749,18 @@ const itemFromCandidate = (
     // 开着嗅探逛一圈，列表就被封面刷满
     if (isSniffExcluded(url, pageUrl)) return null;
 
-    const classified = classifyByExt(url, pathExtOf(pathnameOf(url)));
+    const pathExt = pathExtOf(pathnameOf(url));
+    /*
+     * 分片先挡掉，**在下面那段兜底之前**。
+     *
+     * `classifyByExt` 对分片返回 null，而 null 同时表示"认不出" —— 兜底正是为
+     * "认不出"准备的（`<video src="/play?id=1">` 只能靠标签说明类型）。
+     * 不问这一句的话，`<video src=".../seg001.ts">` 这类候选会被兜底捞回来，
+     * 一次扫描又是几百条分片，而闸门看起来还在（见 isSegmentCandidate）。
+     */
+    if (isSegmentCandidate(url, pathExt)) return null;
+
+    const classified = classifyByExt(url, pathExt);
     const fallbackType: MediaType | null = hint === 'video' || hint === 'playinfo-video'
         ? 'video'
         : hint === 'audio' || hint === 'playinfo-audio'
@@ -998,7 +1063,7 @@ const dispatchBridge = async (method: string, params: unknown): Promise<unknown>
             return { cleared: true };
 
         case 'sniffer-clear-tab':
-            return { removed: clearTab((args as unknown as { tabId: number }).tabId) };
+            return { removed: await clearTab((args as unknown as { tabId: number }).tabId) };
 
         case 'sniffer-tabs':
             return { tabs: await listTabs() };
