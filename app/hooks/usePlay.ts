@@ -6,6 +6,7 @@ import {
     createStreamFile,
     createVideoFile,
     generateId,
+    isSlideshowMedia,
     loadJSON,
     loadStr,
     revokeVideoFile,
@@ -153,6 +154,28 @@ export const usePlay = (): UsePlayReturn => {
         playlistRef.current = next;
         setPlaylist(next);
     }, []);
+
+    /**
+     * 打开新内容（导入 / 抓取 / 推送入列）：「图集自动开播」的唯一入口。
+     *
+     * 图集的播放态就是自动轮播的开关。此前它由加载 effect 在**每次换源**时按
+     * canPlayback 重写一遍，于是用户按下暂停后按 N/→ 翻一页，轮播又自己亮起来
+     * —— 翻页键不是播放键，用户明确关掉的开关不该被换源重新打开。
+     * 现在换源只负责否决（见加载 effect 的图集分支），点亮只发生在两处：
+     * 这里，以及用户按键（play / togglePlay）。
+     *
+     * 只在**真的落到别的条目**上时点亮：往已有列表里追加、索引不动时（拖入散文件）
+     * 不该把正在暂停阅读的那一页重新播起来。
+     */
+    const openNewContent = useCallback((files: VideoFile[], currentIndex: number) => {
+        const moved = currentIndex !== playlistRef.current.currentIndex;
+        commitPlaylist({ files, currentIndex });
+        const target = files[currentIndex];
+        if (!moved || !target || !isSlideshowMedia(target.mediaType)) return;
+        // 末项幻灯片照样不开：canPlayback 已否决，点亮后下一帧也会被按回去
+        if (!canPlayback(target.mediaType, currentIndex, files.length)) return;
+        setState(prev => (prev.isPlaying ? prev : { ...prev, isPlaying: true }));
+    }, [commitPlaylist]);
 
     // 播放列表快照落盘（只写可重建项，本地 File/Blob 条目天然跳过）。
     // 防抖 1.5s：边下边播每页 append 都会改 playlist，同步写 localStorage 会把阅读滚动卡成幻灯片。
@@ -654,8 +677,8 @@ export const usePlay = (): UsePlayReturn => {
         const prev = playlistRef.current;
         const updated = [...prev.files, ...newVideoFiles];
         const nextIdx = prev.currentIndex === -1 ? 0 : prev.currentIndex;
-        commitPlaylist({ files: updated, currentIndex: nextIdx });
-    }, []);
+        openNewContent(updated, nextIdx);
+    }, [openNewContent]);
 
     // 单文件 .gallery 解包入列（与 addFiles 的文件夹画廊分支同构，徽标不进列表）
     const addUnpackedGallery = useCallback((name: string, pages: { file: File; page: number }[]) => {
@@ -678,8 +701,8 @@ export const usePlay = (): UsePlayReturn => {
         setMediaError(null);
         const prev = playlistRef.current;
         const updated = [...prev.files, ...newVideoFiles];
-        commitPlaylist({ files: updated, currentIndex: prev.files.length });
-    }, []);
+        openNewContent(updated, prev.files.length);
+    }, [openNewContent]);
 
     // AI 绘本成组入列：与画廊同构（成组 + 页码），差别在每页带 description 文案
     // 且 groupType='ai-book'——播放器据此切到左图右文的阅读器版式。
@@ -710,8 +733,8 @@ export const usePlay = (): UsePlayReturn => {
         setMediaError(null);
         const prev = playlistRef.current;
         const updated = [...prev.files, ...newVideoFiles];
-        commitPlaylist({ files: updated, currentIndex: prev.files.length });
-    }, []);
+        openNewContent(updated, prev.files.length);
+    }, [openNewContent]);
 
     // 添加网络流。跳转到新条目后由加载 effect 统一发起播放，此处不自己调 play()
     const addStream = useCallback((url: string, name?: string, mediaType?: MediaType) => {
@@ -721,8 +744,8 @@ export const usePlay = (): UsePlayReturn => {
         setMediaError(null);
         const prev = playlistRef.current;
         const updated = [...prev.files, streamFile];
-        commitPlaylist({ files: updated, currentIndex: updated.length - 1 });
-    }, []);
+        openNewContent(updated, updated.length - 1);
+    }, [openNewContent]);
 
     // 批量添加网络流/图集页面
     // autoPlayFirst=true 时跳到本批第一项（不清旧列表也会跳，推送新画廊不再靠清空实现“自动播新”）
@@ -745,8 +768,8 @@ export const usePlay = (): UsePlayReturn => {
         const prev = playlistRef.current;
         const updated = [...prev.files, ...streamFiles];
         const nextIdx = autoPlayFirst ? prev.files.length : (prev.currentIndex === -1 ? 0 : prev.currentIndex);
-        commitPlaylist({ files: updated, currentIndex: nextIdx });
-    }, []);
+        openNewContent(updated, nextIdx);
+    }, [openNewContent]);
 
     // 绘本朗读的语音缓存写回：同一页重复点「朗读」不再重新合成
     const cacheAudioData = useCallback((fileId: string, base64: string) => {
@@ -928,8 +951,8 @@ export const usePlay = (): UsePlayReturn => {
      *
      * 不能拿 currentFile 对象本身当依赖：playlist 每次变化都会重建当前项对象，
      * 于是纯元数据改动（朗读语音写回 audioData、合并时补 groupName）也会走一遍
-     * 换源流程 —— 图片分支会把 isPlaying 强制置回 true，正在读的绘本页当场被
-     * 轮播翻走。id 由 mergeOrderedStreams 刻意沿用、url 变了才是真的换了源。
+     * 换源流程 —— 音视频从 0 重新加载，正在读的页面白走一次置态。
+     * id 由 mergeOrderedStreams 刻意沿用、url 变了才是真的换了源。
      */
     const mediaSourceKey = currentFile ? `${currentFile.id}:${currentFile.url}` : 'none';
 
@@ -952,17 +975,18 @@ export const usePlay = (): UsePlayReturn => {
             return;
         }
 
-        // 非音视频流走图集 / 文档 / 其他展示分支：播放态由 canPlayback 统一裁定。
+        // 非音视频流走图集 / 文档 / 其他展示分支：**只否决，不点亮**。
         // 文档/画廊占位/other 是静态页保持暂停（否则暂停键误导 + 控制条自动隐藏，
-        // 用户连点哪里播都找不到），已在末项的图集同样不进入 —— 轮播无从继续，
-        // 点亮后下一帧就被按回去。
+        // 用户连点哪里播都找不到），已在末项的图集同样不进入 —— 轮播无从继续。
+        // 开关本身由入列处（openNewContent）与用户按键打开：换源替用户决定要不要播，
+        // 就是「暂停后翻一页又自己播起来」的成因。
         if (file.mediaType !== 'video' && file.mediaType !== 'stream' && file.mediaType !== 'audio') {
             const list = playlistRef.current;
             const playable = canPlayback(file.mediaType, list.currentIndex, list.files.length);
             setMediaError(null);
             // 警告同样要清：图集页上残留上一部视频的「已跳过 N 段」是无意义的噪音
             setMediaWarning(null);
-            setState(prev => ({ ...prev, isPlaying: playable, isBuffering: false, currentTime: 0, duration: 0 }));
+            setState(prev => ({ ...prev, isPlaying: playable && prev.isPlaying, isBuffering: false, currentTime: 0, duration: 0 }));
             return;
         }
 

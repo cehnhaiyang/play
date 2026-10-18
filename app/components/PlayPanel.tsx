@@ -17,6 +17,7 @@ import {
     generateId,
     isAiBookFileName,
     isPagedMedia,
+    isSlideshowMedia,
     isValidMediaUrl,
     loadStr,
     readAiBookFile,
@@ -1955,20 +1956,25 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, isVisible, onOpenG
             setAcgInput('');
             setAcgStatus(null);
 
-            // 图集后续页异步续抓追加（旧轮次回包直接丢弃）
+            // 图集后续页异步续抓：按页码归位。这批页是「迟到」的，走 appendStreams
+            // 追加到列表末尾会坏两件事：期间推了别的作品时，读 P1 按 N 会走进那部作品；
+            // 主进程回包的顺序也不保证递增，而侧栏文件树是按页码排的 —— 线性顺序与
+            // 树里看到的顺序就此分叉。mergeOrderedStreams 按 groupId + page 插回原位，
+            // 同页旧条目连同它的 blob URL 一并顶掉（与画廊面板的失败页重试同一套机制）。
             if (resolved.kind === 'image' && resolved.totalPages > 1 && electronAPI.gallery.fetchPages) {
                 fetchAcgRemainingPages(electronAPI.gallery.fetchPages, probe, 'playpanel').then(({ runId, pages }) => {
                     if (!runId || pages.length === 0) return;
-                    methods.appendStreams(pages.map((p) => ({
+                    const groupId = `acg:${probe.gid}`;
+                    methods.mergeOrderedStreams(pages.map((p) => ({
                         url: p.url,
                         name: p.title,
                         title: p.title,
                         mediaType: 'image' as const,
-                        groupId: `acg:${probe.gid}`,
+                        groupId,
                         groupName: probe.title,
                         groupType: 'gallery' as const,
                         page: p.page,
-                    })));
+                    })), groupId);
                 }).catch((e: any) => {
                     // 后台续页失败只记日志，不打断首屏
                     console.warn(`ACG ${probe.gid} 后续页抓取失败:`, e?.message || e);
@@ -1982,9 +1988,11 @@ export const PlayPanel: React.FC<PlayPanelProps> = ({ player, isVisible, onOpenG
         }
     };
 
-    // 图片轮播：绘本 12s/页（留阅读时间），普通图片 4s/页，均受倍速缩放
+    // 图片轮播：绘本 12s/页（留阅读时间），普通图片 4s/页，均受倍速缩放。
+    // 「是不是幻灯片」由 shared/core 的 isSlideshowMedia 回答（与 canPlayback 同源），
+    // 这里再写一遍 mediaType === 'image' 就是同一个判据存两份
     useEffect(() => {
-        if (currentFile?.mediaType !== 'image' || !state.isPlaying) return;
+        if (!isSlideshowMedia(currentFile?.mediaType) || !state.isPlaying) return;
 
         // 已在列表末项：轮播无从继续，立刻退出播放态，而不是等第一次 tick 才反应。
         // nextPage 到头即停（不回绕），若仍留着 isPlaying，控制条会因「正在播放」

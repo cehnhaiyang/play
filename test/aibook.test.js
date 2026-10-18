@@ -409,6 +409,17 @@ const run = () => {
     assert.ok(/\{formatTime\(previewTime\)\}/.test(playPanel), '拖动中的时间气泡没有跟着走');
     // ACG 音声的艺术家不能在 App 的转发边界被丢掉（音频视图靠它显示署名）
     assert.ok(/artist: p\.artist,/.test(readSrc('app/App.tsx')), 'handlePlayMediaStreams 丢掉了 artist');
+    // 换源不得改写图集的播放态：图集下 isPlaying 就是轮播开关，加载 effect 若在换源时
+    // 按 canPlayback 重写它，「暂停后按 N/→」就会被重新点亮（翻页键不是播放键）。
+    // 开关只由 openNewContent（新作品入列）与用户按键打开。
+    assert.ok(
+      /isPlaying: playable && prev\.isPlaying/.test(readSrc('app/hooks/usePlay.ts')),
+      '图集分支又把 isPlaying 重写成 canPlayback 的结果了',
+    );
+    assert.ok(
+      /isSlideshowMedia\(target\.mediaType\)/.test(readSrc('app/hooks/usePlay.ts')),
+      '新内容入列不再打开轮播开关（抓取/导入的图集不会自动播）',
+    );
   });
 
   /* --------------------------------- 汇总 -------------------------------- */
