@@ -1,241 +1,87 @@
 /**
- * 模型回复与工具结果的解析。
+ * 工具结果与工具参数的解析。
  *
- * 这里的每个判据都对应一类"看错就整轮跑偏"的失效：
- * 抠 JSON 抠不准 → 明明调了工具却判成协议错误；
+ * ## 这里**不再有**回复解析
+ *
+ * 旧版本有一整套"从回复正文里抠 JSON 信封"的机器：`extractJsonObject`、
+ * `scanBraces`、`diagnoseReply`，以及配套的五种协议错误。它们存在的前提是
+ * **模型手写外壳** —— 而那个前提本身就是故障源：实测 100 轮里 9 轮死于
+ * 外壳写坏（漏引号、漏括号、被输出长度截断），同一个文件能连撞三次。
+ *
+ * 现在调用由服务商的结构化通道产出（见 toolspec.ts），参数是一段**服务商生成**的
+ * JSON 字符串。剩下唯一要解析的是 `arguments` 本身，而它坏了只有一种含义：
+ * 服务商没有真正约束解码。那件事由引擎按"这一步没做成"处置，不再有五种错法。
+ *
+ * 这个文件里剩下的判据都对应一类"看错就整轮跑偏"的失效：
  * 成败判据写错 → 一次成功的数据探测被标成失败，模型对着成功结果修 bug。
  */
 
-import { asString, errorText } from './text';
+import { errorText } from './text';
 
 /**
- * 回复不合协议时的**具体**原因。
+ * 一条工具调用的参数解析结果。
  *
- * 只说一句"没有工具调用也没有 final"，模型无从下手 —— 它自认为写的是合法
- * JSON，于是下一次原样再来一遍，实测连撞三次就把整个会话撞停了（见
- * MAX_PROTOCOL_ERRORS）。判据必须细到能回答"错在哪一步"：通篇没写 JSON、
- * 被输出长度截断、JSON 语法坏了、还是 JSON 合法但少了 tool / final。
- *
- * 只依赖回复原文这一个输入（纯函数）：回灌文案在"当场"与"下一轮重建"
- * 两处必须逐字一致，而重建时手上只有存下来的那条原文。
+ * 用联合类型而不是抛异常：坏参数要**原样回灌**给模型让它改，不该中断整轮对话。
  */
-type ReplyProblem =
-    /** 整条回复里连一个 `{` 都没有 —— 写成了散文 */
-    | { kind: 'noJson' }
-    /** JSON 没闭合。绝大多数是回复被输出长度截断 */
-    | { kind: 'truncated'; detail: string }
-    /** 括号闭合了但 JSON.parse 报错 */
-    | { kind: 'badJson'; detail: string }
-    /**
-     * 顶层有 `calls`，但里面**一项可执行的调用都没有**。
-     *
-     * 与 noTool 分开是必须的：那种情况下"没有 calls 也没有 final"是**自相矛盾**的
-     * 说法（诊断同时把 calls 列进了"顶层实际有的键"），模型照着一句错话去改，
-     * 只会把已经写对的字段名再改一遍。
-     */
-    | { kind: 'badCalls'; detail: string }
-    /** JSON 合法，顶层字段里既没有 calls 也没有 final */
-    | { kind: 'noTool'; keys: string };
+export type ParsedArguments =
+    | { ok: true; args: Record<string, unknown> }
+    | { ok: false; error: string };
 
 /**
- * 诊断一条不合协议的回复。
+ * 解析工具调用的 `arguments`。
  *
- * 只看**第一个** `{` 起扫出来的那个对象，不像 extractJsonObject 那样把每个起点
- * 都试一遍：这里要回答的是"这条回复为什么切不出 JSON"，而模型写的那个对象总是
- * 从第一个 `{` 开始。逐起点试是给"前面有散文"用的，那是**找**对象的问题。
+ * 三种情形分开报，因为它们各自只有一种有效的补救：
+ *  - **空串**：模型调了工具却没给参数。归一成 `{}` 而不是报错 —— 工具层对缺参数
+ *    有自己的文案（"缺少 code"比"arguments 是空串"更能让它一步改对）。
+ *  - **不是对象**：数组、数字、`null` 都算。工具层只认键值对。
+ *  - **JSON 坏了**：只可能来自"服务商没有约束解码"。把原文抄回去，
+ *    否则模型看不见自己写了什么，只会原样再发一次。
  */
-export const diagnoseReply = (text: string): ReplyProblem => {
-    const start = text.indexOf('{');
-    if (start < 0) return { kind: 'noJson' };
+export const parseArguments = (raw: string): ParsedArguments => {
+    if (!raw.trim()) return { ok: true, args: {} };
 
-    const { spans, inString, depth } = scanBraces(text, start);
-    const self = spans.find((span) => span.start === start);
-
-    if (!self) {
-        return {
-            kind: 'truncated',
-            detail: inString
-                ? `写到第 ${text.length} 个字符时停在一个字符串中间，JSON 从未闭合`
-                : `JSON 的括号没有闭合，还差 ${depth} 个 }`,
-        };
-    }
-    const { end } = self;
-
+    let parsed: unknown;
     try {
-        const parsed = JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>;
-        const keys = parsed && typeof parsed === 'object' ? Object.keys(parsed) : [];
-
-        /*
-         * calls 存在但一项都执行不了 —— 单列一种错法。
-         *
-         * 落到 noTool 的话回灌文案会说"没有 calls 也没有 final"，而同一句里
-         * 又把 calls 列为"顶层实际有的键"：模型读到一句自相矛盾的话，只会去改
-         * 一个本来就写对的字段名。这里直接说清是哪一项坏了。
-         */
-        if ('calls' in parsed && !asString(parsed.final)) {
-            const raw = parsed.calls;
-            if (!Array.isArray(raw)) {
-                return { kind: 'badCalls', detail: `calls 不是数组，而是 ${typeof raw}` };
-            }
-            if (raw.length === 0) {
-                return { kind: 'badCalls', detail: 'calls 是空数组' };
-            }
-            const broken = raw.findIndex((item) => (
-                !item || typeof item !== 'object' || Array.isArray(item) || !asString((item as Record<string, unknown>).tool)
-            ));
-            if (broken >= 0) {
-                return { kind: 'badCalls', detail: `第 ${broken + 1} 项没有 tool 字段（每项都必须写工具名）` };
-            }
-        }
-
-        return { kind: 'noTool', keys: keys.length ? keys.join('、') : '(空对象)' };
+        parsed = JSON.parse(raw);
     } catch (e) {
-        /*
-         * V8 的报错里带 "at position N"，那是**相对这个对象**的偏移。
-         * 换算回整条回复的偏移并把出错位置附近的原文抄出来 —— 只报一句
-         * "JSON 解析失败"，模型还是得自己逐字找那个引号。
-         */
-        const message = errorText(e);
-        const at = /position (\d+)/.exec(message);
-        if (!at) return { kind: 'badJson', detail: message };
-        const offset = start + Number(at[1]);
-        const near = text.slice(Math.max(0, offset - 30), offset + 30).replace(/\n/g, '\\n');
         return {
-            kind: 'badJson',
-            detail: `${message}（整条回复的第 ${offset} 个字符附近。原文：…${near}…）`,
+            ok: false,
+            error: `参数不是合法 JSON（${errorText(e)}）。原文：${raw.slice(0, 500)}`,
         };
     }
-};
 
-/**
- * 从 `start` 起做字符串感知的括号扫描，一遍扫出**全部**平衡对象的跨度。
- *
- * 不能用正则匹配花括号 —— 脚本源码里必然含 `{ }` 与字符串，只有字符串感知的
- * 括号计数才能切准边界。返回按起点升序的跨度，以及扫到结尾时的状态
- * （还在字符串里 / 还差几层），后者供诊断文案区分"截断"与"括号不配对"。
- *
- * ## 为什么必须是一遍
- *
- * `extractJsonObject` 要把每个 `{` 都当起点试一次，而逐个起点现扫会一直走到
- * 文本结尾 —— 复杂度于是变成 O(起点数 × 长度)。实测一份被截断的 1.4MB 回复
- * （96003 个 `{`）要 990ms，而"回复被截断"恰恰是"这一步写的代码太大"的必然
- * 结果，两者总是同时发生，正好卡在最需要快速给出错误文案的时刻。括号配对是
- * 栈的教科书用例，一遍扫完即可。
- *
- * 字符串感知也顺带修正了一处旧行为：从一个**字符串内部**的 `{` 起扫，会把那段
- * 字符串当成 JSON 解析（`他说"{"a":1}"` 会解析出 `{"a":1}`）—— 那不是回复本身。
- */
-const scanBraces = (
-    text: string,
-    start: number,
-): { spans: { start: number; end: number }[]; inString: boolean; depth: number } => {
-    const open: number[] = [];
-    const spans: { start: number; end: number }[] = [];
-    let inString = false;
-    let escaped = false;
-
-    for (let i = start; i < text.length; i += 1) {
-        const ch = text[i];
-
-        if (inString) {
-            if (escaped) escaped = false;
-            else if (ch === '\\') escaped = true;
-            else if (ch === '"') inString = false;
-            continue;
-        }
-
-        if (ch === '"') inString = true;
-        else if (ch === '{') open.push(i);
-        else if (ch === '}' && open.length > 0) spans.push({ start: open.pop() as number, end: i });
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return {
+            ok: false,
+            error: `参数必须是一个 JSON 对象，实际是 ${Array.isArray(parsed) ? 'array' : typeof parsed}。`,
+        };
     }
-
-    // 栈是后进先出的，跨度因此按**闭合**顺序产生；起点升序才是"逐个起点试"的顺序
-    return { spans: spans.sort((a, b) => a.start - b.start), inString, depth: open.length };
+    return { ok: true, args: parsed as Record<string, unknown> };
 };
 
 /**
- * 从模型回复里抠出第一个能解析的**平衡** JSON 对象。
+ * 从一次回复里取出本批要执行的调用，顺序即服务商给的顺序。
  *
- * 不能只看第一个 `{` —— 模型常在 JSON 前写一句"我的计划是…"，那个花括号不是
- * 起点，因此每个 `{` 都当起点试一次，解析成功即返回。
- */
-export const extractJsonObject = (text: string): Record<string, unknown> | null => {
-    if (!text) return null;
-
-    // 起点全部收集：intent 或代码里花括号再多也不能让外层 JSON 的起点被截掉。
-    // 曾经限制过起点数量，后果是"回复里示例代码多写几个 { }，真正的调用就解析不到"。
-    for (const { start, end } of scanBraces(text, 0).spans) {
-        try {
-            const parsed = JSON.parse(text.slice(start, end + 1));
-            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-                return parsed as Record<string, unknown>;
-            }
-        } catch {
-            /* 这个起点不是合法 JSON，换下一个 */
-        }
-    }
-    return null;
-};
-
-/**
- * 一次回复里的工具调用。**唯一权威**是 `calls` 数组。
+ * **一个都不丢。** 曾经有过一个"一批最多 8 个"的上限，理由是成本（各次观察会
+ * 随后续每一步重发）。那条理由站不住：一次给几个调用是模型自己的判断，按条数
+ * 砍等于替它决定，而且被砍掉的那几条**没有任何提示** —— 模型看到的结果比它写的
+ * 少，只会以为工具坏了再把同一批发一遍。真实的成本由 800k 上下文门槛与压缩来管，
+ * 那两道闸门本来就存在。
  *
- * 解析与执行都只读这一个字段：另留一条 `{"tool":…,"args":…}` 的单数通道看着
- * 无害，实际会让"一个回复里到底能发几个调用"有两个答案 —— 主循环读哪个、
- * 提示词写哪个、历史怎么回放，三处各自漂移，而漂移的症状是**静默丢掉后半批**。
- * 写错字段名的模型会收到协议错误回执，那比猜它想调什么便宜。
- */
-interface AgentCall {
-    tool: string;
-    args: Record<string, unknown>;
-}
-
-/**
- * 一条回复里最多执行几个工具调用。
- *
- * 上限的理由是**成本**：一批的实际代价是各次观察之和，而它们会随后续每一步
- * 重发。截断而不是报错 —— 前几条通常已经做完了事，丢掉它们等于白跑。
- *
- * **权威在本文件**（判据 extractCalls 就在这里），提示词那边 import 它去插值：
- * 反过来的话 prompt → transcript → parse → prompt 会成环。
- */
-export const MAX_CALLS_PER_REPLY = 8;
-
-/**
- * 从回复里取出本批要执行的调用，顺序即模型写的顺序。
- *
- * 三条判据各有理由：
- *  - **坏的一项不拖垮整批**：缺 tool 名的那一项只是被跳过（调用处发现列表为空
- *    就按协议错误回灌），而不是把已经写对的几项一起丢掉 —— 后者会让模型以为
- *    "整条回复白写了"，于是把同一批原样再发一次。
- *  - **args 缺失归一成 `{}`**：工具层对缺参数有自己的错误文案（"缺少 code"
- *    比"args 不是对象"更能让它一步改对）。
- *  - **上限 MAX_CALLS_PER_REPLY 条**：理由见那个常量，截断而不是报错。
- *
- * 同时回传 `written`（模型这一批写了几个）—— 截断与跳过都是**静默**的，
- * 不回传的话模型看到的结果比它写的少，只会以为工具坏了，然后把同一批再发一遍。
+ * **参数解析失败的调用也不在这里丢掉**：它照样进列表，由执行处报一条明确的
+ * 失败观察。在这里跳过的话，模型一次都读不到"参数坏了"这个原因。
  */
 export const extractCalls = (
-    reply: Record<string, unknown> | null,
-): { calls: AgentCall[]; written: number } => {
-    const raw = reply?.calls;
-    if (!Array.isArray(raw)) return { calls: [], written: 0 };
-
-    const calls: AgentCall[] = [];
-    for (const item of raw.slice(0, MAX_CALLS_PER_REPLY)) {
-        if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
-        const entry = item as Record<string, unknown>;
-        const tool = asString(entry.tool);
-        if (!tool) continue;
-        const args = entry.args;
-        calls.push({
-            tool,
-            args: args && typeof args === 'object' && !Array.isArray(args)
-                ? (args as Record<string, unknown>)
-                : {},
-        });
-    }
-    return { calls, written: raw.length };
+    calls: { id: string; name: string; arguments: string }[] | null | undefined,
+): { calls: { id: string; tool: string; raw: string }[] } => {
+    if (!Array.isArray(calls)) return { calls: [] };
+    return {
+        calls: calls.map((call) => ({
+            id: call.id,
+            tool: call.name,
+            raw: call.arguments,
+        })),
+    };
 };
 
 /**
@@ -394,3 +240,11 @@ export const buildScriptSource = (code: string): string => `${PREFIX}${code}
     return JSON.stringify({ __agentError: '返回值无法序列化：' + String(__e && __e.message || __e) });
   }
 })()`;
+
+/**
+ * 工具名是否在规格表里。执行前用它挡掉服务商给了一个我们没有的工具。
+ *
+ * 判据放在本文件：它是"这一批能不能执行"的一部分，与参数解析同源；
+ * 规格表在 toolspec.ts，那边 import 这里会与 prompt 的插值成环。
+ */
+export const isKnownTool = (name: string, known: readonly string[]): boolean => known.includes(name);

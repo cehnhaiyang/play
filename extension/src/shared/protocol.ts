@@ -30,7 +30,7 @@
  * 会让"这个字段能不能放"变成看运气 —— 在这里随手塞一张 base64 图片没问题，
  * 同样的代码走桥就会静默失败。
  */
-import type { AiChatMessage, AiConfig, AiUsage, CookieItem, HeaderRule, MediaSourceChannel, MediaType, ReasoningEffort, TamperRule } from '../../../shared/meta';
+import type { AiChatMessage, AiConfig, AiReply, AiToolSpec, AiUsage, CookieItem, HeaderRule, MediaSourceChannel, MediaType, ReasoningEffort, TamperRule } from '../../../shared/meta';
 
 /* ========================================================================== */
 /* 0. 公共                                                                     */
@@ -255,6 +255,14 @@ export interface HostChatRequest {
     temperature?: number;
     maxTokens?: number;
     reasoningEffort?: ReasoningEffort;
+    /**
+     * 可调用的工具与选择策略。
+     *
+     * 必须随请求带过去：真正发请求的是 offscreen 文档，它不认识 Agent 的工具表 ——
+     * 让它在那边自己拼一份，就等于把"有哪些工具"变成两个来源。
+     */
+    tools?: AiToolSpec[];
+    toolChoice?: 'auto' | 'none' | 'required';
 }
 
 export type HostRequest =
@@ -276,4 +284,15 @@ export type HostRequest =
  */
 export type HostEvent =
     | { target: 'chat'; kind: 'ai-delta'; requestId: string; content?: string; reasoning?: string }
-    | { target: 'chat'; kind: 'ai-done'; requestId: string; reply?: string; usage?: AiUsage; error?: string };
+    | {
+        target: 'chat';
+        kind: 'ai-done';
+        requestId: string;
+        /**
+         * 完整结果。**三者必须一起回来**：只回 reply 的话，上层无从区分
+         * "模型说完了"与"这一步要调工具"，也无从知道回复是否被输出上限截断。
+         */
+        reply?: AiReply;
+        usage?: AiUsage;
+        error?: string;
+    };

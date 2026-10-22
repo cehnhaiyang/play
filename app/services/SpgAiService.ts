@@ -499,12 +499,12 @@ export const parseReply = (text: string): GeneratedSpg => {
  * 编曲类任务吃推理，这里用 high 档换质量。
  */
 export const generateSyntax = async (userDescription: string): Promise<GeneratedSpg> => {
-    const text = await chat({
+    const text = (await chat({
         system: SPG_SYSTEM_PROMPT,
         messages: [{ role: 'user', content: userDescription }],
         temperature: 0.7,
         reasoningEffort: 'high',
-    });
+    })).content;
     return parseReply(text);
 };
 
@@ -519,14 +519,14 @@ export const generateSyntax = async (userDescription: string): Promise<Generated
  * 作品名与 `fixSyntax` 同样**只摘不取**：迭代不改工程名，工程沿用原文件名。
  */
 export const refineSyntax = async (code: string): Promise<string> => {
-    const text = await chat({
+    const text = (await chat({
         system: withSyntaxDoc(SPG_REFINE_PROMPT),
         messages: [{ role: 'user', content: `待优化的作品：\n${code}` }],
         // 温度比生成低：这里要的是"同一个人的同一首曲子"，不是新灵感。
         // 生成用 0.7 是为了多样性，迭代用 0.7 只会让模型忍不住重写。
         temperature: 0.3,
         reasoningEffort: 'max',
-    });
+    })).content;
     return parseReply(text).code;
 };
 
@@ -539,11 +539,11 @@ export const refineSyntax = async (code: string): Promise<string> => {
  * 重命名不属于它，何况用户很可能已经自己改过标题了。
  */
 export const fixSyntax = async (brokenCode: string, errorMessage: string): Promise<string> => {
-    const text = await chat({
+    const text = (await chat({
         system: withSyntaxDoc(SPG_FIX_PROMPT),
         messages: [{ role: 'user', content: `Code:\n${brokenCode}\n\nError:\n${errorMessage}` }],
         temperature: 0.2,
         reasoningEffort: 'max',
-    });
+    })).content;
     return parseReply(text).code;
 };

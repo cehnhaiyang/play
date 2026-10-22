@@ -294,12 +294,70 @@ export type AiContentPart =
     | { type: 'image_url'; image_url: { url: string } };
 
 /**
+ * 一次工具调用。**由服务商的结构化通道产生，不是模型手写的文本。**
+ *
+ * 这是本仓"工具调用不经模型手写 JSON"的关键：`id` / `name` / `arguments` 三个字段
+ * 分别由协议层生成与约束，模型只负责产出内容本身。旧协议要求模型在回复正文里
+ * 手写 `{"intent":…,"calls":[…]}` 信封，任何一处引号或换行写错都整条报废 ——
+ * 实测 100 轮里 9 轮死于此，且同一个文件能连撞三次。
+ */
+export interface AiToolCall {
+    /** 协议里的调用 id。tool 消息靠它与 assistant 的 tool_calls 配对 */
+    id: string;
+    name: string;
+    /**
+     * 参数的**原始 JSON 字符串**，原样来自服务商。
+     *
+     * 不在这里解析：解析失败要能区分"服务商给了坏参数"与"我们认错了字段"，
+     * 而那需要在消费方（工具派发）当场报出原文。
+     */
+    arguments: string;
+}
+
+/**
+ * 一个可调用工具的描述（OpenAI `tools[].function` 的扁平形态）。
+ *
+ * 参数表是 JSON Schema：服务商据此约束模型产出，而不是靠提示词里"请只输出合法
+ * JSON"这类请求。实测同一份 schema 交给不支持约束解码的服务商，返回值可能
+ * 直接违反 schema（`{"ok":library_export}` 之于 `{ok: number}`），所以它同时
+ * 也是"这个服务商到底约不约束"的观测点。
+ */
+export interface AiToolSpec {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+}
+
+/**
+ * 一次补全的完整结果。
+ *
+ * 三样必须一起回来，**不能只回正文**：`toolCalls` 为空才是"模型说完了"，
+ * 而 `finishReason` 区分"正常说完"与"被输出上限截断"—— 后者截断的正文是半个
+ * 句子，把它当结论交给用户，等于把一次失败伪装成回答。
+ */
+export interface AiReply {
+    content: string;
+    toolCalls: AiToolCall[];
+    /** 服务商的收尾原因：stop / length / tool_calls / …。空串表示服务商没给 */
+    finishReason: string;
+}
+
+/**
  * 单轮对话消息
  */
 export interface AiChatMessage {
-    role: 'system' | 'user' | 'assistant';
+    role: 'system' | 'user' | 'assistant' | 'tool';
     /** 纯文本用 string；带图消息用 AiContentPart[] */
     content: string | AiContentPart[];
+    /**
+     * assistant 消息：这一步发起的调用。
+     *
+     * 回放历史时必须原样带上 —— 服务商要求每条 `tool` 消息都有一个带同 id 的
+     * `assistant.tool_calls` 与之配对，缺了整条请求会被拒。
+     */
+    tool_calls?: AiToolCall[];
+    /** tool 消息：这是对哪一次调用的答复 */
+    tool_call_id?: string;
 }
 
 /**
@@ -358,6 +416,13 @@ export interface AiChatOptions {
     maxTokens?: number;
     /** 要求模型返回严格 JSON 对象 */
     jsonMode?: boolean;
+    /**
+     * 可调用的工具。传了它，服务商就**用自己的结构化通道**产出调用，
+     * 模型不写任何 JSON 外壳（见 AiToolSpec）。
+     */
+    tools?: AiToolSpec[];
+    /** 工具选择策略，默认 `auto`（由模型决定这一步要不要调） */
+    toolChoice?: 'auto' | 'none' | 'required';
     /** 覆盖默认思考强度（不传则用配置里的档位） */
     reasoningEffort?: ReasoningEffort;
     /**
@@ -639,7 +704,22 @@ export interface AgentMessage {
      * 自己上一轮到底做过哪一件。
      */
     label?: string;
-    /** 工具消息：执行的脚本源码（供界面展开查看） */
+    /**
+     * 工具消息：这一次调用的协议身份。
+     *
+     * 服务商要求每条 tool 消息都由 `tool_call_id` 指回 assistant 那条带
+     * `tool_calls` 的消息，而那个 id 只活在当轮循环里 —— 不落进消息本身，
+     * 下一轮重建历史时就拼不出配对的 assistant.tool_calls，整条请求会被拒。
+     */
+    callId?: string;
+    /** 工具消息：服务商给的原始参数字符串（JSON）。重建 tool_calls 时要原样还回去 */
+    callArgs?: string;
+    /**
+     * 工具消息：执行的脚本源码（供界面展开查看）。
+     *
+     * 它**不是** `callArgs` 的副本：`callArgs` 是整个参数对象的 JSON（含 action、
+     * path 等），而这里只是 `js` 那一个字段，用于界面上的代码块高亮。
+     */
     script?: string;
     /** 工具消息：是否执行成功 */
     ok?: boolean;

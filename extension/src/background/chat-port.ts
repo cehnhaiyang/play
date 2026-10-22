@@ -1,4 +1,4 @@
-import type { AiChatMessage, AiConfig, AiUsage } from '../../../shared/meta';
+import type { AiChatMessage, AiConfig, AiReply, AiUsage } from '../../../shared/meta';
 import type { ChatPort } from '../agent/engine';
 import type { ExtensionResponse, HostChatRequest, HostEvent } from '../shared/protocol';
 import { requestApp } from './bridge-port';
@@ -26,7 +26,7 @@ import { requestApp } from './bridge-port';
 const waiting = new Map<string, {
     onDelta: (delta: { content?: string; reasoning?: string }) => void;
     onUsage: (usage: AiUsage) => void;
-    resolve: (reply: string) => void;
+    resolve: (reply: AiReply) => void;
     reject: (error: Error) => void;
 }>();
 
@@ -70,7 +70,7 @@ chrome.runtime.onMessage.addListener((message: { target?: string; kind?: string 
         }
 
         if (message.usage) entry.onUsage(message.usage);
-        entry.resolve(message.reply || '');
+        entry.resolve(message.reply || { content: '', toolCalls: [], finishReason: '' });
         return false;
     }
 
@@ -115,9 +115,11 @@ export const createChatPort = (ensureOffscreen: () => Promise<void>): ChatPort =
             ...(typeof options.temperature === 'number' ? { temperature: options.temperature } : {}),
             ...(typeof options.maxTokens === 'number' ? { maxTokens: options.maxTokens } : {}),
             ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
+            ...(options.tools ? { tools: options.tools } : {}),
+            ...(options.toolChoice ? { toolChoice: options.toolChoice } : {}),
         };
 
-        const reply = new Promise<string>((resolve, reject) => {
+        const reply = new Promise<AiReply>((resolve, reject) => {
             waiting.set(requestId, {
                 onDelta: options.onDelta,
                 onUsage: options.onUsage,

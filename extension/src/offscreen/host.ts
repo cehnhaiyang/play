@@ -60,6 +60,8 @@ const runChat = async (request: HostChatRequest): Promise<void> => {
             temperature: request.temperature,
             maxTokens: request.maxTokens,
             reasoningEffort: request.reasoningEffort,
+            ...(request.tools ? { tools: request.tools } : {}),
+            ...(request.toolChoice ? { toolChoice: request.toolChoice } : {}),
             signal: controller.signal,
             onUsage: (u) => {
                 usage = u;

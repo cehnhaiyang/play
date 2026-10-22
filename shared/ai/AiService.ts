@@ -7,9 +7,12 @@ import type {
     AiImageInput,
     AiModelPreset,
     AiProviderPreset,
+    AiReply,
     AiStory,
     AiStreamDelta,
     AiTestResult,
+    AiToolCall,
+    AiToolSpec,
     AiUsage,
     ReasoningEffort,
 } from '../meta';
@@ -320,16 +323,32 @@ export const estimateTokens = (text: string): number => {
     return Math.ceil(ascii / 4 + cjk / 1.5 + other / 3);
 };
 
-/** 一条消息的 token 数（多模态消息只算文本块；图片按固定额度估） */
+/**
+ * 一条消息的 token 数（多模态消息只算文本块；图片按固定额度估）。
+ *
+ * **必须把 `tool_calls` 的参数算进来。** 它们和正文一样要随每次请求重发，
+ * 而 Agent 的脚本源码正是装在那里面的 —— 漏算时"每步写一个大脚本"这条路
+ * 永远量不到：实测连发 3 步 90 万字符的脚本，实际发出 180 万 token，
+ * 引擎自报仍是 1707，直到服务商报错才发现。
+ */
 const messageTokens = (message: AiChatMessage): number => {
-    if (typeof message.content === 'string') return estimateTokens(message.content);
-    return message.content.reduce((sum, part) => {
-        // 图片无法按字符估：一张图的实际 token 由分辨率与服务商的切块策略决定，
-        // 这里给一个常见量级（约 800）—— 它只影响"估算"这条回落的精度，
-        // 而带图请求（AI 绘本）本来就不走 Agent 这条链路
-        if (part.type === 'image_url') return sum + 800;
-        return sum + estimateTokens(part.text);
-    }, 0);
+    let total = 0;
+    if (typeof message.content === 'string') {
+        total = estimateTokens(message.content);
+    } else {
+        total = message.content.reduce((sum, part) => {
+            // 图片无法按字符估：一张图的实际 token 由分辨率与服务商的切块策略决定，
+            // 这里给一个常见量级（约 800）—— 它只影响"估算"这条回落的精度，
+            // 而带图请求（AI 绘本）本来就不走 Agent 这条链路
+            if (part.type === 'image_url') return sum + 800;
+            return sum + estimateTokens(part.text);
+        }, 0);
+    }
+    for (const call of message.tool_calls || []) {
+        // 工具名与 id 各算一份小开销，参数串是主要部分
+        total += estimateTokens(call.name) + estimateTokens(call.arguments) + 4;
+    }
+    return total;
 };
 
 /** 按完整入参估算一次请求的 prompt token（系统提示词由 chat 拼入，此处已含） */
@@ -375,17 +394,24 @@ const reportUsage = (
 };
 
 /**
- * 发起一次对话补全，返回助手回复文本。
+ * 发起一次对话补全。
  *
  * 失败一律抛 Error（带服务端原文），由调用方决定如何提示用户——
  * 这里不吞异常，否则界面会把"密钥错了"显示成"未找到资源"。
  *
  * 传了 `options.onDelta` 即走流式（stream:true），增量实时回调，
- * **返回值仍是完整文本**，调用方不需要自己拼接。
+ * **返回值仍是完整结果**，调用方不需要自己拼接。
  *
  * 传了 `options.onUsage` 时，无论流式与否都会在成功拿到回复后回调一次用量。
+ *
+ * ## 为什么返回 AiReply 而不是纯文本
+ *
+ * 工具调用与"被截断"这两件事只在协议层可见：正文里既看不出这一步是不是想调工具
+ * （`tool_calls` 与 `content` 是两条独立通道），也看不出回复是被 `finish_reason:
+ * "length"` 砍断的。把这两样吞掉、只回一个字符串，等于让上层去正文里猜 ——
+ * 而那正是旧协议要求模型手写 JSON 信封的由来。
  */
-export const chat = async (options: AiChatOptions): Promise<string> => {
+export const chat = async (options: AiChatOptions): Promise<AiReply> => {
     const config = options.config || await getAiConfig();
     const messages: AiChatMessage[] = options.system
         ? [{ role: 'system', content: options.system }, ...options.messages]
@@ -401,9 +427,13 @@ export const chat = async (options: AiChatOptions): Promise<string> => {
     if (typeof options.temperature === 'number') payload.temperature = options.temperature;
     if (typeof options.maxTokens === 'number') payload.max_tokens = options.maxTokens;
     if (options.jsonMode) payload.response_format = { type: 'json_object' };
+    if (options.tools && options.tools.length > 0) {
+        payload.tools = options.tools.map(toWireTool);
+        payload.tool_choice = options.toolChoice || 'auto';
+    }
 
-    const finish = (reply: string, measured: ReturnType<typeof pickUsage>): string => {
-        reportUsage(options.onUsage, messages, reply, measured);
+    const finish = (reply: AiReply, measured: ReturnType<typeof pickUsage>): AiReply => {
+        reportUsage(options.onUsage, messages, reply.content, measured);
         return reply;
     };
 
@@ -478,12 +508,88 @@ const pickText = (value: unknown): string => {
     return '';
 };
 
-/** 一次性请求：整包返回后解析 */
+/**
+ * 工具规格 → 协议形态。
+ *
+ * 只有这一处做映射：`AiToolSpec` 是扁平的（name / description / parameters），
+ * 而协议要求外面再包一层 `type: 'function'` + `function: {...}`。分散在多处包，
+ * 就会有一处忘包而表现为"服务商说 tools 里某项缺 name"。
+ */
+const toWireTool = (tool: AiToolSpec): Record<string, unknown> => ({
+    type: 'function',
+    function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+    },
+});
+
+/**
+ * 把流式分片里的 tool_calls 拼回完整调用。
+ *
+ * ## 为什么要按 index 拼而不是按 id
+ *
+ * 实测流式下第一片带 `id` + `name`、**后续每一片只带 `index` 与一小段
+ * `arguments`**（连 `id` 都没有）。按 id 认领会把所有续片当成"又一个新调用"，
+ * 于是模型写的一个调用被拆成十几个各带半个 JSON 的调用 —— 每个都解析失败。
+ * 协议里 `index` 就是为这件事存在的。
+ */
+interface ToolCallDraft {
+    id: string;
+    name: string;
+    arguments: string;
+}
+
+const mergeToolCallDelta = (drafts: ToolCallDraft[], raw: unknown): void => {
+    if (!Array.isArray(raw)) return;
+    for (const item of raw) {
+        if (!item || typeof item !== 'object') continue;
+        const piece = item as {
+            index?: unknown;
+            id?: unknown;
+            function?: { name?: unknown; arguments?: unknown };
+        };
+        /*
+         * index 缺失时落到 0：协议要求它必填，但实测存在只发一个调用、不带 index
+         * 的兼容实现。落到 0 与"只有一个调用"等价，而另起一个新调用会让参数错位。
+         */
+        const at = typeof piece.index === 'number' && piece.index >= 0 ? piece.index : 0;
+        while (drafts.length <= at) drafts.push({ id: '', name: '', arguments: '' });
+        const draft = drafts[at];
+        if (typeof piece.id === 'string' && piece.id) draft.id = piece.id;
+        const fn = piece.function;
+        if (fn) {
+            if (typeof fn.name === 'string' && fn.name) draft.name = fn.name;
+            if (typeof fn.arguments === 'string') draft.arguments += fn.arguments;
+        }
+    }
+};
+
+/** 草稿 → 对外形态。缺 id 的补一个：回放历史时 tool 消息必须能与它配对 */
+const finalizeToolCalls = (drafts: ToolCallDraft[]): AiToolCall[] => {
+    const calls: AiToolCall[] = [];
+    for (const [at, draft] of drafts.entries()) {
+        if (!draft.name) continue;
+        calls.push({
+            id: draft.id || `call_${at}_${Math.random().toString(36).slice(2, 10)}`,
+            name: draft.name,
+            arguments: draft.arguments,
+        });
+    }
+    return calls;
+};
+
+/**
+ * 一次性请求：整包返回后解析。
+ *
+ * `finish_reason` 原样带上去：`length` 是"回复被输出上限截断"的唯一可靠信号，
+ * 上层靠它区分"模型说完了"与"模型被打断了"。
+ */
 const sendCompletion = async (
     payload: Record<string, unknown>,
     config: AiConfig,
     signal?: AbortSignal
-): Promise<{ reply: string; usage: ReturnType<typeof pickUsage> }> => {
+): Promise<{ reply: AiReply; usage: ReturnType<typeof pickUsage> }> => {
     const response = await requestCompletion(payload, config, signal);
     const text = await response.text();
 
@@ -491,14 +597,28 @@ const sendCompletion = async (
         throw new Error(`AI 服务返回错误：${extractErrorMessage(response.status, text)}`);
     }
 
-    let data: { choices?: { message?: { content?: string } }[]; usage?: unknown };
+    let data: {
+        choices?: { message?: { content?: string; tool_calls?: unknown }; finish_reason?: string }[];
+        usage?: unknown;
+    };
     try {
         data = JSON.parse(text);
     } catch (_error) {
         throw new Error('AI 服务返回了无法解析的内容，请确认接口地址指向 OpenAI 兼容服务。');
     }
 
-    return { reply: data?.choices?.[0]?.message?.content || '', usage: pickUsage(data?.usage) };
+    const choice = data?.choices?.[0];
+    const drafts: ToolCallDraft[] = [];
+    mergeToolCallDelta(drafts, choice?.message?.tool_calls);
+
+    return {
+        reply: {
+            content: choice?.message?.content || '',
+            toolCalls: finalizeToolCalls(drafts),
+            finishReason: choice?.finish_reason || '',
+        },
+        usage: pickUsage(data?.usage),
+    };
 };
 
 /**
@@ -513,7 +633,7 @@ const sendStreaming = async (
     config: AiConfig,
     onDelta: (delta: AiStreamDelta) => void,
     signal?: AbortSignal
-): Promise<{ reply: string; usage: ReturnType<typeof pickUsage> }> => {
+): Promise<{ reply: AiReply; usage: ReturnType<typeof pickUsage> }> => {
     const response = await requestCompletion(payload, config, signal);
 
     if (!response.ok) {
@@ -527,15 +647,28 @@ const sendStreaming = async (
     // 服务端忽略了 stream，回的是普通 JSON —— 直接当非流式处理，别当失败
     if (!contentType.includes('event-stream') || !response.body) {
         const text = await response.text();
-        let data: { choices?: { message?: { content?: string } }[]; usage?: unknown };
+        let data: {
+            choices?: { message?: { content?: string; tool_calls?: unknown }; finish_reason?: string }[];
+            usage?: unknown;
+        };
         try {
             data = JSON.parse(text);
         } catch (_error) {
             throw new Error('AI 服务返回了无法解析的内容，请确认接口地址指向 OpenAI 兼容服务。');
         }
-        const whole = data?.choices?.[0]?.message?.content || '';
+        const choice = data?.choices?.[0];
+        const whole = choice?.message?.content || '';
         if (whole) onDelta({ content: whole });
-        return { reply: whole, usage: pickUsage(data?.usage) };
+        const drafts: ToolCallDraft[] = [];
+        mergeToolCallDelta(drafts, choice?.message?.tool_calls);
+        return {
+            reply: {
+                content: whole,
+                toolCalls: finalizeToolCalls(drafts),
+                finishReason: choice?.finish_reason || '',
+            },
+            usage: pickUsage(data?.usage),
+        };
     }
 
     const reader = response.body.getReader();
@@ -547,6 +680,10 @@ const sendStreaming = async (
     // 所以整个流里持续覆盖，取到的那一份自然是最新的
     let usage: ReturnType<typeof pickUsage> = null;
     let finished = false;
+    /** 收尾原因。流里只有最后一片带它，中途的 null 不能覆盖已有的值 */
+    let finishReason = '';
+    /** tool_calls 分片草稿，按 index 累积（理由见 mergeToolCallDelta） */
+    const drafts: ToolCallDraft[] = [];
 
     const handleDataLine = (line: string): void => {
         if (!line.startsWith('data:')) return;
@@ -554,7 +691,10 @@ const sendStreaming = async (
         if (!data) return;
         if (data === '[DONE]') { finished = true; return; }
 
-        let parsed: { choices?: { delta?: Record<string, unknown> }[]; usage?: unknown };
+        let parsed: {
+            choices?: { delta?: Record<string, unknown>; finish_reason?: string | null }[];
+            usage?: unknown;
+        };
         try {
             parsed = JSON.parse(data);
         } catch (_error) {
@@ -566,8 +706,14 @@ const sendStreaming = async (
         const chunkUsage = pickUsage(parsed?.usage);
         if (chunkUsage) usage = chunkUsage;
 
-        const delta = parsed?.choices?.[0]?.delta;
+        const choice = parsed?.choices?.[0];
+        if (choice?.finish_reason) finishReason = choice.finish_reason;
+
+        const delta = choice?.delta;
         if (!delta) return;
+
+        // 工具调用与正文是两条独立通道：带 tool_calls 的分片通常 content 为空串
+        mergeToolCallDelta(drafts, delta.tool_calls);
 
         const piece = pickText(delta.content);
         // 推理字段名各家不一：reasoning_content 是 DeepSeek 系，reasoning 是通用写法
@@ -613,7 +759,10 @@ const sendStreaming = async (
         try { await reader.cancel(); } catch (_error) { /* 已关闭 */ }
     }
 
-    return { reply: content, usage };
+    return {
+        reply: { content, toolCalls: finalizeToolCalls(drafts), finishReason },
+        usage,
+    };
 };
 
 /** 发请求。网络层失败与用户中止要分开报，否则点停止会看到"无法连接 AI 服务" */
@@ -896,7 +1045,7 @@ export const generateStoryFromImages = async (
 
     const system = (systemInstruction || '').trim() || STORY_SYSTEM_PROMPT;
 
-    const raw = await chat({
+    const raw = (await chat({
         system,
         messages: [{
             role: 'user',
@@ -906,7 +1055,7 @@ export const generateStoryFromImages = async (
         jsonMode: true,
         // 读图 + 长文创作是重活，用高推理档换一次成稿率
         reasoningEffort: 'high',
-    });
+    })).content;
 
     const story = parseStoryJson(raw);
     if (story) return story;

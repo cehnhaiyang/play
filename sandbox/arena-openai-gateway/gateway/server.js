@@ -1,8 +1,6 @@
 'use strict';
 const http = require('http');
 const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
 const { acceptKey, frame, createParser } = require('./ws');
 
 const PORT = Number(process.env.PORT || 8787);
@@ -13,17 +11,11 @@ const QUIET = process.env.QUIET === '1';
 const log = (...a) => { if (!QUIET) console.log('[gw]', ...a); };
 
 let agent = null;
+// The ONLY source of truth for models: what the connected browser tab reported.
+// There is deliberately no built-in/offline model list anywhere in this process.
 let agentModels = [];
+let agentModelsAt = 0;
 const pending = new Map();
-
-function staticModels() {
-  try {
-    const p = path.join(__dirname, 'models.json');
-    return JSON.parse(fs.readFileSync(p, 'utf8')).models || [];
-  } catch (e) {
-    return [];
-  }
-}
 
 function sendToAgent(obj) {
   if (!agent) return false;
@@ -40,8 +32,18 @@ function onAgentMessage(raw) {
   let m;
   try { m = JSON.parse(raw); } catch (e) { return; }
   if (m.type === 'hello') {
-    agentModels = Array.isArray(m.models) ? m.models : [];
-    log('agent hello, models =', agentModels.length);
+    const incoming = Array.isArray(m.models) ? m.models : [];
+    const seen = new Set();
+    const next = [];
+    for (const x of incoming) {
+      const id = typeof x === 'string' ? x : (x && x.id);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      next.push({ id: String(id), owned_by: (x && x.owned_by) || 'arena' });
+    }
+    agentModels = next;
+    agentModelsAt = Date.now();
+    log('agent reported models =', agentModels.length);
     return;
   }
   if (m.type === 'ping') { sendToAgent({ type: 'pong' }); return; }
@@ -208,12 +210,15 @@ async function handleChat(req, res) {
 }
 
 function handleModels(res) {
-  let list;
-  if (agentModels.length) {
-    list = agentModels.map((m) => ({ id: m.id, object: 'model', created: 0, owned_by: m.owned_by || 'arena' }));
-  } else {
-    list = staticModels().map((m) => ({ id: m.name, object: 'model', created: 0, owned_by: m.owned_by || 'arena' }));
-  }
+  // Purely dynamic: the list is exactly what the browser tab last reported.
+  // No fallback catalogue, so this endpoint can never advertise a model that
+  // the connected browser is unable to serve.
+  const list = agentModels.map((m) => ({
+    id: m.id,
+    object: 'model',
+    created: 0,
+    owned_by: m.owned_by || 'arena'
+  }));
   sendJson(res, 200, { object: 'list', data: list });
 }
 
@@ -229,7 +234,13 @@ const server = http.createServer(async (req, res) => {
   }
   try {
     if (u.pathname === '/health') {
-      return sendJson(res, 200, { ok: true, agent: !!agent, models: agentModels.length });
+      return sendJson(res, 200, {
+        ok: true,
+        agent: !!agent,
+        models: agentModels.length,
+        modelsAt: agentModelsAt,
+        modelsAge: agentModelsAt ? Date.now() - agentModelsAt : null
+      });
     }
     if (u.pathname === '/v1/models' && req.method === 'GET') return handleModels(res);
     if (u.pathname === '/v1/chat/completions' && req.method === 'POST') {
@@ -258,8 +269,17 @@ server.on('upgrade', (req, socket) => {
   agent = { sock: socket };
   log('agent connected');
   socket.on('data', (c) => parser.push(c, (f) => { try { socket.write(f); } catch (e) {} }));
-  socket.on('close', () => { if (agent && agent.sock === socket) { agent = null; log('agent disconnected'); } });
-  socket.on('error', () => { if (agent && agent.sock === socket) agent = null; });
+  socket.on('close', () => {
+    if (agent && agent.sock === socket) {
+      agent = null;
+      agentModels = [];
+      agentModelsAt = 0;
+      log('agent disconnected, model list cleared');
+    }
+  });
+  socket.on('error', () => {
+    if (agent && agent.sock === socket) { agent = null; agentModels = []; agentModelsAt = 0; }
+  });
 });
 
 function start() {

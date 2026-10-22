@@ -4,7 +4,6 @@ import type {
     AiChatMessage,
 } from '../../../shared/meta';
 import { COMPACT_PREFIX } from './prompt';
-import { diagnoseReply } from './parse';
 
 /**
  * 界面记录 → 模型消息序列，以及回灌给模型的那几段文案。
@@ -14,13 +13,20 @@ import { diagnoseReply } from './parse';
  * 1. **形状不同**。`AgentMessage` 是展示记录（带 reasoning / 脚本源码 / 时间戳），
  *    模型侧只该拿到 role + content。推理尤其不能进 —— 那会把每一步的独白在后续
  *    每一步重发一遍。
- * 2. **时序不同**。工具结果在**本轮循环内**以 user 消息回灌（ReAct 形态），若从
+ * 2. **时序不同**。工具结果在**本轮循环内**以 tool 消息回灌（原生协议形态），若从
  *    `messages` 全量重建，它们会被当成"用户说的话"再发一遍。所以 `send()` 必须在
  *    **追加本轮提问之前**读历史，本轮上下文交给循环自己维护。
  *
+ * ## 工具消息必须是原生 `tool` 角色
+ *
+ * 服务商要求每条 `tool` 消息都由一个 `tool_call_id` 指回 assistant 那条带
+ * `tool_calls` 的消息。旧协议没有 tool 角色（JSON 信封里没有这个概念），工具结果
+ * 只能伪装成 user 消息塞回历史 —— 而那样模型读不出"这是工具说的还是用户说的"，
+ * 只能靠 `[工具 X 的执行结果]` 这类**文本前缀**去猜。现在这层猜测由协议承担。
+ *
  * ## 措辞必须逐字共用
  *
- * 协议错误与工具结果各有专属文案函数，主循环当场回灌用的也是它们 —— 不在这里
+ * 工具结果与协议错误各有专属文案函数，主循环当场回灌用的也是它们 —— 不在这里
  * 各写一遍。同一段历史在"本轮循环里"与"下一轮重建时"长得不一样的话，模型对
  * "这一步到底错在哪"的判断会随轮次漂移。
  */
@@ -63,91 +69,43 @@ const splitRounds = (messages: AgentMessage[]): AgentMessage[][] => {
  *
  * 构造（主循环）与重建（roundToMessages）两处必须认同一个字面量：重建时靠它
  * 认出"这是一次协议错误"，从而吐回与当场**逐字相同**的回灌文案。
+ *
+ * 注意它现在只覆盖**一种**失败：服务商给了一次不可执行的调用（参数不是合法
+ * JSON，或给了一个我们没有的工具名）。旧版本的五种错法（没写 JSON / 被截断 /
+ * JSON 语法坏 / calls 坏了 / 少了字段）随信封协议一起消失了 —— 那些形状在
+ * 结构化通道下根本不存在。
  */
 export const PROTOCOL_ERROR_LABEL = '协议错误';
 
 /**
  * 界面上那条协议错误记录的**一行摘要**。
  *
- * 与回灌文案（protocolErrorObservation）共用同一个诊断，但**不贴原文**：
- * 回灌要带全文让模型自查，而这条是给人看的 —— 原文动辄几千字，贴上去会把
- * 对话流冲得没法读，用户也判断不出错在哪。诊断结论才是他要的那一句。
+ * 与回灌文案（protocolErrorObservation）共用同一个原因，但**不贴原文**：
+ * 回灌要带原文让模型自查，而这条是给人看的 —— 原文动辄几千字，贴上去会把
+ * 对话流冲得没法读，用户也判断不出错在哪。
  */
-export const protocolErrorSummary = (reply: string): string => {
-    const problem = diagnoseReply(reply);
-    switch (problem.kind) {
-        case 'noJson':
-            return '协议错误：整条回复里没有 JSON，写成了说明文字';
-        case 'truncated':
-            return `协议错误：JSON 被截断（${problem.detail}）`;
-        case 'badJson':
-            return `协议错误：JSON 语法不合法（${problem.detail}）`;
-        case 'badCalls':
-            return `协议错误：calls 里没有可执行的调用（${problem.detail}）`;
-        default:
-            return `协议错误：JSON 里既没有 calls 也没有 final（顶层只有 ${problem.keys}）`;
-    }
-};
+export const protocolErrorSummary = (reason: string): string => `协议错误：${reason}`;
 
 /**
  * 协议错误的回灌文案。
  *
  * **只能由这一个函数产出。** 同一段历史在"本轮循环里"与"下一轮重建时"长得不一样
- * 的话，模型对"这一步到底错在哪"的判断会随轮次漂移：当场读到的是"你的 JSON 不合法"，
- * 下一轮却变成"执行失败，请修正参数"——而那次调用压根没有参数可改。
+ * 的话，模型对"这一步到底错在哪"的判断会随轮次漂移。
  *
- * ## 为什么要分四种错法
+ * ## 为什么现在只有一句
  *
- * 一律回一句"没有工具调用也没有 final"时，模型**只能靠猜**：它自认为写的是合法
- * JSON，于是原样再来一遍。实测连撞三次（MAX_PROTOCOL_ERRORS）就把整轮撞停，
- * 而三次的失败原因其实是同一个"回复被输出长度截断"，模型每次都读不出这件事。
- * 所以这里按 diagnoseReply 的判据分开说，并给出各自**唯一有效的动作**。
- *
- * 诊断只看正文，不看时序，因此当场与重建必然得到同一句 —— 不需要额外记状态。
+ * 旧版本按五种错法分岔（没写 JSON / 被截断 / 语法坏 / calls 坏了 / 少了字段），
+ * 因为那时外壳是模型手写的，五种错法各需一种补救。结构化通道下只剩一种可能：
+ * 服务商给的参数不是合法 JSON，或给了一个不存在的工具 —— 两者都只有一条出路，
+ * 就是重发这一个调用。分岔文案留着反而会让模型以为还有别的坑要绕。
  *
  * 刻意不写"第 N 次"：那个计数只服务于 MAX_PROTOCOL_ERRORS 这道闸门，
  * 进了文案就没法从消息本身重建（重建时无从知道当时是第几次），
  * 而这正是两处措辞开始分叉的起点。
  */
-export const protocolErrorObservation = (reply: string): string => {
-    const problem = diagnoseReply(reply);
-
-    let what: string;
-    let fix: string;
-    switch (problem.kind) {
-        case 'noJson':
-            what = '整条回复里没有任何 `{`，写成了散文/说明文字。';
-            fix = '只输出那一个 JSON 对象本身，前面后面都不要加解释。';
-            break;
-        case 'truncated':
-            what = `JSON 没写完就被截断了：${problem.detail}。`
-                + '最常见的原因是这条回复太长，撞上了输出长度上限 —— 不是你把标点写错了。';
-            fix = '把这一步拆小：args 里只放**必需**的那段代码，能分两次做的就分两次。'
-                + '尤其不要把整份脚本、整篇文档塞进一次回复。';
-            break;
-        case 'badJson':
-            what = `大括号是闭上的，但 JSON 语法不合法：${problem.detail}`;
-            fix = '检查 args 里的字符串：换行必须写成 \\n、双引号必须写成 \\"、反斜杠写成 \\\\。';
-            break;
-        case 'badCalls':
-            what = `calls 字段在，但里面没有一项能执行：${problem.detail}`;
-            fix = 'calls 必须是数组，每一项都要有 tool（工具名，全小写）与 args 两个字段；'
-                + '只写一项时同样要用数组包起来：[{"tool":"js","args":{...}}]。';
-            break;
-        default:
-            what = `JSON 本身合法，但没有 calls 也没有 final 字段（顶层只有：${problem.keys}）。`;
-            fix = '补上其中一个：要执行工具就写 calls 数组，要收尾就写 final。';
-            break;
-    }
-
-    return '[协议错误] 你上一条回复没有按协议输出。'
-        + `具体是：${what}`
-        + `改法：${fix}`
-        + ' 协议要求只回一个 JSON 对象：'
-        + '{"intent":"...","calls":[{"tool":"js","args":{...}}]} 或 {"intent":"...","final":"..."}，'
-        + '不要用 ```json 围栏。'
-        + `\n\n你上一条回复的原文：\n${reply}`;
-};
+export const protocolErrorObservation = (reason: string): string => '[协议错误] 这一步没能执行。'
+    + `具体是：${reason}`
+    + ' 工具调用的参数由协议层生成，正常不会坏 —— 遇到这条就按上面的原因改一次，重发同一个调用。';
 
 /**
  * 工具观察的回灌文案：**只由这一个函数产出**。
@@ -170,41 +128,61 @@ export const toolObservation = (label: string, result: string, ok: boolean): str
 /**
  * 一整批工具调用的回灌文案。**只由这一个函数产出**。
  *
- * 一次回复可以带多个调用，所以观察也必须按**批**回灌。逐条各发一条 user 消息
+ * 一次回复可以带多个调用，所以观察也必须按**批**回灌。逐条各发一条消息
  * 在时序上等价，但模型看到的是"我发了一次、回来三条"，读不出哪些结果是同一步
  * 拿到的；而"哪几项可以并行"正是它规划下一步的依据。批次头把这件事说清楚。
  *
- * `shortfall` 是"你写的比跑的多"的说明（超出上限、或某项缺工具名）。它为空的
- * 常见情形是单个调用 —— 多数回复只有一个，此时退化成原来的单条文案：
- * 多一层批次头是纯 token 开销，且会让模型以为自己在批量做事。
+ * 单个调用时退化成原来的单条文案：多一层批次头是纯 token 开销，
+ * 且会让模型以为自己在批量做事。
  */
-export const batchObservation = (
-    items: { label: string; result: string; ok: boolean }[],
-    shortfall = '',
-): string => {
-    if (items.length === 1 && !shortfall) return toolObservation(items[0].label, items[0].result, items[0].ok);
+export const batchObservation = (items: { label: string; result: string; ok: boolean }[]): string => {
+    if (items.length === 1) return toolObservation(items[0].label, items[0].result, items[0].ok);
 
     const failed = items.filter((i) => !i.ok).length;
     const head = `[本步执行了 ${items.length} 个调用，结果如下；`
-        + (failed ? `其中 ${failed} 个失败。` : '全部成功。')
-        + shortfall;
+        + (failed ? `其中 ${failed} 个失败。` : '全部成功。');
     return `${head}\n\n${items.map((i) => toolObservation(i.label, i.result, i.ok)).join('\n\n')}`;
 };
 
 /**
  * 一轮对话 → 发给模型的消息序列。
  *
- * 同一轮里连续的观察合并进**一条** user 消息：一条 user 消息带多段结果，
- * 比拆成多条更贴近真实的 ReAct 轨迹。
+ * ## 工具结果走原生 `tool` 角色
+ *
+ * 服务商要求每条 tool 消息用 `tool_call_id` 指回 assistant 那条带 `tool_calls`
+ * 的消息，否则整条请求被拒（"tool 消息没有对应的调用"）。所以重建历史时，
+ * 先把同一轮的调用还原成一条 `assistant.tool_calls`，再逐条跟 `tool` 消息。
+ *
+ * 这个形状与**当轮循环内**发给模型的那份 transcript 逐字对齐 —— 两处不一致的话，
+ * 同一段历史在"当场"与"下一轮"长得不同，模型对"我这一步做了什么"的判断会漂移。
+ *
+ * ## 协议错误没有对应的 tool 消息
+ *
+ * 那次调用**没能执行**，所以服务商那边根本没有它的 tool_call_id 可配对。
+ * 它只能以文本回灌（`[协议错误]`），作为 user 消息跟在后面 —— 这是协议层面
+ * 唯一能表达"这条调用没有结果"的方式。
  */
 export const roundToMessages = (round: AgentMessage[]): AiChatMessage[] => {
     const out: AiChatMessage[] = [];
-    let observations: string[] = [];
+    /** 攒起来的文本观察（系统提示 / 协议错误），按顺序合成 user 消息 */
+    let notes: string[] = [];
+    /** 这一批已经发出去的调用，等它们的结果 */
+    let pending: { id: string; name: string; arguments: string }[] = [];
+    let toolMessages: AiChatMessage[] = [];
 
-    const flushObservations = () => {
-        if (observations.length === 0) return;
-        out.push({ role: 'user', content: observations.join('\n\n') });
-        observations = [];
+    const flushNotes = () => {
+        if (notes.length === 0) return;
+        out.push({ role: 'user', content: notes.join('\n\n') });
+        notes = [];
+    };
+
+    const flushTools = () => {
+        if (pending.length === 0 && toolMessages.length === 0) return;
+        // assistant 那条必须在 tool 消息**之前**：协议按顺序配对
+        if (pending.length > 0) out.push({ role: 'assistant', content: '', tool_calls: pending });
+        out.push(...toolMessages);
+        pending = [];
+        toolMessages = [];
     };
 
     for (const message of round) {
@@ -214,37 +192,64 @@ export const roundToMessages = (round: AgentMessage[]): AiChatMessage[] => {
         if (message.compaction) continue;
 
         if (message.role === 'user') {
-            flushObservations();
+            flushTools();
+            flushNotes();
             out.push({ role: 'user', content: message.content });
             continue;
         }
 
         if (message.role === 'assistant') {
-            flushObservations();
+            flushTools();
+            flushNotes();
             if (!message.content) continue;
             if (message.notice) {
                 // 界面补的提示不是模型说的话，原样回放等于让它读到一句自己从未写过的台词
-                observations.push(`[系统提示] ${message.content}`);
+                notes.push(`[系统提示] ${message.content}`);
             } else {
                 out.push({ role: 'assistant', content: message.content });
             }
             continue;
         }
 
-        if (message.result || message.content) {
-            if (message.label === PROTOCOL_ERROR_LABEL) {
-                observations.push(protocolErrorObservation(message.result || ''));
-            } else {
-                observations.push(toolObservation(
-                    message.label || message.tool || '未知',
-                    message.result || '',
-                    message.ok !== false,
-                ));
-            }
+        // 工具消息
+        const label = message.label || message.tool || '未知';
+        const callId = message.callId || `rebuilt_${message.id}`;
+
+        /*
+         * **协议错误也走 tool 消息**，不走文本回灌。
+         *
+         * 它的 id 已经在 assistant.tool_calls 里发出去了 —— 服务商按 id 逐条配对，
+         * 少一条就会被拒（"tool 消息与调用对不上"）。所以哪怕这一步没执行成功，
+         * 也必须回一条 tool 消息，只是内容是协议错误文案。
+         *
+         * 没有 callId 的老记录（上一版插件写的）仍按文本回灌：它们没有对应的
+         * assistant.tool_calls，凑一条 tool 消息反而会让配对失败。
+         */
+        if (message.label === PROTOCOL_ERROR_LABEL && !message.callId) {
+            flushTools();
+            notes.push(protocolErrorObservation(message.result || ''));
+            continue;
         }
+
+        if (!message.result && !message.content) continue;
+        flushNotes();
+
+        pending.push({
+            id: callId,
+            name: message.tool || label,
+            arguments: message.callArgs || '{}',
+        });
+        toolMessages.push({
+            role: 'tool',
+            tool_call_id: callId,
+            content: message.label === PROTOCOL_ERROR_LABEL
+                ? protocolErrorObservation(message.result || '')
+                : toolObservation(label, message.result || '', message.ok !== false),
+        });
     }
 
-    flushObservations();
+    flushTools();
+    flushNotes();
     return out;
 };
 

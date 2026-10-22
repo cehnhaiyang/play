@@ -7,6 +7,8 @@ import type {
     AgentToolName,
     AgentUsage,
     AiChatMessage,
+    AiReply,
+    AiToolSpec,
     AiUsage,
     ReasoningEffort,
     SandboxRequest,
@@ -42,17 +44,18 @@ import {
     protocolErrorSummary,
     splitByCompaction,
     sumUsage,
+    toolObservation,
 } from './transcript';
 import { asString, errorText, keepReasoning, trimToBudget } from './text';
 import {
     buildScriptSource,
     extractCalls,
-    extractJsonObject,
     isErrorResult,
     isJsErrorResult,
     locateScriptError,
-    MAX_CALLS_PER_REPLY,
+    parseArguments,
 } from './parse';
+import { AGENT_TOOLS } from './toolspec';
 import { dispatchTool } from './tools';
 
 /**
@@ -123,10 +126,13 @@ export interface ChatPort {
         temperature?: number;
         maxTokens?: number;
         reasoningEffort?: ReasoningEffort;
+        /** 可调用的工具。传了它，服务商用自己的结构化通道产出调用 */
+        tools?: AiToolSpec[];
+        toolChoice?: 'auto' | 'none' | 'required';
         signal: AbortSignal;
         onDelta: (delta: { content?: string; reasoning?: string }) => void;
         onUsage: (usage: AiUsage) => void;
-    }) => Promise<string>;
+    }) => Promise<AiReply>;
 }
 
 interface EngineOptions {
@@ -714,12 +720,12 @@ export class AgentEngine {
         const history = this.contextOf(this.messages).transcript;
         this.appendMessage({ id: generateId(), role: 'user', content: text, at: Date.now() });
 
-        // 模型侧记录。JSON 协议没有 tool role，观察结果以 user 消息回灌（ReAct 形态）
+        // 模型侧记录。工具结果以原生 tool 消息回灌（形状与 roundToMessages 逐字对齐）
         const transcript = [...history, { role: 'user' as const, content: text }];
 
         try {
             // 连续协议错误计数。只统计**连续**的：中途成功执行过一次工具就归零，
-            // 否则一个偶发笔误会跟着整个会话不放，几次之后把还正常的模型判死。
+            // 否则一个偶发故障会跟着整个会话不放，几次之后把还正常的模型判死。
             let protocolErrors = 0;
 
             // 不设步数上限：什么时候停由模型自己决定（不再要工具就收尾）。
@@ -731,7 +737,7 @@ export class AgentEngine {
                  * 不是 `contextOf(messages)`。
                  *
                  * 两者不等价，而且差的正是最容易撑爆的那一块：transcript 里每步
-                 * 都追加模型那条**完整 JSON 回复**（含整份 args.code），而重建
+                 * 都追加模型那条 assistant 消息（含整份 arguments.code），而重建
                  * messages 时工具消息只回放 label + result，脚本源码一个字都不进
                  * （见 roundToMessages）。按重建量的话，"模型每步写一个大脚本"
                  * 这条路永远量不到 —— 实测连发 3 步 90 万字符的脚本，实际发出
@@ -762,12 +768,18 @@ export class AgentEngine {
                 this.abort = controller;
 
                 let stepUsage: AiUsage | undefined;
-                let reply: string;
+                let reply: AiReply;
 
                 try {
                     reply = await this.options.chat.chat({
                         system: SYSTEM_PROMPT,
                         messages: transcript,
+                        /*
+                         * 工具表随请求下发。**这是本设计的核心**：调用由服务商的
+                         * 结构化通道产出，模型不写任何 JSON 外壳 —— 那类"漏引号 /
+                         * 漏括号 / 被截断"的失败因此不是变少了，而是不存在。
+                         */
+                        tools: AGENT_TOOLS,
                         // 不指定 reasoningEffort：由配置里的档位决定。
                         // 硬编码会无视用户在设置里选的档位，而推理强度是按调用计费的。
                         signal: controller.signal,
@@ -819,31 +831,67 @@ export class AgentEngine {
                 }
 
                 if (this.stopped) break;
-                transcript.push({ role: 'assistant', content: reply });
+                const { calls } = extractCalls(reply.toolCalls);
+                const intent = reply.content.trim();
+                const truncated = reply.finishReason === 'length';
 
-                const call = extractJsonObject(reply);
-                const { calls, written } = extractCalls(call);
-                /** 这一步的意图，只用于界面显示（不参与任何判据） */
-                const intent = asString(call?.intent);
+                /*
+                 * 截断发生在参数里时，只有**参数完整**的那些调用能执行。
+                 *
+                 * 理由与服务商配对规则直接相关：`assistant.tool_calls` 里出现的
+                 * 每一个 id，后面都必须跟一条对应的 tool 消息。把坏掉的那个也
+                 * 写进去，就得为它编一条结果；而它根本没被执行，编出来的结果
+                 * 会污染历史。截断这件事由下面那条 notice + TRUNCATED_OBSERVATION
+                 * 说清，不靠"一条假结果"表达。
+                 */
+                const runnable = truncated
+                    ? calls.filter((one) => parseArguments(one.raw).ok)
+                    : calls;
 
                 /**
-                 * 没有可执行的调用 —— 三种情况必须分开处置，混为一谈会让 Agent
-                 * 在最需要自救的时候停下来：
+                 * **截断优先于一切。**
                  *
-                 * 1. **模型明确收尾**（给了 final）：正常结束，落一条回答。
-                 * 2. **协议错误**（没给 final，也没给出可执行的 calls）：这不是"它说完了"，
-                 *    而是**这一步没做成**。直接当成普通文本收尾，等于把一次失败的
-                 *    调用当成结论交给用户。必须把错误回灌让它改。
-                 * 3. **空回复**：推理模型偶发，回灌也无从改起，如实提示后停止。
+                 * `finishReason === 'length'` 意味着这一条回复是被输出上限砍断的，
+                 * 于是它里面的一切都是残片：正文是半句话，`tool_calls` 的参数
+                 * 是半个 JSON。两者必须按**同一个原因**处置 —— 而那个原因是
+                 * "内容太长"，不是"模型写错了协议"。
+                 *
+                 * 判据必须在这里、在派发之前：放到 `calls.length === 0` 分支里
+                 * 就只覆盖了"截断发生在正文"这一种，而实测中截断几乎总是发生在
+                 * **参数**里（模型正在写一份长文件），那时 calls 非空，会一路
+                 * 走到"参数不是合法 JSON"被误判成协议错误 —— 回灌一句"重发同一个
+                 * 调用"，模型照做还是被砍，于是连撞三次把整轮撞停。
                  */
-                if (calls.length === 0) {
-                    const finalText = asString(call?.final);
+                if (truncated) {
+                    this.appendMessage({
+                        id: generateId(),
+                        role: 'assistant',
+                        content: runnable.length > 0
+                            ? '（本轮回复撞上输出长度上限被截断；已完整写出的调用照常执行）'
+                            : '（本轮回复撞上输出长度上限被截断，已要求模型拆小重做）',
+                        reasoning: keepReasoning(liveReasoning),
+                        notice: true,
+                        ...(stepUsage ? { usage: stepUsage } : {}),
+                        at: Date.now(),
+                    });
+                    transcript.push({ role: 'assistant', content: intent });
+                    transcript.push({ role: 'user', content: TRUNCATED_OBSERVATION });
+                    // 一条能执行的调用都没有：没有 tool 消息要回，直接进下一轮
+                    if (runnable.length === 0) continue;
+                }
 
-                    if (finalText) {
+                /**
+                 * 没有工具调用 —— 两种情况：
+                 *
+                 * 1. **模型明确收尾**（有正文）：落一条回答。
+                 * 2. **空回复**：推理模型偶发，回灌也无从改起，如实提示后停止。
+                 */
+                if (runnable.length === 0) {
+                    if (intent) {
                         this.appendMessage({
                             id: generateId(),
                             role: 'assistant',
-                            content: finalText,
+                            content: intent,
                             reasoning: keepReasoning(liveReasoning),
                             ...(stepUsage ? { usage: stepUsage } : {}),
                             at: Date.now(),
@@ -852,64 +900,9 @@ export class AgentEngine {
                     }
 
                     /*
-                     * 走到这里：既没有 final 也没有可执行的调用。有正文内容才算协议错误 ——
+                     * 走到这里：既没有工具调用也没有正文。
                      * 空回复回灌一句"你没输出"它也变不出内容来，那是浪费一次调用。
-                     *
-                     * 两条文案喂**同一段** trim 过的正文：它们各自调 diagnoseReply，
-                     * 而诊断里的字符偏移是相对传进去的那段文本算的 —— 一处给原文、
-                     * 一处给 trim 过的，同一次错误就会对用户说"第 120 个字符"、
-                     * 对模型说"第 118 个"。
                      */
-                    const badReply = reply.trim();
-                    if (badReply) {
-                        protocolErrors += 1;
-
-                        /*
-                         * 界面上那条记录只说"哪儿错了"，不贴整条原文。
-                         *
-                         * 回灌给模型的观察里带全文（protocolErrorObservation），
-                         * 那是它自查的依据；而这条记录是给**人**看的，原文动辄
-                         * 几千字，贴上去会把对话流冲得没法读。两处用途不同，
-                         * 所以取的内容也不同 —— 但都出自同一个诊断函数。
-                         */
-                        this.appendMessage({
-                            id: generateId(),
-                            role: 'tool',
-                            content: protocolErrorSummary(badReply),
-                            reasoning: keepReasoning(liveReasoning),
-                            label: PROTOCOL_ERROR_LABEL,
-                            ok: false,
-                            result: badReply,
-                            ...(stepUsage ? { usage: stepUsage } : {}),
-                            at: Date.now(),
-                        });
-
-                        transcript.push({ role: 'user', content: protocolErrorObservation(badReply) });
-
-                        if (protocolErrors >= MAX_PROTOCOL_ERRORS) {
-                            this.appendMessage({
-                                id: generateId(),
-                                role: 'assistant',
-                                /*
-                                 * 收尾必须**同时**说清"发生了什么事"与"你可以怎么办"。
-                                 * 原话只有"换个更明确的说法"，而这里的成因几乎总是
-                                 * 回复超长被截断 —— 那不是用户措辞的问题，
-                                 * 让他去改措辞等于把人支到错的方向上。
-                                 */
-                                content: `连续 ${MAX_PROTOCOL_ERRORS} 次没有按输出协议回复，已停止。`
-                                    + '常见原因是单步内容太长（一次塞了整份脚本或整篇文档）'
-                                    + '撞上输出长度上限，回复被截断成半个 JSON。'
-                                    + '可以再说一次，或把任务拆成几步让它一次只做一件。',
-                                notice: true,
-                                at: Date.now(),
-                            });
-                            break;
-                        }
-                        continue;
-                    }
-
-                    // 空回复：不能静默 break —— 那样用户看到对话停在半路，
-                    // 分不清是结束还是卡住。
                     this.appendMessage({
                         id: generateId(),
                         role: 'assistant',
@@ -924,6 +917,23 @@ export class AgentEngine {
                 this.emit();
 
                 /*
+                 * 把这一步的调用原样回放进 transcript —— **在派发之前**。
+                 *
+                 * 服务商要求每条 tool 消息都由一个带同 id 的 assistant.tool_calls
+                 * 指回，所以那条 assistant 消息必须先在序列里。它同时是下一轮
+                 * 重建历史时 `roundToMessages` 产出的同一条形状。
+                 */
+                transcript.push({
+                    role: 'assistant',
+                    content: intent,
+                    tool_calls: runnable.map((one) => ({
+                        id: one.id,
+                        name: one.tool,
+                        arguments: one.raw,
+                    })),
+                });
+
+                /*
                  * 一批调用是**一步**：先把它们全部发出去，再按声明顺序收结果。
                  *
                  * 不给每条观察各发一次 emit —— 一批里改三次界面，用户看到的是
@@ -934,7 +944,28 @@ export class AgentEngine {
                  * 对方改了一半的页面）。这不是遗憾而是取舍 —— 模型要的是
                  * "一次回复里能派几件事"，不是"几段脚本同时跑"。
                  */
-                const batch = await Promise.all(calls.map(async (one) => {
+                const batch = await Promise.all(runnable.map(async (one) => {
+                    /*
+                     * 参数解析失败**不是**"丢掉这个调用"：那会让模型看到的结果
+                     * 比它写的少，从而以为工具坏了再发一遍，而真实原因（参数
+                     * JSON 坏了）它一次都读不到。这里把它变成一条明确的失败观察。
+                     *
+                     * 它在结构化通道下只可能来自"服务商没有真正约束解码"，
+                     * 所以计一次协议错误 —— 与"给了一个不存在的工具名"同类。
+                     */
+                    const parsed = parseArguments(one.raw);
+                    if (parsed.ok === false) {
+                        return {
+                            callId: one.id,
+                            tool: one.tool,
+                            label: one.tool,
+                            result: JSON.stringify({ __agentError: parsed.error }),
+                            ok: false,
+                            bad: true,
+                            args: {} as Record<string, unknown>,
+                        };
+                    }
+
                     const tool = one.tool as AgentToolName;
 
                     /**
@@ -947,7 +978,7 @@ export class AgentEngine {
                      */
                     let result: string;
                     try {
-                        result = await dispatchTool(tool, one.args, {
+                        result = await dispatchTool(tool, parsed.args, {
                             host: this.options.host,
                             exec: (code) => this.execActive(code),
                             sandbox: this.options.sandbox,
@@ -963,7 +994,7 @@ export class AgentEngine {
 
                     // 日志只写工具名会分不清模型做的是哪件事
                     // （读写删改查语法都是 "sandbox"）。
-                    const rawAction = asString(one.args.action);
+                    const rawAction = asString(parsed.args.action);
                     const label = tool === 'sandbox' && rawAction ? `${tool}·${rawAction}` : tool;
 
                     /**
@@ -973,16 +1004,24 @@ export class AgentEngine {
                      * 构造，`{error}` 就是失败。
                      */
                     const failed = tool === 'js' ? isJsErrorResult(result) : isErrorResult(result);
-                    return { tool, label, result, ok: !failed };
+                    return { callId: one.id, tool, label, result, ok: !failed, bad: false, args: parsed.args };
                 }));
 
                 // 用户在一批跑到一半时点停止：后面的调用已经发出去了，收不回来，
                 // 但结果不必再落进对话流 —— 他刚说了不要。
                 if (this.stopped) break;
 
-                // 这一步真的执行了（无论成败），协议错误计数归零 ——
-                // 判据是"模型能不能正确表达调用意图"，它已经表达对了。
-                protocolErrors = 0;
+                /*
+                 * 协议错误计数：只有**参数坏掉**的那些才算（见上面的 bad）。
+                 * 一个工具执行失败（文件不存在、脚本抛错）是模型的正常反馈循环，
+                 * 不是协议问题 —— 把它算进去，连续三次失败就会把还正常的模型判死。
+                 */
+                const badCalls = batch.filter((item) => item.bad).length;
+                if (badCalls === 0) {
+                    protocolErrors = 0;
+                } else {
+                    protocolErrors += 1;
+                }
 
                 /*
                  * 一批的展示记录**一次性**写进列表（见 appendMessages）：
@@ -1006,14 +1045,27 @@ export class AgentEngine {
                          * 哪条对应哪次调用。而 label 是**稳定**的那一份：重建上下文时
                          * 若只按 tool 写回，模型在历史里看不出这一步做的是读文件还是改文件。
                          */
-                        content: intent
-                            ? (batch.length > 1 ? `${intent}（${index + 1}/${batch.length}）` : intent)
-                            : `调用 ${item.label}`,
+                        content: item.bad
+                            ? protocolErrorSummary(item.result)
+                            : (intent
+                                ? (batch.length > 1 ? `${intent}（${index + 1}/${batch.length}）` : intent)
+                                : `调用 ${item.label}`),
                         reasoning: keepReasoning(liveReasoning),
-                        tool: item.tool,
-                        label: item.label,
+                        tool: item.tool as AgentToolName,
+                        /*
+                         * 参数坏掉的调用记成**协议错误**而不是工具失败。
+                         *
+                         * 两者的成因完全不同：工具失败是"这一步没做成，改参数再来"，
+                         * 协议错误是"服务商给的参数不是合法 JSON" —— 后者在结构化
+                         * 通道下本不该发生。混记成工具失败，用户与模型都会以为
+                         * 是自己参数写错了，而真正该换的是模型服务。
+                         */
+                        label: item.bad ? PROTOCOL_ERROR_LABEL : item.label,
+                        // 协议身份：下一轮重建历史时要靠它拼回 assistant.tool_calls
+                        callId: item.callId,
+                        callArgs: calls[index].raw,
                         // js 跑的源码存下来供界面展开查看；其它工具没有源码。
-                        script: item.tool === 'js' ? asString(calls[index].args.code) : undefined,
+                        script: item.tool === 'js' ? asString(item.args.code) : undefined,
                         ok: item.ok,
                         result: item.result,
                         // 用量挂在这条工具消息上而不是上一条 assistant：assistant 那条在这一步里
@@ -1026,18 +1078,48 @@ export class AgentEngine {
                 }
                 this.appendMessages(created);
 
-                transcript.push({
-                    role: 'user',
-                    content: batchObservation(
-                        batch,
-                        // 写多了几个、有几个没写工具名：两种"你写的比跑的多"都要说，
-                        // 否则模型只会看到结果比它写的少，以为工具坏了再发一遍。
-                        written > batch.length
-                            ? `你这一步写了 ${written} 个调用，其中 ${batch.length} 个被执行`
-                                + `（一批最多 ${MAX_CALLS_PER_REPLY} 个，且每一项都必须带 tool 名）。`
-                            : '',
-                    ),
-                });
+                /*
+                 * 回灌观察。**每条调用一条 tool 消息**（不是把一批塞进一条 user
+                 * 消息）：服务商按 tool_call_id 逐条配对，塞成一条会让后面几条
+                 * 调用找不到结果。批次语义因此改由 tool 消息的内容表达 ——
+                 * 见 batchObservation 的 head。
+                 *
+                 * 参数坏掉的那些也**必须**回一条 tool 消息：它们的 id 已经在
+                 * assistant.tool_calls 里发出去了，少一条配对，整条请求会被服务商
+                 * 拒掉（"tool 消息与调用对不上"）。
+                 */
+                const batchHead = batchObservation(batch);
+                const perCall = batch.length > 1;
+                for (const item of batch) {
+                    transcript.push({
+                        role: 'tool',
+                        tool_call_id: item.callId,
+                        /*
+                         * 单条调用时用 toolObservation 的原话；一批时每条都带上
+                         * 批次头 —— 模型需要知道"这些结果来自同一步"，那正是它
+                         * 规划下一步并行的依据。只有第一条带完整的 head 会更省
+                         * token，但模型按 tool_call_id 逐条读，后几条就没有上下文了。
+                         */
+                        content: item.bad
+                            ? protocolErrorObservation(item.result)
+                            : (perCall
+                                ? `${batchHead}\n\n${toolObservation(item.label, item.result, item.ok)}`
+                                : batchHead),
+                    });
+                }
+
+                if (protocolErrors >= MAX_PROTOCOL_ERRORS) {
+                    this.appendMessage({
+                        id: generateId(),
+                        role: 'assistant',
+                        content: `连续 ${MAX_PROTOCOL_ERRORS} 次收到无法执行的调用，已停止。`
+                            + '工具调用由协议层生成，正常不会坏 —— 这说明当前模型服务没有真正约束解码。'
+                            + '可以换一个模型，或再说一次。',
+                        notice: true,
+                        at: Date.now(),
+                    });
+                    break;
+                }
             }
         } finally {
             this.busy = false;
@@ -1156,7 +1238,7 @@ export class AgentEngine {
         this.compactAbort = controller;
         try {
             let usage: AiUsage | undefined;
-            const body = await this.options.chat.chat({
+            const reply = await this.options.chat.chat({
                 system: COMPACT_SYSTEM_PROMPT,
                 messages: digest,
                 /*
@@ -1180,7 +1262,7 @@ export class AgentEngine {
                 },
             });
 
-            const summary = body.trim();
+            const summary = reply.content.trim();
             // 空摘要不能落盘：那等于把一段历史换成了空白，而且没有任何提示
             if (!summary) {
                 this.error = '压缩失败：模型没有返回摘要内容，历史未改动。';
@@ -1274,6 +1356,17 @@ export class AgentEngine {
         }
     }
 }
+
+/**
+ * 回复撞上输出长度上限时回灌的那句话。
+ *
+ * 只由这一个函数产出（当场与重建共用）：模型自己不知道被砍断了 —— 它收到的
+ * 正文就是它写下的那半句，看起来完全正常。不说清这件事，它下一步只会照着
+ * 半句话继续往下想，而真正该做的是把这一步拆小。
+ */
+const TRUNCATED_OBSERVATION = '[系统提示] 你上一条回复撞上了输出长度上限，被截断在半路。'
+    + '这不是你的表达问题，是这一步的内容太长。把这一步拆小：'
+    + 'args 里只放必需的那部分，能分两次做的就分两次，尤其不要把整份脚本或整篇文档塞进一次调用。';
 
 /**
  * 一条新会话的元信息。
