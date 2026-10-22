@@ -1,0 +1,14 @@
+{
+  "name": "arena-openai-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "OpenAI-compatible local gateway bridging a normal arena.ai browser session via an MV3 extension",
+  "scripts": {
+    "start": "node gateway/server.js",
+    "selftest": "node test/selftest.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

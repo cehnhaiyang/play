@@ -11,8 +11,6 @@ test/build
 test/.mutant.ts
 # ui-check.js 的截图输出（每次跑 UI 回归都会重新生成，属于产物不是源码）
 scripts/shots
-# Agent 本地沙箱：模型在这里写文件、跑命令，全是运行时产物（主进程首次使用时自建）
-sandbox/
 
 # 备份文件
 *.bak

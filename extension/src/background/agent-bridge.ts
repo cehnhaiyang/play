@@ -46,6 +46,11 @@ const chromeStorage: EngineStorage = {
     save: async (key, value) => {
         await chrome.storage.local.set({ [key]: value });
     },
+    // 删会话、迁移老版本的单会话键都要它：改写成空数组的话，配额照样被占着
+    // （而配额正是会话数上限的出处，见 prompt.ts 的 MAX_SESSIONS）
+    remove: async (key) => {
+        await chrome.storage.local.remove(key);
+    },
 };
 
 /* ========================================================================== */

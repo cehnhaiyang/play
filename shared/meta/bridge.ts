@@ -141,7 +141,8 @@ export const BRIDGE_ENDPOINTS = {
     },
     'agent-snapshot': {
         route: 'extension',
-        reason: 'Agent 引擎（对话历史、主循环、工具派发）跑在插件里，快照的唯一权威在那边。',
+        reason: 'Agent 引擎（多条会话的历史、主循环、工具派发）跑在插件里，'
+            + '快照的唯一权威在那边 —— 应用侧不存会话，连"当前是哪一条"也在快照里。',
     },
     'agent-action': {
         route: 'extension',

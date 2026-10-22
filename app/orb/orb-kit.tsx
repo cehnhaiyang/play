@@ -188,7 +188,11 @@ export type AgentAction =
     | { type: 'compact' }
     | { type: 'set-compact-ratio'; ratio: number }
     | { type: 'remove-message'; id: string }
-    | { type: 'rewind'; id: string };
+    | { type: 'rewind'; id: string }
+    | { type: 'new-session' }
+    | { type: 'switch-session'; id: string }
+    | { type: 'rename-session'; id: string; title: string }
+    | { type: 'delete-session'; id: string };
 
 const api = () => {
     const orb = window.orbApi;

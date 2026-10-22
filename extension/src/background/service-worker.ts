@@ -1430,6 +1430,20 @@ const runAgentAction = async (
             return { done: true };
         case 'rewind':
             return { prompt: engine.actions.rewindTo(action.id) };
+        /*
+         * 会话四条。返回值都是**布尔**而不是 `{done:true}`：这四条都可能被合法地
+         * 拒绝（到上限 / 运行中 / 只剩一条），而"点下去什么也没发生"必须能被球看见
+         * —— 原因由引擎写进 `error`，随后那份快照会把它画出来。
+         */
+        case 'new-session':
+            return { done: await engine.actions.newSession() };
+        case 'switch-session':
+            return { done: await engine.actions.switchSession(action.id) };
+        case 'rename-session':
+            engine.actions.renameSession(action.id, action.title);
+            return { done: true };
+        case 'delete-session':
+            return { done: await engine.actions.deleteSession(action.id) };
         default: {
             const never: never = action;
             throw new Error(`未知 Agent 动作：${JSON.stringify(never)}`);

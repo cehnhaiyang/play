@@ -1,0 +1,39 @@
+{
+    "manifest_version": 3,
+    "name": "Gemini Relay Agent",
+    "version": "1.0.0",
+    "description": "gemini-relay 的浏览器执行代理: 借页面原生发送产出逐轮自洽票据",
+    "background": {
+        "service_worker": "background.js"
+    },
+    "host_permissions": [
+        "http://127.0.0.1:8787/*",
+        "http://127.0.0.1:8788/*",
+        "http://127.0.0.1:8789/*",
+        "http://127.0.0.1:8790/*",
+        "https://contribution.usercontent.google.com/*",
+        "https://*.googleusercontent.com/*",
+        "https://gemini.google.com/*"
+    ],
+    "content_scripts": [
+        {
+            "matches": [
+                "https://gemini.google.com/*"
+            ],
+            "js": [
+                "page.js"
+            ],
+            "world": "MAIN",
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "https://gemini.google.com/*"
+            ],
+            "js": [
+                "bridge.js"
+            ],
+            "run_at": "document_idle"
+        }
+    ]
+}

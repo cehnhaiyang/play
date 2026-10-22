@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "Arena OpenAI Bridge",
+  "version": "1.0.0",
+  "description": "Relays a normal arena.ai browser session to a local OpenAI-compatible gateway.",
+  "minimum_chrome_version": "111",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": [
+    "https://arena.ai/*",
+    "http://127.0.0.1:8787/*",
+    "http://localhost:8787/*"
+  ],
+  "background": { "service_worker": "sw.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://arena.ai/*"],
+      "js": ["sse-parse.js", "page-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
+    {
+      "matches": ["https://arena.ai/*"],
+      "js": ["bridge.js"],
+      "run_at": "document_start",
+      "world": "ISOLATED",
+      "all_frames": false
+    }
+  ],
+  "action": { "default_title": "Arena OpenAI Bridge" }
+}

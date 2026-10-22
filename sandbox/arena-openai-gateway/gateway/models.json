@@ -1,0 +1,13 @@
+{
+  "_comment": "离线兜底别名表;运行时优先使用浏览器内 /nextjs-api/model-catalog 的实时结果",
+  "models": [
+    { "name": "claude-sonnet-5", "displayName": "claude-sonnet-5-high", "owned_by": "anthropic" },
+    { "name": "claude-haiku-4-5-20251001", "displayName": "claude-haiku-4-5-20251001", "owned_by": "anthropic" },
+    { "name": "gemini-3.8-flash-high", "displayName": "gemini-3.8-flash-high", "owned_by": "google" },
+    { "name": "gemini-3.1-pro-preview", "displayName": "gemini-3.1-pro-preview", "owned_by": "google" },
+    { "name": "grok-4.6", "displayName": "grok-4.6", "owned_by": "xai" },
+    { "name": "gpt-5.5-instant", "displayName": "gpt-5.5-instant", "owned_by": "openai" },
+    { "name": "gpt-5.1", "displayName": "gpt-5.1", "owned_by": "openai" },
+    { "name": "inkling-small", "displayName": "inkling-small", "owned_by": "thinky" }
+  ]
+}

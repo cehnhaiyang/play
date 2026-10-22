@@ -95,10 +95,10 @@ export const AI_PROVIDERS: AiProviderPreset[] = [
         models: [
             // workbuddy
             { id: 'global:deepseek-v4.1-flash' }, { id: 'cn:deepseek-v4.1-flash' },
-            // qoder
-            { id: 'Qwen3.8-Flash', reasoning: false, }, { id: 'GLM-5.3-Flash' },
-            // zcode
-            { id: 'glm-5.3' }, { id: 'glm-5.3-flash' },
+            { id: 'loomy:deepseek-v4.1-flash' },
+            { id: 'bear:deepseek-v4.1-flash' },
+            { id: 'other:deepseek-v4.1-flash' },
+
         ],
     },
 ];

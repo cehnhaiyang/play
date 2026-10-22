@@ -112,7 +112,13 @@ const buildAgentHarness = async (options = {}) => {
      * "这次调用带了什么参数"因此无从断言（压缩曾经偷偷写死档位就是这么漏掉的）。
      */
     const chatCalls = [];
-    const store = {};
+    /**
+     * 内存存储。
+     *
+     * `options.store` 用来预置**已有内容**（会话迁移那条路径必须从"上一版留下的
+     * 老键"起步，而那只能靠预置，因为 hydrate 在 harness 里已经跑完了）。
+     */
+    const store = { ...(options.store || {}) };
 
     /**
      * AiService 的**编译产物**。
@@ -208,9 +214,17 @@ const buildAgentHarness = async (options = {}) => {
      */
     /** 落盘次数。用来钉住"一批只写一次"这类写入次数的契约 */
     let saves = 0;
+    /** 删除键的次数。用来钉住"迁移之后老键必须被删掉" */
+    let removes = 0;
     const storage = {
         load: async (k, d) => (k in store ? store[k] : d),
-        save: async (k, v) => { saves += 1; store[k] = v; },
+        save: async (k, v) => {
+            // failSave：复刻"写不进去"（配额满）。抛在计数之前 —— 没写成的不能算一次写入
+            if (options.failSave && options.failSave(k)) throw new Error('存储写入失败（配额可能已满）');
+            saves += 1;
+            store[k] = v;
+        },
+        remove: async (k) => { removes += 1; delete store[k]; },
     };
 
     /**
@@ -294,6 +308,16 @@ const buildAgentHarness = async (options = {}) => {
     });
     await engine.hydrate();
 
+    /*
+     * 记账从"构造完成"那一刻开始。
+     *
+     * hydrate 自己会写存储（迁移老键 / 建第一条会话的索引），而那不是任何一轮的账：
+     * 把它算进去，每条与写入次数有关的断言都得先减掉一个常量 —— 而那个常量还会
+     * 随着 hydrate 的实现变化。
+     */
+    saves = 0;
+    removes = 0;
+
     return {
         chats,
         /** 每次 chat 的完整选项（system / temperature / reasoningEffort / maxTokens） */
@@ -314,6 +338,10 @@ const buildAgentHarness = async (options = {}) => {
         snapshots: () => snapshots,
         /** 落盘次数。写入次数的契约（如"一批只写一次"）只能靠它验 */
         saves: () => saves,
+        /** 删除键的次数（迁移删老键、删会话删历史） */
+        removes: () => removes,
+        /** 存储内容。会话相关的断言要看"哪几个键真的写下去了" */
+        store: () => store,
         /** activeTab() 被问了几次。用来证明引擎没有缓存标签页 */
         activeTabCalls: () => activeTabCalls,
         /** 最近一次页面执行落在哪个标签页 */
@@ -335,9 +363,12 @@ const buildAgentHarness = async (options = {}) => {
          * 走**存储 + 重新 hydrate**而不是给引擎开一个写入口：hydrate 是真实存在
          * 的代码路径（service worker 被回收后就是靠它恢复），所以这里测到的
          * 是产品行为；加一个 setMessagesForTest() 则会让"恢复"这条路无人覆盖。
+         *
+         * 写的是**当前会话**那一份（消息按会话分键存），因此摆完之后 hydrate
+         * 读到的就是它 —— 摆别的会话的那一份不会影响 state()。
          */
         async setMessages(list) {
-            store['agent-messages'] = list;
+            store[PROMPT.sessionMessagesKey(engine.snapshot().activeSessionId)] = list;
             await engine.hydrate();
         },
     };
@@ -2603,8 +2634,12 @@ const run = async () => {
         assert(tools.length === 3, `构造前提：应有 3 条工具记录，实际 ${tools.length}`);
         assert(new Set(tools.map((m) => m.at)).size === 1,
             `同一步的记录必须是同一个时刻，实际 ${JSON.stringify(tools.map((m) => m.at))}`);
-        // 3 次 = 用户提问 + 这一批 + 收尾回答。逐条追加的话这里是 5 次。
-        assert(h.saves() === 3, `一批只该落一次盘：整轮应 3 次写入，实际 ${h.saves()} 次`);
+        /*
+         * 每次落盘写两份：这条会话的历史（大）+ 会话索引（几百字节，列表要用的
+         * 条数与自动名字在里面）。3 次落盘 = 用户提问 + 这一批 + 收尾回答，
+         * 所以是 6 次。逐条追加的话，光历史那一份就是 5 次。
+         */
+        assert(h.saves() === 6, `一批只该落一次盘：整轮应 6 次写入（历史 3 + 索引 3），实际 ${h.saves()} 次`);
     });
 
     /** 只有一个调用时不加批次头：多数回复只有一个，多一层是纯 token 开销 */
@@ -4551,6 +4586,303 @@ const run = async () => {
         eq(h.state().compacting, false, '压缩状态必须复位');
         eq(h.state().messages.length, before, '历史必须一个字不动');
         eq(h.state().error, '', '用户主动停止不该留下错误横幅');
+    });
+
+    /* ------------------------------ 会话 ------------------------------ */
+
+    /**
+     * 全新安装：hydrate 之后**一定有一条会话**。
+     *
+     * "至少一条"是引擎的不变式。没有会话时，用户按下发送就没有地方可落 ——
+     * 那是个连「清空」都救不回来的状态（清空清的是"当前这条"）。
+     */
+    await check('空存储 hydrate 出一条空会话，索引落盘', async () => {
+        const h = await buildAgentHarness({});
+        const st = h.state();
+        eq(st.sessions.length, 1, '应有一条会话');
+        eq(st.activeSessionId, st.sessions[0].id, '当前会话必须指向那条会话');
+        eq(st.messages.length, 0, '新会话没有消息');
+        assert(h.store()[PROMPT.SESSIONS_STORE_KEY], '索引必须落盘，否则下次启动又是一条新会话');
+    });
+
+    /**
+     * 上一版（单会话）的历史必须迁过来。
+     *
+     * 不迁就是"升级一次插件丢掉全部历史"，而那是用户自己写下的、没有任何副本的
+     * 东西。三条判据：历史一条不少、进了新键、老键被删掉 —— 老键不删就是最多
+     * 1.5MB 的配额被一份没人读的数据占着，而配额正是会话数上限的出处。
+     */
+    await check('上一版的老键被迁成第一条会话，老键删掉', async () => {
+        const legacy = [
+            { id: 'u0', role: 'user', content: '旧会话里的提问', at: 1 },
+            { id: 'a0', role: 'assistant', content: '旧会话里的回答', at: 2 },
+            // 坏记录照旧被滤掉（迁移走的是同一个 isStoredMessage）
+            null,
+            { id: 'broken' },
+        ];
+        const h = await buildAgentHarness({ store: { [PROMPT.LEGACY_MESSAGES_STORE_KEY]: legacy } });
+        const st = h.state();
+        eq(st.messages.length, 2, '老键里的历史必须一条不少地接过来');
+        eq(st.sessions.length, 1, '迁移之后只有一条会话');
+        eq(st.sessions[0].autoTitle, '旧会话里的提问', '自动名字应取第一条提问');
+        eq(st.sessions[0].messageCount, 2, '索引里的条数应与历史一致');
+        assert(h.store()[PROMPT.sessionMessagesKey(st.activeSessionId)], '历史必须写进新键');
+        /*
+         * 判据是"键还在不在"，不是"里面是不是空的"：把老键改写成一个空数组
+         * 同样会让 `in` 为真 —— 那样最多 1.5MB 的配额就被一份没人读的数据占着，
+         * 而配额正是会话数上限的出处。
+         */
+        assert(!(PROMPT.LEGACY_MESSAGES_STORE_KEY in h.store()), '老键必须被删掉，而不是改写成空数组');
+    });
+
+    /**
+     * 索引**没写成**时，上一版的老键一个字都不许动。
+     *
+     * 这是迁移里唯一会丢数据的写法：把"写过索引了"当成"索引写成了"。一旦它没落盘，
+     * 新键的 id 只有索引知道（那份历史谁也找不回来），而老键又被删了 ——
+     * 两边同时没有。写不进去在插件里是**常态而非异常**（配额满被静默吞掉），
+     * 所以这条路径必须能自愈：下一次 hydrate 重来一遍，成功了才删。
+     */
+    await check('索引没落盘时老键必须留着，重试成功后才删', async () => {
+        const legacy = [{ id: 'u0', role: 'user', content: '升上来的历史', at: 1 }];
+        let fail = true;
+        const h = await buildAgentHarness({
+            store: { [PROMPT.LEGACY_MESSAGES_STORE_KEY]: legacy },
+            failSave: (key) => fail && key === PROMPT.SESSIONS_STORE_KEY,
+        });
+
+        eq(h.state().messages.length, 1, '构造前提：老键里的历史已经读进内存');
+        assert(PROMPT.LEGACY_MESSAGES_STORE_KEY in h.store(),
+            '索引没落盘时老键必须留着 —— 它是那份历史唯一的副本');
+
+        // 下一次 hydrate 重来一遍。这次索引写得成，老键才该被删掉
+        fail = false;
+        await h.engine.hydrate();
+        eq(h.state().messages.length, 1, '重试不得丢掉历史');
+        assert(!(PROMPT.LEGACY_MESSAGES_STORE_KEY in h.store()), '索引写成之后老键才该被删掉');
+    });
+
+    /**
+     * 索引是**外部输入**（上一版插件写的、用户手改的）。
+     *
+     * 一条坏记录足以把 `activeId` 指到一个不存在的会话上 —— 那时消息列表是空的，
+     * 而用户按下发送会把新消息写进一个列表里不存在的 id。
+     */
+    await check('索引里的坏记录被滤掉，activeId 指空就落到第一条', async () => {
+        const good = { id: 's1', title: '', autoTitle: '旧名字', createdAt: 1, messageCount: 2 };
+        const h = await buildAgentHarness({
+            store: {
+                [PROMPT.SESSIONS_STORE_KEY]: { activeId: '不存在', sessions: [good, { id: 's2' }, null] },
+            },
+        });
+        eq(h.state().sessions.length, 1, '只有字段齐全的那条能留下来');
+        eq(h.state().activeSessionId, 's1', 'activeId 指空时应落到第一条');
+        eq(h.state().messages.length, 0, '它的历史键不存在 → 空列表，而不是抛错');
+    });
+
+    /**
+     * 切换会话换的是"messages 指向哪份历史"，不是把它清掉。
+     *
+     * 判据是切回去之后**逐条相同**（id 也一样），而不是"条数对得上"：
+     * 后者在"两边恰好都是三条"时会给一个假绿。
+     */
+    await check('新建会话后切回旧的，历史逐条还在', async () => {
+        const h = await buildAgentHarness({});
+        await h.send('第一条会话里的提问');
+        const first = h.state().activeSessionId;
+        const ids = h.state().messages.map((m) => m.id);
+        assert(ids.length > 0, '构造前提：第一条会话应有消息');
+
+        eq(await h.state().actions.newSession(), true, '新建应成功');
+        const second = h.state().activeSessionId;
+        assert(second !== first, '新会话的 id 必须与旧的不是同一个');
+        eq(h.state().messages.length, 0, '新会话是空的');
+        eq(h.state().sessions.length, 2, '应有两条会话');
+        eq(h.state().sessions[0].id, second, '新会话排在最前（列表按创建倒序）');
+
+        eq(await h.state().actions.switchSession(first), true, '切回去应成功');
+        eq(h.state().messages.map((m) => m.id).join(), ids.join(), '切回去的历史必须逐条相同');
+        assert(h.store()[PROMPT.sessionMessagesKey(first)], '第一条会话的历史必须还在它自己那份键里');
+    });
+
+    /**
+     * 切了会话，发给模型的历史必须跟着换。
+     *
+     * 只改 `state().messages` 而忘了换上下文缓存的话，模型会读到**上一条会话**的
+     * 全部内容 —— 用户以为换了个干净的工作区，实际它什么都记得。
+     */
+    await check('换会话之后，发给模型的上下文里不得有上一条会话的内容', async () => {
+        const h = await buildAgentHarness({});
+        await h.send('上一条会话里的秘密');
+        await h.state().actions.newSession();
+        await h.send('这条会话的问题');
+
+        const last = h.chats[h.chats.length - 1].map((m) => m.content).join('\n');
+        assert(!last.includes('上一条会话里的秘密'), '换会话必须换掉发给模型的上下文');
+        assert(last.includes('这条会话的问题'), '构造前提：本次提问应在上下文里');
+    });
+
+    /**
+     * 运行中不许换会话。
+     *
+     * 主循环正拿着当前这份 messages 追加：中途换一份，这一轮的结果会落进**另一条
+     * 会话**，而"哪条会话得到了这些消息"没有答案。三个动作都要拦 —— 新建与删除
+     * 同样会让"当前这份"失去主人。
+     */
+    await check('运行中拒绝新建 / 切换 / 删除会话', async () => {
+        const h = await buildAgentHarness({ hold: new Promise(() => {}), holdAt: 2 });
+        await h.send('先开一条别的会话');
+        const other = h.state().activeSessionId;
+        assert(other, '构造前提：应有一条会话');
+        await h.state().actions.newSession();
+        const active = h.state().activeSessionId;
+        eq(h.state().sessions.length, 2, '构造前提：应有两条会话');
+
+        const pending = h.sendPending('这一轮会卡在模型调用上');
+        assert(h.state().status !== 'idle', '构造前提：这一轮应在途');
+
+        eq(await h.state().actions.newSession(), false, '运行中不得新建会话');
+        eq(await h.state().actions.switchSession(other), false, '运行中不得切换会话');
+        eq(await h.state().actions.deleteSession(other), false, '运行中不得删除会话');
+        eq(h.state().activeSessionId, active, '当前会话不得变化');
+        eq(h.state().sessions.length, 2, '会话数不得变化');
+
+        h.state().actions.stop();
+        await pending;
+    });
+
+    /**
+     * 只剩一条时拒绝删除，并把出路说清楚。
+     *
+     * 拒绝的理由不是"少了一条不好看"，而是不变式（至少一条）。用户真正想做的
+     * 多半是"把这条清掉重新开始" —— 提示里必须给出那个出口。
+     */
+    await check('只剩一条会话时拒绝删除，提示指向清空', async () => {
+        const h = await buildAgentHarness({});
+        eq(await h.state().actions.deleteSession(h.state().activeSessionId), false, '不得删掉最后一条');
+        eq(h.state().sessions.length, 1, '会话数不得变化');
+        assert(h.state().error.includes('清空'), `提示必须给出出路，实际：${h.state().error}`);
+    });
+
+    /**
+     * 删掉当前会话：剩下的那条必须**立刻顶上来**，并带来它自己的历史。
+     *
+     * 不换的话，界面上留着的是"一条已经被删掉的会话"的消息 —— 而那一刻它们属于
+     * 哪条会话没有答案，用户接着发送就会写进一条不存在的 id。
+     */
+    await check('删除当前会话后落到剩下那条，并读出它的历史', async () => {
+        const h = await buildAgentHarness({});
+        await h.send('第一条会话');
+        const first = h.state().activeSessionId;
+        await h.state().actions.newSession();
+        await h.send('第二条会话');
+        const second = h.state().activeSessionId;
+
+        eq(await h.state().actions.deleteSession(second), true, '删除应成功');
+        eq(h.state().sessions.length, 1, '应只剩一条');
+        eq(h.state().activeSessionId, first, '当前会话应落到剩下那条');
+        assert(h.state().messages.some((m) => m.content === '第一条会话'),
+            '必须读出剩下那条的历史，而不是留着被删那条的');
+        assert(!h.store()[PROMPT.sessionMessagesKey(second)], '被删会话的历史键必须删掉');
+        assert(h.removes() >= 1, '删会话要连它的历史键一起删，而不是留在存储里');
+    });
+
+    /**
+     * 索引**没写成**时，被删会话的历史一个字都不许动。
+     *
+     * 与迁移删老键同一条规矩：索引是提交点。这里刻意选的是"删除宁可不生效"——
+     * 内存里那条会话已经没了（界面照常变），但存储里它连历史都还在，重启之后
+     * 它会照原样回来。反过来先删历史的话，索引一失败就留下一条**点开即空白的
+     * 会话**：用户看得见的坏状态，而且内容真的没了。
+     */
+    await check('索引没写成时不得删会话历史（宁可删除不生效）', async () => {
+        let failIndex = false;
+        const h = await buildAgentHarness({
+            failSave: (key) => failIndex && key === PROMPT.SESSIONS_STORE_KEY,
+        });
+        await h.send('第一条会话');
+        await h.state().actions.newSession();
+        await h.send('第二条会话');
+        const second = h.state().activeSessionId;
+        assert(h.store()[PROMPT.sessionMessagesKey(second)], '构造前提：第二条会话的历史应已落盘');
+
+        failIndex = true;
+        await h.state().actions.deleteSession(second);
+        eq(h.state().sessions.length, 1, '内存里这条会话应已删掉（界面要跟着变）');
+        assert(h.store()[PROMPT.sessionMessagesKey(second)],
+            '索引没落盘时历史必须留着，否则会留下一条点开即空白的会话');
+    });
+
+    /**
+     * 用户起的名字与自动名字是**两个字段**。
+     *
+     * 合成一个就必然要在某一刻丢掉其中一个：改名会盖掉自动名字；而回退掉第一条
+     * 提问之后，自动名字又再也算不回用户起的那个（非当前会话的历史不在内存里）。
+     */
+    await check('改名不动自动名字，清掉名字又回落到自动名字', async () => {
+        const h = await buildAgentHarness({});
+        await h.send('帮我改这个页面的价格');
+        const id = h.state().activeSessionId;
+
+        h.state().actions.renameSession(id, '  淘宝比价  ');
+        eq(h.state().sessions[0].title, '淘宝比价', '改名要去掉首尾空白');
+        eq(h.state().sessions[0].autoTitle, '帮我改这个页面的价格', '自动名字必须原样留着');
+
+        // 回退掉那条提问：自动名字跟着回去（它回答的是"开头问了什么"）
+        const firstUser = h.state().messages.find((m) => m.role === 'user');
+        h.state().actions.rewindTo(firstUser.id);
+        eq(h.state().sessions[0].autoTitle, '未命名会话', '没有提问了，自动名字应回到未命名');
+        eq(h.state().sessions[0].title, '淘宝比价', '用户起的名字不该被回退动到');
+
+        h.state().actions.renameSession(id, '');
+        eq(h.state().sessions[0].title, '', '清空即没有用户名字，界面回落到自动名字');
+    });
+
+    /** 改过的名字必须进索引：它只活在内存里的话，浏览器重启一次就没了 */
+    await check('改过的名字落进索引，重新 hydrate 之后还在', async () => {
+        const h = await buildAgentHarness({});
+        await h.send('第一问');
+        const id = h.state().activeSessionId;
+        h.state().actions.renameSession(id, '取价格');
+
+        await h.engine.hydrate();
+        eq(h.state().sessions[0].title, '取价格', '名字应能从索引里读回来');
+        eq(h.state().sessions[0].autoTitle, '第一问', '自动名字也应一起恢复');
+    });
+
+    /**
+     * 上限是**拒绝**，不是"删掉最旧那条腾地方"。
+     *
+     * 历史是用户的东西，程序替他扔掉一条会话不可接受 —— 而写不进去只是写不进去，
+     * 已经写下的还在。拒绝时也必须说清上限是多少，否则用户只会看到按钮没反应。
+     */
+    await check('会话数到上限时拒绝新建，并说清上限', async () => {
+        const h = await buildAgentHarness({});
+        for (let i = 1; i < PROMPT.MAX_SESSIONS; i += 1) {
+            eq(await h.state().actions.newSession(), true, `构造前提：第 ${i + 1} 条应建得出来`);
+        }
+        eq(h.state().sessions.length, PROMPT.MAX_SESSIONS, '构造前提：应正好到上限');
+
+        eq(await h.state().actions.newSession(), false, '到上限必须拒绝');
+        eq(h.state().sessions.length, PROMPT.MAX_SESSIONS, '被拒绝时不得多出一条');
+        assert(h.state().error.includes(String(PROMPT.MAX_SESSIONS)),
+            `报错里要带上限数字，实际：${h.state().error}`);
+    });
+
+    /**
+     * 会话管理必须**在界面上有入口**。
+     *
+     * 上面那一批断言全部打在引擎上，而引擎做完了不等于用户够得着：会话条从对话页上
+     * 消失时，引擎那一侧一切照旧（测试全绿），只有功能没了。
+     *
+     * 这条断言能证明的只有"四条动作被界面发出去了"，**不能**证明它画得出来、
+     * 点得到 —— 渲染层没有测试环境（见文件头）。所以它是一道兜底，不是覆盖。
+     */
+    await check('界面把四条会话动作都接到了引擎上', async () => {
+        const orb = fs.readFileSync(ORB_SRC, 'utf8');
+        for (const type of ['new-session', 'switch-session', 'rename-session', 'delete-session']) {
+            assert(orb.includes(`type: '${type}'`), `界面没有发出 ${type}（会话管理等于没有入口）`);
+        }
     });
 
     console.log(`Agent 工具派发：通过 ${pass} 项，失败 ${fails.length} 项`);

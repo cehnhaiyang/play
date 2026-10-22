@@ -126,10 +126,24 @@ const sectionBody = (message: AgentMessage, includeReasoning: boolean): string[]
 const messageSection = (message: AgentMessage, index: number, includeReasoning: boolean): string =>
     [`## ${sectionHeading(message, index)}`, ...sectionBody(message, includeReasoning)].join('\n\n');
 
-/** 会话标题：第一条用户提问压成一行，用作文件名（标题里换行会让文件名带上控制字符） */
-const sessionTitle = (messages: AgentMessage[]): string => {
+/**
+ * 会话标题的长度上限。
+ *
+ * 导出文件名与引擎的自动会话名共用它：两处各写一个数字时，改了一处不会报错，
+ * 只会让同一份会话在文件名里被截掉后半句、在列表里不截（或反过来）。
+ */
+export const AGENT_SESSION_TITLE_MAX = 24;
+
+/**
+ * 会话标题：第一条用户提问压成一行，用作文件名（标题里换行会让文件名带上控制字符）。
+ *
+ * 引擎的会话列表**也用它**（用户没自己起名时的自动名字）：同一个概念在两处各写
+ * 一遍时，改了一处另一处不会报错，只会让同一份会话在文件名里叫一个名字、
+ * 在列表里叫另一个。
+ */
+export const agentSessionTitle = (messages: AgentMessage[]): string => {
     const first = messages.find((message) => message.role === 'user' && message.content.trim());
-    return first ? first.content.replace(/\s+/g, ' ').trim().slice(0, 24) : '未命名会话';
+    return first ? first.content.replace(/\s+/g, ' ').trim().slice(0, AGENT_SESSION_TITLE_MAX) : '未命名会话';
 };
 
 /** 取一次选项，把缺省值补齐（两个 builder 与导出动作对缺省的理解必须一致） */
@@ -150,7 +164,7 @@ const resolveExportOptions = (options: AgentExportOptions): Required<AgentExport
 const buildAgentSessionFileName = (messages: AgentMessage[], options: AgentExportOptions = {}): string => {
     const { includeReasoning, at } = resolveExportOptions(options);
     const stamp = formatDateTime(at).replace(/[-: ]/g, '');
-    const title = sessionTitle(messages).replace(UNSAFE_FILENAME_CHARS, '_');
+    const title = agentSessionTitle(messages).replace(UNSAFE_FILENAME_CHARS, '_');
     return `Agent对话_${title}_${includeReasoning ? '带思考' : '不带思考'}_${stamp}.md`;
 };
 

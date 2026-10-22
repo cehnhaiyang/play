@@ -29,11 +29,36 @@ import { MAX_CALLS_PER_REPLY } from './parse';
  */
 export const MAX_PROTOCOL_ERRORS = 3;
 
-export const MESSAGES_STORE_KEY = 'agent-messages';
+/**
+ * 会话索引的存储键：全部会话的元信息，以及当前是哪一个。
+ *
+ * 与消息本体**分开存**：一份历史可以到 1.5MB，而这个索引只有几百字节。
+ * 装在一起就意味着一份历史的每次追加都要把**别的会话**的整份历史重写一遍。
+ */
+export const SESSIONS_STORE_KEY = 'agent-sessions';
+
+/**
+ * 上一版（单会话）的消息存储键。
+ *
+ * 只有 hydrate 的迁移路径读它：见到它就说明这份历史是上一版留下的，
+ * 迁成一条会话之后立刻删掉 —— 留着就是最多 1.5MB 的配额被一份再也无人读的数据
+ * 占着，而配额正是会话数上限的出处（见 MAX_SESSIONS）。
+ */
+export const LEGACY_MESSAGES_STORE_KEY = 'agent-messages';
+
+/**
+ * 一条会话的消息本体存储键。
+ *
+ * 加冒号而不是另起一个前缀：老键是 `agent-messages`，新键是
+ * `agent-messages:<会话 id>`，两者在存储里不会撞名，而前缀本身说明了它是什么。
+ */
+export const sessionMessagesKey = (id: string): string => `${LEGACY_MESSAGES_STORE_KEY}:${id}`;
+
+/** 单条会话的消息条数上限 */
 export const MESSAGES_STORE_MAX = 200;
 
 /**
- * 落盘体积预算（字节）。
+ * **单条会话**的落盘体积预算（字节）。
  *
  * `chrome.storage.local` 的配额是 10MB，而 manifest 里**没有** `unlimitedStorage`
  * —— 这是真上限，不是靠声明能绕开的软约束。**条数上限挡不住体积**：推理文本
@@ -41,6 +66,19 @@ export const MESSAGES_STORE_MAX = 200;
  * "历史不再保存"（persist 静默吞掉错误）。所以按**字节**收敛，条数上限只作附加保护。
  */
 export const STORE_BUDGET_MESSAGES = 1_500_000;
+
+/**
+ * 会话数上限。
+ *
+ * 这个数是**算出来的**，不是随手定的：配额 10MB，而每条会话各自可以长到
+ * `STORE_BUDGET_MESSAGES` —— 6 × 1.5MB = 9MB，剩下 1MB 留给插件其余状态
+ * （篡改规则、嗅探开关，都是 KB 量级）。
+ *
+ * 超限时**拒绝新建并说清原因**：配额顶穿的表现是"写入失败且界面上没有提示"，
+ * 比"建不了新会话"难查得多，而且那时丢的是已经写下的历史。要留更多会话，
+ * 先把不用的那条导出成 Markdown 再删。
+ */
+export const MAX_SESSIONS = 6;
 
 /**
  * 上下文硬门槛（token）。达到或超过即**强制压缩**：输入框禁用，不压不能继续。

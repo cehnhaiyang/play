@@ -1,8 +1,9 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { AgentMessage, AgentUsage, CookieItem, HeaderRule, TamperRule } from '../../shared/meta';
+import type { AgentMessage, AgentSessionMeta, AgentUsage, CookieItem, HeaderRule, TamperRule } from '../../shared/meta';
 import {
+    AGENT_SESSION_TITLE_MAX,
     buildCookieData,
     collectDroppedRules,
     decodeJwt,
@@ -51,6 +52,24 @@ const formatTokens = (usage?: AgentUsage): string => {
 };
 
 /**
+ * 会话在列表上的名字。
+ *
+ * `title`（用户起的）空着就回落到 `autoTitle`（第一条提问）—— 这两个字段由引擎
+ * 分别存（见 AgentSessionMeta），这里只负责把它们拼成一行。条数一起带上：
+ * 几条会话的名字都长得像"帮我看看…"时，条数是唯一能看出"哪条真干过活"的东西。
+ */
+const sessionLabel = (session: AgentSessionMeta): string =>
+    `${session.title || session.autoTitle}（${session.messageCount} 条）`;
+
+/**
+ * 会话条上三个按钮的样式。
+ *
+ * 它们长得完全一样（同级、同权重），写三遍就是三处可能改漏的地方 ——
+ * 而漏掉的那一个不会报错，只会在悬停时颜色不一样。
+ */
+const SESSION_BUTTON = 'shrink-0 rounded-lg bg-white/[0.06] px-2 py-1 text-[10px] font-medium text-slate-400 transition hover:bg-white/[0.12] hover:text-white disabled:opacity-30';
+
+/**
  * 压缩档位候选。
  *
  * 与插件的 `COMPACT_RATIOS`（`agent/prompt.ts`）逐字一致。这里再写一份而不是
@@ -66,12 +85,16 @@ const COMPACT_RATIOS = [0.4, 0.6, 0.8, 1] as const;
  *
  * ## 它只是一个视图
  *
- * 引擎（对话历史、主循环、工具派发）在插件的 service worker 里，模型调用在
+ * 引擎（多条会话的历史、主循环、工具派发）在插件的 service worker 里，模型调用在
  * offscreen 文档里，页面执行在 chrome.debugger 上。这个窗口做三件事：
  *
  *   1. 把用户输入转成 `agent-action` 桥请求；
  *   2. 订阅 `agent-snapshot` 与 `agent-delta`，把引擎状态画出来；
  *   3. 显示插件连没连上。
+ *
+ * 会话（新建 / 切换 / 改名 / 删除）也走这条路：列表来自快照的 `sessions`，四个动作
+ * 是四条 `agent-action`。这里**一个会话字段都不存** —— 存一份就会与引擎那份漂移，
+ * 而"哪一份是对的"没有答案。
  *
  * ## 为什么不做乐观更新
  *
@@ -156,6 +179,16 @@ const AgentOrb = () => {
     const [error, setError] = useState('');
     const [connected, setConnected] = useState(true);
     const [tab, setTab] = useState<AgentTab>('chat');
+
+    /**
+     * 正在改名的那条会话 id，以及输入框里的草稿。`null` = 没有在改名。
+     *
+     * 存 id 而不是布尔：改名的过程中当前会话可能被切走（别处的动作、或引擎自己
+     * 拒绝了一次切换），布尔会让这次改名落到"现在这条"上 —— 而那不是用户要改的
+     * 那一条。
+     */
+    const [renaming, setRenaming] = useState<string | null>(null);
+    const [renameDraft, setRenameDraft] = useState('');
 
     /* 篡改规则。**唯一权威在插件**（tamper-get / tamper-set），这里只是它的一个视图 */
     const [rules, setRules] = useState<{ interceptRules: TamperRule[]; requestRules: TamperRule[]; headerRules: HeaderRule[] }>({
@@ -414,6 +447,40 @@ const AgentOrb = () => {
 
     const state = snapshot;
 
+    const sessions = state?.sessions || [];
+    const activeSession = sessions.find((session) => session.id === state?.activeSessionId);
+
+    /**
+     * 会话的四个动作：新建 / 切换 / 改名 / 删除。
+     *
+     * 都只发一条 `agent-action` 给引擎 —— 会话的权威在插件那边（历史与存储都在它
+     * 手里），球这边一个字段都不存。所以列表要等引擎推回快照才变，理由与"为什么
+     * 不做乐观更新"同一条：被拒绝的动作会永远停在界面上，而引擎根本没收到。
+     */
+    const startRename = useCallback((session: AgentSessionMeta) => {
+        /*
+         * 草稿填**用户起的那个名字**，不是列表上显示的那个：显示的可能是自动名字
+         * （第一条提问），把自动名字填进输入框再确认一次，就等于把它固化成了
+         * 用户起的名字 —— 之后回退掉那条提问，名字也不会跟着回去了。
+         */
+        setRenameDraft(session.title);
+        setRenaming(session.id);
+    }, []);
+
+    const commitRename = useCallback(() => {
+        const id = renaming;
+        setRenaming(null);
+        if (!id) return;
+        void act({ type: 'rename-session', id, title: renameDraft });
+    }, [act, renameDraft, renaming]);
+
+    const removeSession = useCallback((session: AgentSessionMeta) => {
+        // 问在调用之前：删掉的历史没有任何副本（导出是手动的一步，程序替不了）
+        if (!window.confirm(`删除会话「${session.title || session.autoTitle}」？它的全部消息会一起删掉。`)) return;
+        setRenaming(null);
+        void act({ type: 'delete-session', id: session.id });
+    }, [act]);
+
     /*
      * 还没收到快照时状态是**未知**，不是"正在跑"。
      *
@@ -533,6 +600,105 @@ const AgentOrb = () => {
             </button>
         </>
     );
+    /**
+     * 会话条：切换 + 新建 / 改名 / 删除。
+     *
+     * 放在对话页**消息列表之上**，而不是塞进标题栏：标题栏只有 440px，已经装着
+     * 停止与清空，而这里有一个选择器加三个按钮。
+     *
+     * 切换用原生 `<select>`：它做的就是"选中另一项"，原生控件自带键盘操作、
+     * 下拉定位与点击外面收起，自绘要把这些重做一遍而每一处漏掉都不报错。
+     *
+     * 运行中禁用切换与增删（`!canEdit`），**但不禁用改名**：引擎那边改名一个字
+     * 都不碰历史（见 renameSession），拦它只会让用户以为改名坏了。
+     */
+    const sessionBar = sessions.length > 0 && (
+        <div className="flex shrink-0 items-center gap-1 border-b border-white/[0.07] px-2 py-1.5">
+            {renaming ? (
+                <>
+                    <input
+                        value={renameDraft}
+                        onChange={(e) => setRenameDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                            // Enter 确认、Esc 放弃。与输入框那边一致：不拦 IME 组合中的 Enter
+                            if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                                e.preventDefault();
+                                commitRename();
+                            }
+                            if (e.key === 'Escape') setRenaming(null);
+                        }}
+                        // 焦点本来就该落在刚刚打开的这个输入框里
+                        autoFocus
+                        maxLength={AGENT_SESSION_TITLE_MAX}
+                        aria-label="会话名"
+                        placeholder="会话名（留空则用第一条提问）"
+                        className="min-h-0 min-w-0 flex-1 rounded-lg border border-white/10 bg-slate-950/60 px-2 py-1 text-[11px] text-slate-200 outline-none placeholder:text-slate-600 focus:border-white/25"
+                    />
+                    <button
+                        type="button"
+                        onClick={commitRename}
+                        className="shrink-0 rounded-lg bg-fuchsia-500/20 px-2 py-1 text-[10px] font-medium text-fuchsia-200 transition hover:bg-fuchsia-500/30"
+                    >
+                        确定
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setRenaming(null)}
+                        className="shrink-0 rounded-lg px-2 py-1 text-[10px] text-slate-500 transition hover:text-slate-300"
+                    >
+                        取消
+                    </button>
+                </>
+            ) : (
+                <>
+                    <select
+                        value={state?.activeSessionId || ''}
+                        onChange={(e) => {
+                            setRenaming(null);
+                            void act({ type: 'switch-session', id: e.target.value });
+                        }}
+                        disabled={!canEdit}
+                        aria-label="切换会话"
+                        title={canEdit ? '切换会话' : '运行中不能切换会话'}
+                        className="min-h-0 min-w-0 flex-1 rounded-lg border border-white/10 bg-slate-950/60 px-1.5 py-1 text-[10px] text-slate-300 outline-none focus:border-white/25 disabled:opacity-40"
+                    >
+                        {sessions.map((session) => (
+                            <option key={session.id} value={session.id}>{sessionLabel(session)}</option>
+                        ))}
+                    </select>
+                    <button
+                        type="button"
+                        onClick={() => void act({ type: 'new-session' })}
+                        disabled={!canEdit}
+                        title="新建会话"
+                        className={SESSION_BUTTON}
+                    >
+                        新建
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => activeSession && startRename(activeSession)}
+                        disabled={!activeSession}
+                        title="给当前会话起个名字"
+                        className={SESSION_BUTTON}
+                    >
+                        改名
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => activeSession && removeSession(activeSession)}
+                        disabled={!canEdit || sessions.length <= 1}
+                        // 只剩一条时按钮是灰的，这里把原因说清楚，而不是让人猜
+                        title={sessions.length <= 1 ? '只剩一条会话，不能删除' : '删除当前会话'}
+                        className={SESSION_BUTTON}
+                    >
+                        删除
+                    </button>
+                </>
+            )}
+        </div>
+    );
+
     return (
         <OrbShell
             label="Agent"
@@ -619,6 +785,7 @@ const AgentOrb = () => {
                     aria-labelledby="agent-tab-chat"
                     className="flex min-h-0 flex-1 flex-col"
                 >
+                    {sessionBar}
                     <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
                         {messages.length === 0 && !streaming ? (
                             <p className="p-4 text-[11px] leading-relaxed text-slate-500">

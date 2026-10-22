@@ -18,6 +18,7 @@ import type {
     AgentCompaction,
     AgentMessage,
     AgentRunStatus,
+    AgentSessionMeta,
     AgentUsage,
 } from './type';
 
@@ -1996,15 +1997,22 @@ export interface GalleryMarkerManifest {
 
 export interface AgentState {
     messages: AgentMessage[];
+    /**
+     * 全部会话的元信息，按创建时刻倒序（新的在最前）。**至少一条**：
+     * 引擎不让自己落到零会话 —— 没有会话时连"提问"都没有地方可落。
+     */
+    sessions: AgentSessionMeta[];
+    /** 当前会话的 id。上面的 `messages` 就是它的消息 */
+    activeSessionId: string;
     status: AgentRunStatus;
     error: string;
     /**
-     * 现在能不能改历史（删除 / 回退 / 清空）。
+     * 现在能不能改历史、能不能换会话（删除 / 回退 / 清空 / 新建 / 切换 / 删除会话）。
      *
      * 运行中或压缩中为 false。运行中是因为主循环正拿着 messages 追加，此刻改动会和
      * 它的下一次 appendMessage 抢同一个数组；压缩中是因为摘要调用的锚点算在开始时
-     * 那一刻，历史一变这次调用就白跑。**快照与三个动作共用同一个判据**（引擎里的
-     * locked），界面据此禁用按钮，而不是让用户点了没反应。
+     * 那一刻，历史一变这次调用就白跑。**快照与每一个这样的动作共用同一个判据**
+     * （引擎里的 locked），界面据此禁用按钮，而不是让用户点了没反应。
      */
     canEdit: boolean;
     /** 会话累计 token 统计（含当前上下文占用） */
@@ -2031,6 +2039,33 @@ export interface AgentState {
         send: (prompt: string) => Promise<void>;
         stop: () => void;
         clear: () => void;
+        /**
+         * 新建一条会话并切过去。
+         *
+         * 已达 `MAX_SESSIONS` 时返回 false 并写一条 error —— 界面上那句"为什么
+         * 建不出来"必须由这里给，而不是让按钮点了没反应。
+         */
+        newSession: () => Promise<boolean>;
+        /**
+         * 切换会话。返回是否切成功。
+         *
+         * 运行中 / 压缩中一律拒绝：主循环正拿着当前这份 messages 追加，中途换一份
+         * 会让这一轮的结果落进**另一条会话**，而"哪条会话得到了这些消息"没有答案。
+         */
+        switchSession: (id: string) => Promise<boolean>;
+        /**
+         * 给会话改名。空串表示恢复自动名字（第一条提问）。
+         *
+         * 长度由引擎截断（`agentSessionTitle` 同一把尺子），调用方不必自己裁。
+         */
+        renameSession: (id: string, title: string) => void;
+        /**
+         * 删除一条会话，连同它的历史。返回是否删成功。
+         *
+         * 只剩一条时拒绝：会话数是"至少一条"的不变式，删空了就没有地方落提问了
+         * （要清掉内容请用 clear）。
+         */
+        deleteSession: (id: string) => Promise<boolean>;
         /** 删除单条消息体（只删这一条，不牵连同轮的其他消息） */
         removeMessage: (id: string) => void;
         /**

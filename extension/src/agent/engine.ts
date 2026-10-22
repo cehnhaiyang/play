@@ -2,6 +2,7 @@ import type {
     AgentCompaction,
     AgentMessage,
     AgentRunStatus,
+    AgentSessionMeta,
     AgentState,
     AgentToolName,
     AgentUsage,
@@ -11,7 +12,7 @@ import type {
     SandboxRequest,
     SandboxResult,
 } from '../../../shared/meta';
-import { generateId } from '../../../shared/core';
+import { AGENT_SESSION_TITLE_MAX, agentSessionTitle, generateId } from '../../../shared/core';
 import type { AgentHost } from './host';
 import {
     COMPACT_PREFIX,
@@ -20,14 +21,17 @@ import {
     COMPACT_RATIOS,
     COMPACT_SYSTEM_PROMPT,
     CONTEXT_LIMIT_TOKENS,
+    LEGACY_MESSAGES_STORE_KEY,
     MAX_PROTOCOL_ERRORS,
-    MESSAGES_STORE_KEY,
+    MAX_SESSIONS,
     MESSAGES_STORE_MAX,
+    SESSIONS_STORE_KEY,
     STORE_BUDGET_MESSAGES,
     SYSTEM_PROMPT,
     compactCoverCount,
     contextFullMessage,
     requestTokensOf,
+    sessionMessagesKey,
 } from './prompt';
 import {
     PROTOCOL_ERROR_LABEL,
@@ -72,6 +76,12 @@ import { dispatchTool } from './tools';
  * 快照形状就是 `AgentState`（悬浮球按它渲染），只**多了一个 `revision`**：
  * 条数不变的改写（同一段历史被重算）在界面侧看不出变化，带一个单调递增的序号
  * 最省事。
+ *
+ * ## 会话
+ *
+ * 对话历史是**多条**的：每条一个 id，`messages` 只是当前那条的本体。切会话不新建
+ * 引擎、也不清空任何东西 —— 它换的是"`messages` 指向哪份历史"，以及把这一份从
+ * 存储里读出来。运行中不许切（见 switchSession）：主循环正拿着这个数组追加。
  */
 
 /** 引擎推给界面的快照 */
@@ -83,6 +93,14 @@ export interface EngineSnapshot extends AgentState {
 export interface EngineStorage {
     load: <T>(key: string, fallback: T) => Promise<T>;
     save: (key: string, value: unknown) => Promise<void>;
+    /**
+     * 删掉一个键。
+     *
+     * 只有两处用它：删掉一条会话时连它的历史一起删、以及迁移上一版单会话的键。
+     * 少了这一口，那两处都只能改写成一个空数组 —— 而配额照样被那份没人读的数据
+     * 占着，配额正是会话数上限的出处（见 prompt.ts 的 MAX_SESSIONS）。
+     */
+    remove: (key: string) => Promise<void>;
 }
 
 /**
@@ -135,7 +153,23 @@ interface EngineOptions {
 export class AgentEngine {
     private readonly options: EngineOptions;
 
+    /**
+     * 当前会话的消息。
+     *
+     * 只有这一份在内存里 —— 别的会话的本体留在存储里，切过去时才读（见
+     * switchSession）。全部装进内存的话，6 条会话就是十几 MB 常驻。
+     */
     private messages: AgentMessage[] = [];
+
+    /**
+     * 全部会话的元信息，以及当前是哪一条。**两者缺一不可**：会话列表要画出来，
+     * 而"当前这条"决定了 `messages` 是哪个数组的家。
+     *
+     * 至少一条（不变式，见 deleteSession 的拒绝条件）：没有会话时，用户按下发送
+     * 就没有地方可落 —— 那是一个连"清空"都救不回来的状态。
+     */
+    private sessions: AgentSessionMeta[] = [];
+    private activeId = '';
 
     /**
      * 上一轮的上下文重建。键是数组身份，理由见 contextOf
@@ -200,6 +234,10 @@ export class AgentEngine {
         send: (prompt) => this.send(prompt),
         stop: () => this.stop(),
         clear: () => this.clear(),
+        newSession: () => this.newSession(),
+        switchSession: (id) => this.switchSession(id),
+        renameSession: (id, title) => this.renameSession(id, title),
+        deleteSession: (id) => this.deleteSession(id),
         removeMessage: (id) => this.removeMessage(id),
         rewindTo: (id) => this.rewindTo(id),
         compact: () => this.compact(),
@@ -219,19 +257,81 @@ export class AgentEngine {
      *
      * 读进来的每条都要过 isStoredMessage：存储是外部输入，一条坏记录足以让
      * buildTranscript 抛错，而那时界面连「清空」都点不了（见 isStoredMessage）。
+     *
+     * 三条来源按优先级：会话索引 → 上一版的单会话键（迁移）→ 全新的一条空会话。
+     * 三条路径走完，`sessions` 与 `activeId` 一定有值 —— 这是不变式，
+     * 后面的每个动作都建立在它上面。
      */
     async hydrate(): Promise<void> {
-        const [messages, ratio] = await Promise.all([
-            this.options.storage.load<AgentMessage[]>(MESSAGES_STORE_KEY, []),
+        const [index, legacy, ratio] = await Promise.all([
+            this.options.storage.load<unknown>(SESSIONS_STORE_KEY, null),
+            this.options.storage.load<AgentMessage[]>(LEGACY_MESSAGES_STORE_KEY, []),
             this.options.storage.load<number>(COMPACT_RATIO_STORE_KEY, COMPACT_RATIO_DEFAULT),
         ]);
 
-        this.messages = Array.isArray(messages) ? messages.filter(isStoredMessage) : [];
         this.compactRatio = (COMPACT_RATIOS as readonly number[]).includes(ratio)
             ? ratio
             : COMPACT_RATIO_DEFAULT;
 
+        const restored = readSessionIndex(index);
+        // 索引是否**确定**在存储里。下面删老键只认这一个事实
+        let committed = restored !== null;
+        if (restored) {
+            this.sessions = restored.sessions;
+            this.activeId = restored.activeId;
+            this.messages = await this.readMessages(restored.activeId);
+        } else {
+            committed = await this.adoptLegacyMessages(legacy);
+        }
+
+        /*
+         * 上一版的单会话键，只在"索引确定落盘"之后才删。
+         *
+         * 判据是提交点，不是"迁移跑过了"：写索引是异步的，而失败会被静默吞掉
+         * （配额满是最常见的原因）。把"写过了"当成"写成了"，一旦它没落盘，
+         * 那份历史就两处都没了 —— 新键的 id 只有索引知道，而老键已经删掉。
+         *
+         * 放在两条分支之外，是为了同时收掉另一种断点：迁移写完索引之后 SW 被回收，
+         * 老键当时没来得及删。下一次 hydrate 走的是恢复这条路，删除只写在迁移分支里
+         * 的话，那份最多 1.5MB、再也无人读的数据就永远留着 —— 而配额正是会话数
+         * 上限的出处（见 prompt.ts 的 MAX_SESSIONS）。
+         */
+        if (committed) await this.options.storage.remove(LEGACY_MESSAGES_STORE_KEY);
+
         this.emit();
+    }
+
+    /**
+     * 读一条会话的消息本体。
+     *
+     * 缺键就是空数组（新建的会话不写空历史）：判断"这条会话有没有消息"的地方
+     * 因此只有一处 —— 这里。
+     */
+    private async readMessages(id: string): Promise<AgentMessage[]> {
+        const stored = await this.options.storage.load<AgentMessage[]>(sessionMessagesKey(id), []);
+        return Array.isArray(stored) ? stored.filter(isStoredMessage) : [];
+    }
+
+    /**
+     * 把上一版（单会话）的历史收成第一条会话。
+     *
+     * 这是**数据迁移**，不是兼容分支：老键读一次、历史写进新键、索引作为提交点落盘，
+     * 老键由 hydrate 在确认提交之后删掉（判据与理由都在那边）。不迁的话，
+     * 用户升级一次插件就丢掉了全部历史，而那是他自己写下的、没有任何副本的东西。
+     *
+     * @returns 索引是否真的落盘 —— 删老键拿它当判据
+     */
+    private async adoptLegacyMessages(legacy: AgentMessage[]): Promise<boolean> {
+        const messages = Array.isArray(legacy) ? legacy.filter(isStoredMessage) : [];
+        const created = createSessionMeta(Date.now());
+        this.sessions = [created];
+        this.activeId = created.id;
+        this.messages = messages;
+        // 条数与自动名字必须在落盘之前推出来：索引里存的就是它们
+        this.touchActiveMeta();
+
+        await this.writeMessages();
+        return this.writeIndex();
     }
 
     /**
@@ -269,6 +369,8 @@ export class AgentEngine {
         const usage: AgentUsage = sumUsage(this.messages, contextTokens);
         return {
             messages: this.messages,
+            sessions: this.sessions,
+            activeSessionId: this.activeId,
             status: this.status,
             error: this.error,
             /*
@@ -279,7 +381,7 @@ export class AgentEngine {
              * 可以编辑，可主循环已经拿着 messages 在跑了 —— 按钮显示为可用，
              * 点下去却什么也不会发生（改写历史的闸门是 busy）。
              *
-             * compacting 同样必须在里面：三个改历史的动作都拦它（见 locked），
+             * compacting 同样必须在里面：改历史的动作与换会话都拦它（见 locked），
              * 这里少写一项，快照就会说"能改"而动作拒绝。
              */
             canEdit: !this.locked(),
@@ -299,7 +401,7 @@ export class AgentEngine {
     }
 
     /**
-     * 现在能不能改历史。**快照与三个动作共用这一个判据。**
+     * 现在能不能改历史、能不能换会话。**快照与每一个这样的动作共用这一个判据。**
      *
      * 曾经写成两处：快照判 `!busy && !compacting`，动作只判 `busy`。于是压缩
      * 在途时界面把按钮禁掉，而程序化路径（`agent-action` 桥端点）照样能删能清 ——
@@ -308,6 +410,9 @@ export class AgentEngine {
      * 压缩为什么必须锁：摘要调用的 digest 与 upTo 是开始那一刻算的，这期间
      * 历史一变，这次调用就白跑（锚点没了会自愈成丢弃，但白花一次调用）。
      * 而压缩是用户自己点的、明知要等几十秒，锁住比"让他改完再重压"更省事。
+     *
+     * 换会话为什么必须在里面：`messages` 是主循环追加的那一份，换掉它，这一轮的
+     * 结果就会落进**另一条会话**，而"哪条会话得到了这些消息"没有答案。
      */
     private locked(): boolean {
         return this.busy || this.compacting;
@@ -324,10 +429,61 @@ export class AgentEngine {
      * 失败静默吞掉（`catch` 里连日志都没有）：配额满了的时候，用户最不该看到的是
      * "对话进行到一半整个卡住"。代价是写入失败时界面只表现为"历史不再保存" ——
      * 这条取舍是有意的，不是遗漏；要让它可查得先有一个界面上的落盘失败提示。
+     *
+     * 写**两份**：这条会话的历史（大）+ 会话索引（几百字节）。索引必须跟着每次
+     * 写入一起更新，否则列表上的条数与自动名字会停在会话创建那一刻 ——
+     * 而"这条会话里写了什么"正是用户在列表上找它的依据。
      */
     private persist(): void {
+        this.touchActiveMeta();
+        void this.writeMessages();
+        void this.writeIndex();
+    }
+
+    /** 当前会话的历史落盘。裁剪在这里发生，迁移那条路径用的是同一份逻辑 */
+    private writeMessages(): Promise<void> {
         const messages = trimToBudget(this.messages, STORE_BUDGET_MESSAGES).slice(-MESSAGES_STORE_MAX);
-        void this.options.storage.save(MESSAGES_STORE_KEY, messages).catch(() => undefined);
+        return this.options.storage.save(sessionMessagesKey(this.activeId), messages).catch(() => undefined);
+    }
+
+    /**
+     * 会话索引落盘。返回**是否真的写成了**。
+     *
+     * 返回值只有一处用：hydrate 据此决定能不能删上一版的老键（理由见那里的注释）。
+     * persist 那条路径忽略它 —— 那条路上失败是静默的，与别处一致。
+     *
+     * 索引是**提交点**：删会话要等它写完才敢删历史（索引里没有的会话等于不存在）。
+     */
+    private async writeIndex(): Promise<boolean> {
+        try {
+            await this.options.storage.save(SESSIONS_STORE_KEY, {
+                activeId: this.activeId,
+                sessions: this.sessions,
+            });
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * 把"消息变了"这件事同步到当前会话的元信息上：条数 + 自动名字。
+     *
+     * **推导只有这一处。** 这两个值都是从 `messages` 算出来的，所以三处调用它而不是
+     * 各算一遍，共同点是"`messages` 刚换过，而快照或落盘马上就要用到它们"：
+     *
+     *   · `persist` —— 每次改写历史之后，这是常态路径；
+     *   · `newSession` —— 换成了一条空历史，第一版快照上就得有个名字可画；
+     *   · `adoptLegacyMessages` —— 接过上一版那份历史，索引里存的就是推导结果。
+     *
+     * 用户起的名字（`title`）不在这里动：自动名字回答的是"它开头问的是什么"，
+     * 与用户管它叫什么无关（见 AgentSessionMeta）。
+     */
+    private touchActiveMeta(): void {
+        const meta = this.sessions.find((session) => session.id === this.activeId);
+        if (!meta) return;
+        meta.messageCount = this.messages.length;
+        meta.autoTitle = agentSessionTitle(this.messages);
     }
 
     /**
@@ -349,6 +505,121 @@ export class AgentEngine {
     /** 单条追加，就是上面那个的退化情形 */
     private appendMessage(message: AgentMessage): void {
         this.appendMessages([message]);
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* 会话                                                                    */
+    /* ---------------------------------------------------------------------- */
+
+    /**
+     * 新建一条会话并切过去。
+     *
+     * 到上限时是**拒绝**，不是"删掉最旧的那条腾地方"：历史是用户的东西，
+     * 程序替他扔掉一条会话不可接受 —— 而写不进去只是写不进去，已经写下的还在。
+     */
+    private async newSession(): Promise<boolean> {
+        if (this.locked()) return false;
+        if (this.sessions.length >= MAX_SESSIONS) {
+            this.error = `最多 ${MAX_SESSIONS} 条会话。要新建请先删掉一条（可以先把它导出成 Markdown）。`;
+            this.emit();
+            return false;
+        }
+
+        const created = createSessionMeta(Date.now());
+        /*
+         * 前插而不是追加：数组顺序就是列表顺序（新的在最前），而它是 createdAt 倒序
+         * —— 新会话的 createdAt 一定最大，所以前插就等于排好序。
+         */
+        this.sessions = [created, ...this.sessions];
+        this.activeId = created.id;
+        // 新会话是空的，历史一份都不用写（缺键即空，见 readMessages）；索引要写
+        this.messages = [];
+        // 名字与条数推在 emit 之前：第一版快照上就得有一个能画的名字
+        this.touchActiveMeta();
+        this.error = '';
+        this.emit();
+        await this.writeIndex();
+        return true;
+    }
+
+    /**
+     * 切换会话。
+     *
+     * 当前这份历史**不需要在这里回写一次**：它每次追加都已经落盘（persist 挂在
+     * appendMessages 上，其余改写历史的动作也各自走过）。多写一次等于凭空多一处
+     * "什么时候该写"的判断，而那种判断正是会漏的那一种。
+     */
+    private async switchSession(id: string): Promise<boolean> {
+        if (this.locked()) return false;
+        if (id === this.activeId) return true;
+        if (!this.sessions.some((session) => session.id === id)) return false;
+
+        this.activeId = id;
+        this.messages = await this.readMessages(id);
+        // 上一条会话留下的报错属于那一段历史，留着会指向用户已经看不见的东西
+        this.error = '';
+        // 换了一份历史，上下文占用、canCompact、contextFull 全都要跟着变
+        this.emit();
+        await this.writeIndex();
+        return true;
+    }
+
+    /**
+     * 给会话改名。空串 = 清掉用户起的名字，界面回落到自动名字。
+     *
+     * **不拦 locked**（与其它改历史的动作不同）：它一个字都不碰消息。模型正跑着的
+     * 时候给这条会话起个名字是完全合理的动作，而拦住它只会让用户以为改名坏了。
+     */
+    private renameSession(id: string, title: string): void {
+        const meta = this.sessions.find((session) => session.id === id);
+        if (!meta) return;
+        meta.title = title.trim().slice(0, AGENT_SESSION_TITLE_MAX);
+        this.emit();
+        void this.writeIndex();
+    }
+
+    /**
+     * 删掉一条会话，连同它的历史。
+     *
+     * 只剩一条时**拒绝**：会话数"至少一条"是不变式（见 sessions 的注释），删空了
+     * 用户按下发送就没有地方可落。要清掉内容有 clear —— 两者的意图不同：
+     * 清空是"这条不要了，从头开始"，删除是"这条连同名字一起消失"。
+     */
+    private async deleteSession(id: string): Promise<boolean> {
+        if (this.locked()) return false;
+        if (this.sessions.length <= 1) {
+            this.error = '只剩一条会话，不能删除。要清掉里面的内容请用「清空」。';
+            this.emit();
+            return false;
+        }
+        const at = this.sessions.findIndex((session) => session.id === id);
+        if (at < 0) return false;
+
+        this.sessions = this.sessions.filter((session) => session.id !== id);
+        if (id === this.activeId) {
+            /*
+             * 删的是当前这条：落到剩下的同一条位置上（下标越界时取最后一条），
+             * 并把那份历史读出来。不换的话界面上留着的是**一条已经被删掉的会话**
+             * 的消息，而那一刻它属于哪条会话没有答案。
+             */
+            const next = this.sessions[Math.min(at, this.sessions.length - 1)];
+            this.activeId = next.id;
+            this.messages = await this.readMessages(next.id);
+        }
+
+        this.error = '';
+        this.emit();
+        /*
+         * 删历史的**条件是索引确实落盘了**（提交点，与 hydrate 删老键同一条规矩）。
+         *
+         * 两种顺序都试过，取这一种的理由是两种断点里选坏处小的：索引没写成时不删，
+         * 最坏留下一份"不在列表里、也没人读"的历史（占着配额，界面看不出异常），
+         * 而且重启之后那条会话还在索引里 —— 删除没生效，但什么都没丢。反过来先删
+         * 历史，索引一失败就留下一条点开即空白的会话：用户看得见的坏状态，
+         * 而且内容真的没了。
+         */
+        if (await this.writeIndex()) await this.options.storage.remove(sessionMessagesKey(id));
+        return true;
     }
 
     /* ---------------------------------------------------------------------- */
@@ -1003,6 +1274,61 @@ export class AgentEngine {
         }
     }
 }
+
+/**
+ * 一条新会话的元信息。
+ *
+ * 只给身份与创建时刻：条数与自动名字由 `touchActiveMeta` 从历史推导出来。
+ * 那份推导**只有一处** —— 在这里再算一遍，等于同一件事有两个实现，而其中一个
+ * （新建时是空历史，推导结果是"未命名会话"）改了另一个不会跟着改。
+ */
+const createSessionMeta = (now: number): AgentSessionMeta => ({
+    id: generateId(),
+    title: '',
+    autoTitle: '',
+    createdAt: now,
+    messageCount: 0,
+});
+
+/**
+ * 存储里的会话索引是不是能用的。
+ *
+ * 与 isStoredMessage 同一个立场：存储是外部输入（上一版插件写的、用户手改的、
+ * 同 origin 的别的代码写的），而这份索引决定"有哪些会话、当前是哪条"。一条坏
+ * 记录足以把 `activeId` 指到一个不存在的会话上 —— 那时消息列表是空的，而且用户
+ * 按下发送会把新消息写进一个列表里不存在的 id。
+ *
+ * 返回 null 表示"没有可用的索引"：调用方去走迁移或新建（见 hydrate）。**不在这里
+ * 兜底造一条会话**：那会把"没有索引"和"索引坏了"合并成同一条路径，而前者要走的是
+ * 迁移（把老键那份历史接过来），后者只能新建。
+ */
+const readSessionIndex = (value: unknown): { activeId: string; sessions: AgentSessionMeta[] } | null => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const raw = (value as { sessions?: unknown }).sessions;
+    if (!Array.isArray(raw)) return null;
+
+    const sessions = raw.filter(isStoredSession);
+    if (sessions.length === 0) return null;
+
+    // 数组顺序就是列表顺序（新会话前插，见 newSession），这里原样保留
+    const wanted = (value as { activeId?: unknown }).activeId;
+    const activeId = typeof wanted === 'string' && sessions.some((session) => session.id === wanted)
+        ? wanted
+        : sessions[0].id;
+    return { activeId, sessions };
+};
+
+/** 索引里的一条会话记录是不是能用的。只查会被读到的那几个字段，同 isStoredMessage */
+const isStoredSession = (value: unknown): value is AgentSessionMeta => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const session = value as Record<string, unknown>;
+    if (typeof session.id !== 'string' || !session.id) return false;
+    if (typeof session.title !== 'string' || typeof session.autoTitle !== 'string') return false;
+    if (typeof session.createdAt !== 'number') return false;
+    // 界面直接渲染它，非数字会渲染成 NaN
+    if (typeof session.messageCount !== 'number') return false;
+    return true;
+};
 
 /**
  * 存储里的一条记录是不是能用的 `AgentMessage`。
