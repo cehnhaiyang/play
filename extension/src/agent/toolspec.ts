@@ -46,7 +46,7 @@ const FOCUS: AiToolSpec = {
         '',
         'If a tab with exactly this URL is already open it is reloaded (a clean main world); otherwise a new background tab is opened. Neither steals focus from the user, so they can keep working elsewhere.',
         '',
-        'Accepts an absolute URL, a path starting with / (resolved against the focused page), or a bare domain (https:// is added). Returns the final URL, which can differ from the requested one (redirects).',
+        'Accepts an absolute URL, a relative path starting with / (resolved against the focused page), or a bare domain (https:// is added). Returns the final URL, which can differ from the requested one (redirects).',
         '',
         'Call it on its own. The page changes underneath any call that reads it in the same batch, so issue js / storage calls in the next step, after focus has returned.',
     ),

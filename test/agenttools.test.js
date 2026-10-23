@@ -300,24 +300,35 @@ const buildAgentHarness = async (options = {}) => {
     const tabUrl = options.webviewUrl || 'https://example.com/';
     const hasPage = options.webview !== false;
     const ranCode = [];
-    const navigated = [];
+    const focusedUrls = [];
     const sandboxCalls = [];
 
     /*
-     * 当前标签页可变，且记录 activeTab() 被问了几次。
+     * 当前执行目标可变，且记录 target() 被问了几次。
      *
-     * 这两样是给"执行前重新解析活动标签"那条断言用的：缓存 tabId 的写法在
-     * 单标签页的用例里完全看不出问题，只有切换之后才暴露。所以必须能切、
+     * 这两样是给"执行前重新解析目标页面"那条断言用的：缓存 tabId 的写法在
+     * 单页面的用例里完全看不出问题，只有目标换了之后才暴露。所以必须能换、
      * 也必须能数。
      */
     let currentTabId = 1;
-    let activeTabCalls = 0;
+    let targetCalls = 0;
     let lastEvalTabId = null;
 
     const host = {
-        activeTab: async () => {
-            activeTabCalls += 1;
+        target: async () => {
+            targetCalls += 1;
             return hasPage ? { id: currentTabId, url: tabUrl } : null;
+        },
+        /*
+         * 复刻宿主的 focus 契约：换目标、开新标签页 id、返回最终地址。
+         *
+         * 必须真的换 currentTabId —— 只记下 URL 而不换 id 的话，"focus 之后
+         * 的 js 跑在新页面上"这条性质在测试里恒真，永远测不出缓存 tabId 的写法。
+         */
+        focus: async (url) => {
+            focusedUrls.push(url);
+            currentTabId += 1;
+            return { id: currentTabId, url, loaded: true };
         },
         evaluate: async (tabId, source) => {
             /*
@@ -386,7 +397,8 @@ const buildAgentHarness = async (options = {}) => {
         /** 每次 chat 的完整选项（system / temperature / reasoningEffort / maxTokens） */
         chatCalls: () => chatCalls,
         ranCode,
-        navigated,
+        /** 每次 focus 收到的地址。用来证明工具层的地址归一化 */
+        focusedUrls,
         /** 沙箱端口被调了几次、每次收到什么。用来证明参数确实转给了应用 */
         sandboxCalls: () => sandboxCalls,
         engine,
@@ -405,11 +417,11 @@ const buildAgentHarness = async (options = {}) => {
         removes: () => removes,
         /** 存储内容。会话相关的断言要看"哪几个键真的写下去了" */
         store: () => store,
-        /** activeTab() 被问了几次。用来证明引擎没有缓存标签页 */
-        activeTabCalls: () => activeTabCalls,
+        /** target() 被问了几次。用来证明引擎没有缓存目标页面 */
+        targetCalls: () => targetCalls,
         /** 最近一次页面执行落在哪个标签页 */
         lastEvalTabId: () => lastEvalTabId,
-        /** 模拟用户切标签页 */
+        /** 模拟目标页面被换掉（例如用户关掉它之后模型又 focus 了别处） */
         switchTab: (id) => { currentTabId = id; },
         async send(text) {
             roundCalls = 0;
@@ -451,7 +463,7 @@ const buildAgentHarness = async (options = {}) => {
 const buildDispatch = (tamperState, webviewUrl = DEFAULT_TAB_URL, sandboxImpl = null) => {
     const calls = {
         apply: 0, setCookie: [], setLocal: [], setSession: [], removed: [],
-        ranCode: [], navigated: [], sandbox: [],
+        ranCode: [], focused: [], sandbox: [],
     };
 
     const tamper = JSON.parse(JSON.stringify(tamperState));
@@ -487,12 +499,12 @@ const buildDispatch = (tamperState, webviewUrl = DEFAULT_TAB_URL, sandboxImpl = 
      */
     const hasPage = webviewUrl !== false;
     const host = {
-        activeTab: async () => (hasPage ? { id: 1, url: webviewUrl } : null),
+        target: async () => (hasPage ? { id: 1, url: webviewUrl } : null),
+        focus: async (url) => { calls.focused.push(url); return { id: 1, url, loaded: true }; },
         evaluate: async (_tabId, source) => {
             calls.ranCode.push(source);
             return '{"ok":true}';
         },
-        navigate: async (_tabId, url) => { calls.navigated.push(url); return { url, loaded: true }; },
         /*
          * 签名必须与 AgentHost 逐字对齐（tabId 在第一个参数）。
          *
@@ -616,33 +628,69 @@ const run = async () => {
         assert(kBad.error && kBad.error.includes('find'), '大写 FIND 应报错');
     });
 
-    /* ------------------------------ navigate ------------------------------ */
+    /* ------------------------------- focus ------------------------------- */
 
-    await check('navigate：裸域名自动补 https', async () => {
+    await check('focus：裸域名自动补 https', async () => {
         const { dispatchTool, calls } = buildDispatch(EMPTY, 'https://example.com/a');
-        const out = j(await dispatchTool('navigate', { url: 'example.org/x' }));
+        const out = j(await dispatchTool('focus', { url: 'example.org/x' }));
         assert(out.url === 'https://example.org/x', `应补协议，实际 ${out.url}`);
-        assert(calls.navigated[0] === 'https://example.org/x', '应按归一后的地址导航');
+        assert(calls.focused[0] === 'https://example.org/x', '应按归一后的地址打开');
     });
 
-    await check('navigate：相对路径相对当前页解析', async () => {
+    await check('focus：相对路径相对当前目标页解析', async () => {
         const { dispatchTool, calls } = buildDispatch(EMPTY, 'https://example.com/a/b?x=1');
-        const out = j(await dispatchTool('navigate', { url: '/api/login' }));
-        assert(out.url === 'https://example.com/api/login', `应相对当前页解析，实际 ${out.url}`);
-        assert(calls.navigated[0] === out.url, '导航地址与回显必须一致（下一步 js 基于它判断）');
+        const out = j(await dispatchTool('focus', { url: '/api/login' }));
+        assert(out.url === 'https://example.com/api/login', `应相对当前目标页解析，实际 ${out.url}`);
+        assert(calls.focused[0] === out.url, '打开地址与回显必须一致（下一步 js 基于它判断）');
     });
 
-    await check('navigate：完整 URL 原样通过', async () => {
+    await check('focus：完整 URL 原样通过', async () => {
         const { dispatchTool, calls } = buildDispatch(EMPTY, 'https://example.com/');
-        const out = j(await dispatchTool('navigate', { url: 'http://other.com/p' }));
+        const out = j(await dispatchTool('focus', { url: 'http://other.com/p' }));
         assert(out.url === 'http://other.com/p', '有协议的地址不得改动');
-        assert(calls.navigated[0] === 'http://other.com/p', '导航地址应原样');
+        assert(calls.focused[0] === 'http://other.com/p', '打开地址应原样');
     });
 
-    await check('navigate：无页面时报错', async () => {
+    /**
+     * 相对路径在**没 focus 过**时必须报错，不能猜一个基准。
+     *
+     * 这是 focus 与旧 navigate 的一处真实差别：旧版总能拿到活动标签页当 base，
+     * 现在没有目标页就没有 base。猜一个（比如 about:blank 或扩展页）会让模型
+     * 落到一个它从未指定的地址上，而回显的 url 看起来还挺正常。
+     */
+    await check('focus：相对路径在无目标页时报错而不是猜基准', async () => {
+        const { dispatchTool, calls } = buildDispatch(EMPTY, false);
+        const out = j(await dispatchTool('focus', { url: '/api/login' }));
+        assert(out.error && out.error.includes('完整地址'), `应要求给完整地址，实际 ${JSON.stringify(out)}`);
+        assert(calls.focused.length === 0, '不得在没有基准的情况下打开任何地址');
+    });
+
+    await check('focus：完整地址在没有目标页时照常可用', async () => {
+        const { dispatchTool, calls } = buildDispatch(EMPTY, false);
+        const out = j(await dispatchTool('focus', { url: 'example.com/x' }));
+        assert(out.focused === true, `应成功，实际 ${JSON.stringify(out)}`);
+        assert(calls.focused[0] === 'https://example.com/x', '完整地址不需要基准页');
+    });
+
+    /**
+     * 没 focus 过时，依赖页面的工具都必须**失败并指出出路**。
+     *
+     * 这是本设计的前提：不再有"回落到活动标签页"的兜底，所以模型必须自己先
+     * focus。只说"没有可用页面"会让它以为浏览器坏了，反复重试同一个调用。
+     *
+     * js 不在这里测：它走引擎的 `exec` 端口而不是宿主，那条路径的措辞在
+     * engine.ts 里，由下面「工具失败：回灌前缀标明失败」那条用例覆盖。
+     */
+    await check('未 focus 时 storage / tokens 失败并提示先 focus', async () => {
         const { dispatchTool } = buildDispatch(EMPTY, false);
-        const out = j(await dispatchTool('navigate', { url: 'https://example.com/' }));
-        assert(out.error && out.error.includes('没有可用'), `应报无页面，实际 ${JSON.stringify(out)}`);
+        for (const [tool, args] of [
+            ['storage', { action: 'get', area: 'local' }],
+            ['tokens', { action: 'find' }],
+        ]) {
+            const out = j(await dispatchTool(tool, args));
+            assert(out.error && out.error.includes('focus'),
+                `${tool} 的失败信息必须提示先 focus，实际 ${JSON.stringify(out)}`);
+        }
     });
 
     /* ------------------------- tamper: get ------------------------- */
@@ -2334,10 +2382,10 @@ const run = async () => {
     await check('label 缺失时回落到 tool 字段', async () => {
         const out = buildTranscript([
             msg({ role: 'user', content: 'q' }),
-            msg({ role: 'tool', tool: 'navigate', result: 'ok' }),
+            msg({ role: 'tool', tool: 'focus', result: 'ok' }),
         ]);
         const toolMsg = out.find((m) => m.role === 'tool');
-        assert(toolMsg && toolMsg.content.includes('[工具 navigate 的执行结果]'),
+        assert(toolMsg && toolMsg.content.includes('[工具 focus 的执行结果]'),
             `没有 label 时应回落到 tool，实际：${toolMsg && toolMsg.content.slice(0, 40)}`);
     });
 
@@ -3601,21 +3649,21 @@ const run = async () => {
      *
      * 判据是 activeTab() 的调用次数：切换后再执行一次，必须重新问。
      */
-    await check('执行前重新解析活动标签，不缓存 tabId', async () => {
+    await check('执行前重新解析目标页面，不缓存 tabId', async () => {
         const h = await buildAgentHarness({ toolCall: true });
 
         await h.send('第一轮提问');
-        const afterFirst = h.activeTabCalls();
+        const afterFirst = h.targetCalls();
         assert(h.lastEvalTabId() === 1, `首轮应跑在标签页 1，实际 ${h.lastEvalTabId()}`);
 
-        // 模拟用户切到另一个标签页，再跑一步 js
+        // 目标被换掉（模型 focus 了新页面），再跑一步 js
         h.switchTab(99);
         await h.send('第二轮提问');
 
-        assert(h.activeTabCalls() > afterFirst,
-            `切换标签页后必须重新问宿主，实际调用次数停在 ${afterFirst}`);
+        assert(h.targetCalls() > afterFirst,
+            `换目标后必须重新问宿主，实际调用次数停在 ${afterFirst}`);
         assert(h.lastEvalTabId() === 99,
-            `脚本应跑在新标签页上，实际 ${h.lastEvalTabId()}`);
+            `脚本应跑在新目标页上，实际 ${h.lastEvalTabId()}`);
     });
 
     /* --------------------------- 提示词：行为约束 --------------------------- */
@@ -3680,10 +3728,10 @@ const run = async () => {
          * 参数形状的唯一来源是 toolspec.ts 的 JSON Schema。
          *
          * 这里钉住三件模型最容易搞错、而 schema 表达不了的事：
-         * 改文件用 edit、node 不是 shell、navigate 接受相对路径。
+         * 改文件用 edit、node 不是 shell、focus 接受相对路径。
          * 它们都是**行为约束**而不是参数形状，所以留在 description 里是对的。
          */
-        assert(/relative path/.test(specSrc), 'navigate 的相对路径必须写进说明');
+        assert(/relative path/.test(specSrc), 'focus 的相对路径必须写进说明');
         assert(/substring/.test(specSrc), 'tamper 的 url_pattern 子串语义必须点明');
         assert(/deletes the header/.test(specSrc), 'tamper 的空 header value 语义必须点明');
         assert(/empty string deletes that segment/.test(specSrc), 'edit 的空 new 语义必须点明');
