@@ -1387,9 +1387,9 @@ const dispatchBall = async (message: BallRequest): Promise<unknown> => {
         /*
          * Agent 的两条：引擎挂在 agentBridge 上，球只负责转发。
          *
-         * 这些消息**不带 tabId**：引擎每次都问宿主的 `activeTab()`，
+         * 这些消息**不带 tabId**：引擎每次都问宿主的 `target()`，
          * 那是"当前操作哪个页面"的唯一权威。球传一个自己的 tabId 会让同一个
-         * 事实有两个存放处 —— 用户切标签页后两边立刻不一致。
+         * 事实有两个存放处 —— 模型 focus 了别的页面时两边立刻不一致。
          */
         case 'host-ensure':
             await agentBridge.ensureOffscreen();

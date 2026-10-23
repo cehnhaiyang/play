@@ -43,7 +43,9 @@ const main = async () => {
   const aibookOk = require('./aibook.test.js').run();
 
   console.log('\n=== AI 服务商与档位映射 ===');
-  const aiproviderOk = require('./aiprovider.test.js').run();
+  const aiproviderMod = require('./aiprovider.test.js');
+  const aiproviderOk = aiproviderMod.run();
+  const aiwireOk = await aiproviderMod.runAsync();
 
   console.log('\n=== 搜索引擎测试 ===');
   const searchMod = require('./search.test.js');
@@ -80,7 +82,7 @@ const main = async () => {
   console.log('\n=== E-Hentai 站点适配 ===');
   const ehentaiOk = require('./ehentai.test.js').run();
 
-  if (!engineOk || !compatOk || !aibookOk || !aiproviderOk || !searchSyncOk || !searchAsyncOk
+  if (!engineOk || !compatOk || !aibookOk || !aiproviderOk || !aiwireOk || !searchSyncOk || !searchAsyncOk
     || !mainStaticOk || !agentToolsOk
     || !logsOk || !bridgeOk || !bridgeAppOk || !extSnifferOk || !extModelOk || !manifestOk || !scriptsOk
     || !ehentaiOk) {

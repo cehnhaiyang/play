@@ -104,6 +104,41 @@ export const AI_PROVIDERS: AiProviderPreset[] = [
 
         ],
     },
+    {
+        id: 'arena',
+        label: 'arena',
+        note: '本地 arena 网关（8787），借已登录的 arena.ai 浏览器会话；'
+            + '只回文本、不实现 tool_calls，Agent 用不了，适合音频工坊与绘本',
+        baseUrl: 'http://127.0.0.1:8787/v1',
+        /*
+         * 网关未设 GATEWAY_KEY 时任意密钥都通过；给一个显式的占位串，
+         * 是为了让界面上的"密钥（空）"不出现 —— 那会被读成"没配好"。
+         */
+        apiKey: 'unused',
+        /*
+         * 网关**丢弃** reasoning_effort（server.js 只读 model / messages /
+         * stream / modality），所以每条都标 reasoning: false，让界面如实显示
+         * 「不思考」—— 标成需要思考的话，三个档位按钮点了也不会有任何效果。
+         *
+         * 模型名用的是目录里的 **publicName**（如 claude-sonnet-5），而不是
+         * picker 上显示的 displayName（claude-sonnet-5-high）。两者网关都认：
+         * 目录条目以 displayName 为 id、把 publicName 与 UUID 记进 aliases，
+         * 精确匹配三者之一即命中。这里取 publicName 是因为它更稳定 ——
+         * displayName 带档位后缀（-high / -low / -medium），站点调整默认档位时
+         * 会跟着变。站点下线某个模型后，这里写着的名字会立刻 404，那是网关的
+         * 设计（绝不残留旧清单），换名字即可。
+         */
+        models: [
+            { id: 'claude-sonnet-5', reasoning: false },
+            { id: 'gemini-3.8-flash-high', reasoning: false },
+            { id: 'gemini-3.1-pro-preview', reasoning: false },
+            { id: 'gpt-5.5-instant', reasoning: false },
+            { id: 'grok-4.6', reasoning: false },
+            { id: 'deepseek-v4.1-flash-max', reasoning: false },
+            { id: 'kimi-k2.6', reasoning: false },
+            { id: 'qwen3.7-max', reasoning: false },
+        ],
+    },
 ];
 
 /** 比地址时忽略大小写与末尾斜杠 */
@@ -417,7 +452,8 @@ export const chat = async (options: AiChatOptions): Promise<AiReply> => {
         ? [{ role: 'system', content: options.system }, ...options.messages]
         : options.messages;
 
-    const payload: Record<string, unknown> = { model: config.model, messages };
+    // 消息一律过 toWireMessage：回放历史时 assistant.tool_calls 必须包成协议形态
+    const payload: Record<string, unknown> = { model: config.model, messages: messages.map(toWireMessage) };
 
     // 思考参数可选：配置里只有 low / high / max，当前模型未必认，
     // 下发前按模型预设映射；无档位或模型不需要思考时映射结果为空，整条请求就不带这个参数
@@ -523,6 +559,32 @@ const toWireTool = (tool: AiToolSpec): Record<string, unknown> => ({
         parameters: tool.parameters,
     },
 });
+
+/**
+ * 一条消息 → 协议形态。
+ *
+ * `assistant.tool_calls` 与 `tools` 是**同一条包装规则**：协议要求每个调用是
+ * `{id, type:'function', function:{name, arguments}}`，而内部类型 `AiToolCall`
+ * 是扁平的（id / name / arguments）。
+ *
+ * 漏了这一层的代价不是报错，是**静默的空回复**：实测本地 agent2api 对扁平的
+ * tool_calls 回 `HTTP 200` + 一个字节都没有的流（非流式则回 `content:""`、
+ * `usage:null`）。于是引擎读到"没有正文、也没有调用"，把这一步判成模型无输出
+ * 而收尾 —— 用户看到的是"Agent 干了一步就停了，什么都没说"。
+ *
+ * 只有回放历史时才带 tool_calls，所以第一轮永远正常，从第二步开始坏。
+ */
+const toWireMessage = (message: AiChatMessage): Record<string, unknown> => {
+    if (!message.tool_calls) return message as unknown as Record<string, unknown>;
+    return {
+        ...message,
+        tool_calls: message.tool_calls.map((call) => ({
+            id: call.id,
+            type: 'function',
+            function: { name: call.name, arguments: call.arguments },
+        })),
+    };
+};
 
 /**
  * 把流式分片里的 tool_calls 拼回完整调用。

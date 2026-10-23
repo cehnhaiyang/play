@@ -39,7 +39,11 @@ function onAgentMessage(raw) {
       const id = typeof x === 'string' ? x : (x && x.id);
       if (!id || seen.has(id)) continue;
       seen.add(id);
-      next.push({ id: String(id), owned_by: (x && x.owned_by) || 'arena' });
+      // aliases are only what the browser declared: nothing is invented here
+      const aliases = (x && Array.isArray(x.aliases))
+        ? x.aliases.filter((a) => typeof a === 'string' && a && a !== id)
+        : [];
+      next.push({ id: String(id), owned_by: (x && x.owned_by) || 'arena', aliases });
     }
     agentModels = next;
     agentModelsAt = Date.now();
@@ -65,6 +69,21 @@ function onAgentMessage(raw) {
     pending.delete(m.reqId);
     p.fail(new Error(m.message || 'agent reported error'));
   }
+}
+
+// Resolve a caller-supplied model name against the agent-reported catalogue.
+// Only exact matches on id or agent-declared aliases are accepted; there is no
+// pattern matching and no built-in alias table, so an unknown name is an error.
+function resolveModel(name) {
+  const want = String(name || '').trim();
+  if (!want) return null;
+  for (const m of agentModels) {
+    if (m.id === want) return m;
+  }
+  for (const m of agentModels) {
+    if (Array.isArray(m.aliases) && m.aliases.indexOf(want) >= 0) return m;
+  }
+  return null;
 }
 
 function callAgent(model, content, modality, onDelta) {
@@ -168,6 +187,24 @@ async function handleChat(req, res) {
   const content = flatten(payload.messages);
   if (!content) return sendErr(res, 400, 'missing required field: messages');
 
+  // Model names are only ever validated against the live browser catalogue.
+  // With no agent attached we let callAgent() produce the 503 instead, so the
+  // failure reason stays accurate.
+  let resolved = null;
+  if (agent) {
+    resolved = resolveModel(model);
+    if (!resolved) {
+      const names = agentModels.slice(0, 40).map((m) => m.id).join(', ');
+      return sendErr(
+        res, 404,
+        'model not found: ' + model + '; the connected browser offers ' + agentModels.length + ' models' +
+          (agentModels.length > 40 ? ' (' + names + ', ...)' : ' (' + names + ')'),
+        'invalid_request_error'
+      );
+    }
+  }
+  const modelId = resolved ? resolved.id : model;
+
   const id = 'chatcmpl-' + crypto.randomUUID().replace(/-/g, '');
   const created = Math.floor(Date.now() / 1000);
 
@@ -197,10 +234,10 @@ async function handleChat(req, res) {
   }
 
   try {
-    const buf = await callAgent(model, content, payload.modality);
+    const buf = await callAgent(modelId, content, payload.modality);
     const text = buf.join('');
     return sendJson(res, 200, {
-      id, object: 'chat.completion', created, model,
+      id, object: 'chat.completion', created, model: modelId,
       choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }],
       usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
     });

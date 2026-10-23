@@ -42,14 +42,28 @@
     }
 
     if (d.type === 'models' && Array.isArray(d.models)) {
-      modelCache = d.models.map(function (m) { return { id: m.id, owned_by: m.owned_by }; });
+      modelCache = d.models.map(function (m) {
+        return { id: m.id, owned_by: m.owned_by, aliases: Array.isArray(m.aliases) ? m.aliases : [] };
+      });
       toWorker({ type: 'arenaBridgeRegister', models: modelCache });
       return;
     }
 
     if (d.type === 'selected') {
-      var cb = pendingSelect[d.reqId];
-      if (cb) { delete pendingSelect[d.reqId]; cb(); }
+      var pend = pendingSelect[d.reqId];
+      if (!pend) return;
+      delete pendingSelect[d.reqId];
+      // A failed switch must never fall through to "just send it": that would
+      // silently answer with whatever model happens to be selected.
+      var res = d.result || {};
+      if (res.error) {
+        toWorker({
+          type: 'arenaBridgeFrame',
+          frame: { type: 'error', reqId: pend.reqId, message: 'model switch failed: ' + res.error }
+        });
+        return;
+      }
+      pend.go();
       return;
     }
 
@@ -66,10 +80,17 @@
       var go = function () { toPage({ op: 'send', reqId: r.reqId, prompt: r.content }); };
       if (r.model) {
         var sid = 'sel-' + r.reqId;
-        pendingSelect[sid] = go;
+        pendingSelect[sid] = { go: go, reqId: r.reqId };
         toPage({ op: 'select', reqId: sid, model: r.model });
         setTimeout(function () {
-          if (pendingSelect[sid]) { delete pendingSelect[sid]; go(); }
+          var still = pendingSelect[sid];
+          if (still) {
+            delete pendingSelect[sid];
+            toWorker({
+              type: 'arenaBridgeFrame',
+              frame: { type: 'error', reqId: still.reqId, message: 'model switch timed out' }
+            });
+          }
         }, 25000);
       } else {
         go();

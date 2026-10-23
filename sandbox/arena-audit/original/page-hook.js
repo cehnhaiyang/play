@@ -211,7 +211,12 @@
           var key = m.displayName || m.publicName;
           if (!key || seen[key]) return;
           seen[key] = 1;
-          out.push({ id: key, owned_by: m.organization || 'arena', publicName: m.publicName, displayName: m.displayName, provider: m.provider, arena: c.arena });
+          // Aliases are derived from the live catalogue only: the public name and
+          // the record uuid are accepted spellings of the same picker entry.
+          var aliases = [];
+          if (m.publicName && m.publicName !== key) aliases.push(m.publicName);
+          if (m.id && String(m.id) !== key) aliases.push(String(m.id));
+          out.push({ id: key, owned_by: m.organization || 'arena', aliases: aliases, provider: m.provider, arena: c.arena });
         });
       });
       return out;

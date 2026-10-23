@@ -196,10 +196,13 @@ const headerRuleToProtocol = (rule: HeaderRule): Record<string, unknown> => ({
 /**
  * 没有可用页面时的回执。
  *
- * 抽成常量是因为它现在出现在三个工具里（navigate / storage / tokens），
- * 措辞分叉时模型会以为遇到的是三种不同的故障。
+ * 抽成常量是因为它出现在四个工具里（storage / tokens / tamper 的注入与 js），
+ * 措辞分叉时模型会以为遇到的是几种不同的故障。
+ *
+ * 必须点出**出路**（先 focus）：只说"没有可用页面"时，模型会以为浏览器出了问题，
+ * 反复重试同一个调用；而它真正要做的只是先 focus 一个地址。
  */
-const NO_PAGE = '当前没有可用的页面';
+const NO_PAGE = '还没有指定执行页面。请先调用 focus 打开一个地址，之后的工具才会在那个页面上执行。';
 
 export const dispatchTool = async (
     tool: AgentToolName,
@@ -226,35 +229,52 @@ export const dispatchTool = async (
             return ctx.exec(code);
         }
 
-        case 'navigate': {
+        /**
+         * focus —— 指定接下来的工具在哪个页面里执行。
+         *
+         * 这是**唯一**换页的方式（旧版的 navigate 已删）：换地址就 focus 新地址。
+         * 页面已打开则强制刷新，没打开则新开一个后台标签页 —— 两条路都不激活
+         * 标签页，用户可以在别处继续干活。
+         *
+         * 归一化与旧 navigate 一致：有协议原样，`/` 开头相对**当前目标页**解析，
+         * 其余补 `https://`。相对路径在没有目标页时直接报错 —— 那时没有一个
+         * "当前页"可以作为基准，猜一个 base 等于替模型编造地址。
+         */
+        case 'focus': {
             const raw = asString(args.url).trim();
-            if (!raw) return JSON.stringify({ error: '缺少 url' });
-            /**
-             * 模型从页面里读到的地址常常不是完整 URL（相对路径 `/api/user`、裸域名
-             * `example.com`）。直接导航会失败或落到奇怪的地方，而失败信息指不出
-             * "缺协议"这个真正原因。在这里归一：有协议原样，`/` 开头相对当前页解析，
-             * 其余补 `https://`。回显归一后的最终地址 —— 模型下一步的 js 要基于它判断。
-             */
-            const current = await ctx.host.activeTab();
-            if (!current) return JSON.stringify({ error: NO_PAGE });
+            if (!raw) return JSON.stringify({ error: '缺少 url（要打开或刷新的地址）' });
+
             let url = raw;
-            try {
-                if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) {
-                    url = raw;
-                } else if (raw.startsWith('/')) {
-                    url = new URL(raw, current.url).href;
-                } else {
-                    url = `https://${raw}`;
+            if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) {
+                url = raw;
+            } else if (raw.startsWith('/')) {
+                const current = await ctx.host.target();
+                if (!current) {
+                    return JSON.stringify({
+                        error: `相对路径 ${raw} 需要一个当前页面作基准，而还没有 focus 过任何页面。请给完整地址。`,
+                    });
                 }
-            } catch {
-                return JSON.stringify({ error: `地址解析失败：${raw}（相对路径需要当前页面地址可读）` });
+                try {
+                    url = new URL(raw, current.url).href;
+                } catch {
+                    return JSON.stringify({ error: `地址解析失败：${raw}` });
+                }
+            } else {
+                url = `https://${raw}`;
             }
 
             try {
-                const result = await ctx.host.navigate(current.id, url);
-                return JSON.stringify({ url: result.url, loaded: result.loaded });
+                const result = await ctx.host.focus(url);
+                return JSON.stringify({
+                    focused: true,
+                    url: result.url,
+                    loaded: result.loaded,
+                    note: result.loaded
+                        ? '之后所有依赖页面的工具都在这个页面上执行。'
+                        : '页面还没加载完（超时），工具仍可在这个页面上执行，但内容可能不完整。',
+                });
             } catch (e) {
-                return JSON.stringify({ error: `导航失败：${errorText(e)}` });
+                return JSON.stringify({ error: `打开页面失败：${errorText(e)}` });
             }
         }
 
@@ -353,7 +373,7 @@ export const dispatchTool = async (
                 return JSON.stringify({ error: unknownActionError(action, ['get', 'set', 'delete']) });
             }
 
-            const tab = await ctx.host.activeTab();
+            const tab = await ctx.host.target();
             if (!tab) return JSON.stringify({ error: NO_PAGE });
 
             if (area === 'cookie') {
@@ -460,7 +480,7 @@ export const dispatchTool = async (
                 return JSON.stringify({ error: unknownActionError(action, ['find', 'decode', 'rewrite']) });
             }
 
-            const tab = await ctx.host.activeTab();
+            const tab = await ctx.host.target();
             if (!tab) return JSON.stringify({ error: NO_PAGE });
 
             if (action === 'find') {

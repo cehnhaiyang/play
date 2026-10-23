@@ -65,7 +65,7 @@ import { dispatchTool } from './tools';
  *
  * 两个理由都来自它自己会做的事：
  *
- * 1. **它的 navigate 工具会换页**。挂在页面里的话（内容脚本、注入的脚本），
+ * 1. **它的 focus 工具会开页面 / 刷新页面**。挂在页面里的话（内容脚本、注入的脚本），
  *    换页会重跑整个脚本，主循环当场死掉 —— 而"跨页继续"正是 Agent 存在的
  *    意义之一。
  * 2. **它必须在没有界面的情况下继续跑**。球收起、用户切到别的标签页，循环都该
@@ -661,15 +661,17 @@ export class AgentEngine {
         /*
          * 每次都问宿主"现在操作哪个页面"，**不缓存 tabId**。
          *
-         * 缓存会让同一个事实有两个存放处：引擎一份、宿主的 activeTab() 一份。
-         * 用户切标签页后两边立刻不一致，而"哪个是对的"没有答案 ——
-         * 表现为"脚本跑到上一个标签页去了"。宿主才是这件事的权威。
+         * 缓存会让同一个事实有两个存放处：引擎一份、宿主的 target() 一份。
+         * 而模型可以在同一轮里 focus 新页面，缓存会让后面的 js 继续跑到上一个
+         * 页面上 —— 表现为"它说切过去了，读的还是旧页面"。宿主才是这件事的权威。
          */
-        const tab = await this.options.host.activeTab();
+        const tab = await this.options.host.target();
         if (!tab) {
             // 走 `__agentError`：这是**我们**的失败，与页面返回的 `{error:"..."}`
             // 业务字段必须分开（判据见 isJsErrorResult）。
-            return JSON.stringify({ __agentError: '当前没有可用的页面（标签页是空白页或未就绪）' });
+            return JSON.stringify({
+                __agentError: '还没有指定执行页面。请先调用 focus 打开一个地址，之后的 js 才会在那个页面上执行。',
+            });
         }
         return this.execOnPage(tab.id, code);
     }

@@ -164,4 +164,92 @@ const run = () => {
   return failed === 0;
 };
 
-module.exports = { run };
+/**
+ * 下发形态（需要 await chat，所以与 run 分开）。
+ *
+ * 打在这里而不是别处：它是 **AiService 拼请求体**这件事的契约，与档位映射同源。
+ *
+ * ## 为什么这条断言必须存在
+ *
+ * 内部类型 `AiToolCall` 是扁平的（id / name / arguments），而协议要求
+ * `{id, type:'function', function:{name, arguments}}`。少包这一层**不报错**：
+ * 实测本地 agent2api 回 `HTTP 200` 加一个零字节的流，引擎读成"没正文也没调用"，
+ * 于是每一步都判成模型无输出而收尾 —— 用户看到的是"Agent 干了一步就停"。
+ *
+ * 只有回放历史时才带 tool_calls，所以第一轮永远正常、从第二步开始坏。
+ * 这类"只在第二步出现、且不报错"的失效，靠跑真实服务才发现得了，
+ * 所以把请求体本身钉住。
+ */
+const runAsync = async () => {
+  const aiService = require(path.join(BUILD, 'shared', 'ai', 'AiService.js'));
+  const { chat, DEFAULT_AI_CONFIG } = aiService;
+
+  const realFetch = globalThis.fetch;
+  let captured = null;
+  globalThis.fetch = async (_url, init) => {
+    captured = JSON.parse(String(init && init.body));
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      text: async () => JSON.stringify({
+        choices: [{ message: { content: '好' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+    };
+  };
+
+  const flatCall = { id: 'call_1', name: 'js', arguments: '{"code":"return 1;"}' };
+  const history = [
+    { role: 'user', content: '取数' },
+    { role: 'assistant', content: '', tool_calls: [flatCall] },
+    { role: 'tool', tool_call_id: 'call_1', content: '[工具 js 的执行结果]\n1' },
+  ];
+  const spec = { name: 'js', description: '跑脚本', parameters: { type: 'object', properties: {} } };
+
+  let body = null;
+  let withTools = null;
+  try {
+    await chat({ config: DEFAULT_AI_CONFIG, messages: history });
+    body = captured;
+    await chat({ config: DEFAULT_AI_CONFIG, messages: [{ role: 'user', content: 'hi' }], tools: [spec] });
+    withTools = captured;
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  // run() 已经把它的成绩报过了；这里只统计本段新增的那几条
+  const basePassed = passed;
+  const baseFailed = failed;
+
+  check('下发形态: 回放历史时 tool_calls 包成 {type,function}', () => {
+    const assistant = body.messages.find((m) => m.role === 'assistant');
+    assert(assistant && Array.isArray(assistant.tool_calls), 'assistant 消息必须带 tool_calls');
+    const wire = assistant.tool_calls[0];
+    assert.strictEqual(wire.type, 'function', 'tool_calls 每项必须有 type:"function"');
+    assert(wire.function, 'tool_calls 每项必须有 function 对象（扁平字段会被上游静默吞掉）');
+    assert.strictEqual(wire.function.name, flatCall.name, 'function.name 必须原样带上工具名');
+    assert.strictEqual(wire.function.arguments, flatCall.arguments, 'function.arguments 必须原样带上参数串');
+    assert(!('name' in wire) && !('arguments' in wire), '不允许把扁平字段同时留在外层');
+  });
+
+  check('下发形态: tool 消息的 tool_call_id 与调用 id 逐字配对', () => {
+    const assistant = body.messages.find((m) => m.role === 'assistant');
+    const tool = body.messages.find((m) => m.role === 'tool');
+    assert(tool, 'tool 消息必须在');
+    assert.strictEqual(tool.tool_call_id, assistant.tool_calls[0].id, 'tool_call_id 必须指回调用的 id');
+  });
+
+  check('下发形态: 工具规格与调用项是同一条包装规则', () => {
+    assert(Array.isArray(withTools.tools) && withTools.tools.length === 1, 'tools 必须下发');
+    assert.strictEqual(withTools.tools[0].type, 'function', 'tools 每项必须有 type:"function"');
+    assert.strictEqual(withTools.tools[0].function.name, spec.name, 'tools 的 function.name 必须是工具名');
+  });
+
+  const added = failed - baseFailed;
+  console.log(`AI 下发形态：通过 ${passed - basePassed} 项，失败 ${added} 项`);
+  for (const f of failures.slice(failures.length - added)) console.log(`  FAIL  ${f.name}\n        ${f.message}`);
+  return added === 0;
+};
+
+module.exports = { run, runAsync };

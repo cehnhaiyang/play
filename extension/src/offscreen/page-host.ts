@@ -46,6 +46,15 @@ const PROTOCOL_VERSION = '1.3';
  */
 const EVAL_TIMEOUT_MS = 60000;
 
+/**
+ * 等一个页面加载完成的超时。
+ *
+ * 必须有上限：页面可能一直加载不完（挂在某个永不返回的资源上）。超时不是失败，
+ * 返回 `loaded: false` 让模型自己决定要不要等 —— 半加载的页面里它照样能跑脚本，
+ * 而"报错退出"会让它重开一遍。
+ */
+const READY_TIMEOUT_MS = 15000;
+
 /** 已附着的标签页。值是附着 Promise，用来把并发的 attach 合并成一次 */
 const attached = new Map<number, Promise<void>>();
 
@@ -65,7 +74,7 @@ const readyListeners = new Set<(tabId: number, url: string) => void>();
  * 表现为"用一会儿就不响应导航了"。
  */
 chrome.webNavigation.onCompleted.addListener((details) => {
-    // 只报主框架：子 iframe 加载完成不代表页面可用，报上去会让 navigate 提前返回
+    // 只报主框架：子 iframe 加载完成不代表页面可用，报上去会让 focus 提前返回
     if (details.frameId !== 0) return;
     for (const listener of readyListeners) listener(details.tabId, details.url);
 });
@@ -183,12 +192,20 @@ const evaluateInPage = async (tabId: number, code: string): Promise<string> => {
 /**
  * 等某个标签页导航完成。
  *
- * 与旧实现的差别：这里**不需要**轮询停止标志，也不需要比对 webview 身份 ——
- * `webNavigation.onCompleted` 本身就带 tabId，比"全局广播 + 身份比对"准确。
- * 唯一保留的是超时：页面可能一直加载不完（挂在某个永不返回的资源上）。
+ * 返回句柄而不是裸 Promise：调用方在 `tabs.reload` 失败时要能取消这次等待，
+ * 否则监听器与定时器会挂满一整个超时。曾经用 `readyListeners.clear()` 取消 ——
+ * 那是**全局**清理，一批里同时 focus 两个页面时会把另一个的等待一起杀掉。
+ *
+ * `probeLoaded` 是"订阅晚了一步"的补偿，只给建新标签页那条路用：那里 tabId 只有
+ * `tabs.create` 返回后才知道，而 `onCompleted` 可能已经错过。刷新那条路**不能**探测
+ * —— 那一刻页面还是 `complete` 的（新导航尚未开始），探测会把"还没刷新"当成"刷完了"。
  */
-const waitForReady = (tabId: number, timeoutMs = 15000): Promise<boolean> =>
-    new Promise<boolean>((resolve) => {
+const waitForReady = (
+    tabId: number,
+    probeLoaded = false,
+): { ready: Promise<boolean>; cancel: () => void } => {
+    let cancel: () => void = () => undefined;
+    const ready = new Promise<boolean>((resolve) => {
         let done = false;
         const finish = (ok: boolean) => {
             if (done) return;
@@ -201,8 +218,17 @@ const waitForReady = (tabId: number, timeoutMs = 15000): Promise<boolean> =>
             if (readyTabId === tabId) finish(true);
         };
         readyListeners.add(listener);
-        const timer = self.setTimeout(() => finish(false), timeoutMs);
+        const timer = self.setTimeout(() => finish(false), READY_TIMEOUT_MS);
+        cancel = () => finish(false);
+
+        if (probeLoaded) {
+            void chrome.tabs.get(tabId)
+                .then((tab) => { if (tab.status === 'complete') finish(true); })
+                .catch(() => undefined);
+        }
     });
+    return { ready, cancel };
+};
 
 /** 读页面的 localStorage / sessionStorage 原文。返回 JSON 字符串 */
 const readWebStorage = async (tabId: number, area: 'local' | 'session'): Promise<string> => {
@@ -365,37 +391,113 @@ const safeJson = (text: string): Record<string, unknown> | null => {
 const errorText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 /* ========================================================================== */
+/* 执行目标                                                                    */
+/* ========================================================================== */
+
+/**
+ * 模型指定的执行目标。
+ *
+ * ## 唯一权威
+ *
+ * `focus` 是**唯一写点**，其余每一个依赖页面的工具都读它。曾经取的是
+ * `chrome.tabs.query({active:true})` —— 于是"Agent 在哪个页面干活"这件事
+ * 跟着用户切标签页跑：用户切到别的网页工作，Agent 下一步就落到那个页面上，
+ * 而"Agent 跑着的时候用户在别处干活"是最常见不过的状态。
+ *
+ * ## 为什么存在 storage.session 而不是模块变量
+ *
+ * service worker 空闲约 30 秒就被回收，模块变量随之清零。存成变量的话，
+ * 用户隔一分钟再提问，模型看到历史里自己 focus 过，而宿主说"没 focus"——
+ * 它会以为工具坏了，转头再 focus 一遍，用户看到的是标签页被莫名刷新。
+ *
+ * 用 `storage.session` 而不是 `storage.local`：tabId 只在本次浏览器会话内有意义，
+ * 重启后编号会从头分配，存过期的 id 会让工具指向一个**陌生页面**。
+ */
+const FOCUS_STORE_KEY = 'agent-focus-tab';
+
+/**
+ * 当前目标页面。没有 focus 过、或那个标签页已被关掉时返回 null。
+ *
+ * 返回 null 是**正常状态**而不是故障：模型必须自己先 focus，这是本设计的
+ * 前提（见 tools.ts 的 NO_PAGE）。所以这里不做任何"回落到活动标签页"的兜底 ——
+ * 那会把这个前提悄悄取消掉，而模型永远不会知道自己没 focus 过。
+ *
+ * 标签页是否还活着由 `tabs.get` 现问，不在别处维护一个"还开着吗"的副本：
+ * 用户随时可能关掉它，而那个副本没有任何办法保持同步。
+ */
+const target = async (): Promise<AgentTab | null> => {
+    const got = await chrome.storage.session.get(FOCUS_STORE_KEY);
+    const tabId = got[FOCUS_STORE_KEY];
+    if (typeof tabId !== 'number') return null;
+    try {
+        const tab = await chrome.tabs.get(tabId);
+        return { id: tabId, url: tab.url || '' };
+    } catch {
+        return null;
+    }
+};
+
+/** 找已打开的、地址完全一致的那个标签页。用于"存在就刷新，不存在才新开" */
+const findTabByUrl = async (url: string): Promise<number | null> => {
+    const tabs = await chrome.tabs.query({});
+    const hit = tabs.find((tab) => tab.url === url && typeof tab.id === 'number');
+    return typeof hit?.id === 'number' ? hit.id : null;
+};
+
+/**
+ * 打开或刷新一个页面，并把它设为执行目标。
+ *
+ * 两条路都**不激活标签页**（`active: false` / 刷新本就不改激活状态）：抢焦点会把
+ * 用户从他正在看的页面赶走，而 Agent 的整个意义就是能在后台干活。
+ *
+ * 刷新是**强制的**，即使页面看起来已经加载完：模型要的是一份干净的页面
+ * （新的主世界、清掉的内存态、重新发的请求），而"已经打开了"不等于"已经就绪"。
+ */
+const focus = async (url: string): Promise<{ id: number; url: string; loaded: boolean }> => {
+    const existing = await findTabByUrl(url);
+    const tabId = existing ?? await createTab(url);
+
+    const { ready, cancel } = waitForReady(tabId, existing === null);
+    if (existing !== null) {
+        try {
+            await chrome.tabs.reload(existing);
+        } catch (e) {
+            // 取消这次等待：reload 在标签页刚被关掉时会 reject，不取消的话
+            // 监听器与定时器要挂满一整个超时。
+            cancel();
+            throw e;
+        }
+    }
+    const loaded = await ready;
+
+    await chrome.storage.session.set({ [FOCUS_STORE_KEY]: tabId });
+    const tab = await chrome.tabs.get(tabId);
+    return { id: tabId, url: tab.url || url, loaded };
+};
+
+/**
+ * 新建一个后台标签页，返回它的 id。
+ *
+ * tabId 要等 `create` 返回才知道，而那时导航可能已经跑完了 —— 所以新开这条路
+ * 要探测一次当前状态（见 waitForReady 的 probeLoaded）。刷新那条路**不能**探测：
+ * 那一刻页面还是加载完成的，会把"还没开始刷新"当成"刷完了"。
+ */
+const createTab = async (url: string): Promise<number> => {
+    const created = await chrome.tabs.create({ url, active: false });
+    if (typeof created.id !== 'number') throw new Error('新标签页没有返回 id');
+    return created.id;
+};
+
+/* ========================================================================== */
 /* 导出                                                                       */
 /* ========================================================================== */
 
-const activeTab = async (): Promise<AgentTab | null> => {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (typeof tab?.id !== 'number') return null;
-    return { id: tab.id, url: tab.url || '' };
-};
-
 export const pageHost: AgentHost = {
-    activeTab,
+    focus,
+    target,
 
     evaluate: evaluateInPage,
 
-    navigate: async (tabId: number, url: string) => {
-        /*
-         * 先订阅后导航：`chrome.tabs.update` 在地址非法时直接 reject，
-         * 那时等待必须能取消，否则监听器与定时器会泄漏到 15 秒超时。
-         */
-        const ready = waitForReady(tabId);
-        try {
-            await chrome.tabs.update(tabId, { url });
-        } catch (e) {
-            // 取消这次等待。没有 cancel 的话上面那个 Promise 会挂满 15 秒，
-            // 期间 readyListeners 里一直留着这个回调。
-            readyListeners.clear();
-            throw e;
-        }
-        const loaded = await ready;
-        return { url, loaded };
-    },
 
     readWebStorage,
     writeWebStorage,
@@ -424,7 +526,7 @@ export const pageHost: AgentHost = {
          * "改了没反应"，且没有任何报错。没有可用标签页时如实回 false。
          */
         applyRules: async (intercept, request, headers) => {
-            const tab = await activeTab();
+            const tab = await target();
             return applyRules(
                 { interceptRules: intercept, requestRules: request, headerRules: headers },
                 tab?.id ?? null,

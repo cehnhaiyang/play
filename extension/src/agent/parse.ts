@@ -110,7 +110,7 @@ const parseToolResult = (result: string): Record<string, unknown> | null => {
  * `{"error": null, "data": [...]}` 是合法值，按前缀判会被标成失败。
  * 必须解析出来看：**含 error 字段且它是非空字符串**才算错。
  *
- * 只管 tamper / storage / tokens / sandbox / navigate：它们的错误对象**只可能**
+ * 只管 tamper / storage / tokens / sandbox / focus：它们的错误对象**只可能**
  * 由我们构造，所以 `{error}` 就是失败。js 不适用 —— 它的返回值是页面数据，
  * 判据见 isJsErrorResult。
  */

@@ -30,8 +30,25 @@ export interface AgentTab {
 }
 
 export interface AgentHost {
-    /** 当前要操作的页面。没有可用页面时返回 null */
-    activeTab: () => Promise<AgentTab | null>;
+    /**
+     * 当前要操作的页面 —— 由模型用 `focus` 指定。没 focus 过、或那个标签页
+     * 已被关掉时返回 null。
+     */
+    target: () => Promise<AgentTab | null>;
+    /**
+     * 打开或刷新一个页面，把它交给模型当作后续所有页面工具的目标。
+     *
+     * **不激活标签页**（`active: false`）：用户往往正在别的网页里干活，把焦点抢过来
+     * 等于让 Agent 一动手就把人赶出他正在看的东西。这也正是这一层存在的理由 ——
+     * 以前"操作哪个页面"取自浏览器的活动标签页，于是 Agent 的目标跟着用户切标签页
+     * 跑；现在它由模型自己指定，用户切到哪儿都不影响。
+     *
+     * 已存在同地址的标签页时**强制刷新**它而不是新开一个：模型要的是一份干净的
+     * 页面（新的主世界、清掉的内存态），而不是又一张重复的标签页。
+     *
+     * 返回**最终**地址（重定向后会与请求的不同）：模型要靠它判断自己到底落在哪。
+     */
+    focus: (url: string) => Promise<{ id: number; url: string; loaded: boolean }>;
     /**
      * 在指定页面的主世界执行代码，返回**已序列化的观察值**。
      *
@@ -46,8 +63,6 @@ export interface AgentHost {
      * 不是调用方该关心的事。
      */
     evaluate: (tabId: number, code: string) => Promise<string>;
-    /** 导航并等页面就绪。返回最终地址 */
-    navigate: (tabId: number, url: string) => Promise<{ url: string; loaded: boolean }>;
 
     /** 读页面的 localStorage / sessionStorage 原文 */
     readWebStorage: (tabId: number, area: 'local' | 'session') => Promise<string>;
