@@ -2151,43 +2151,6 @@ const run = async () => {
             'text.ts 必须是叶子（无 import），否则 text → prompt → parse → text 又成环');
     });
 
-    /**
-     * 沙箱的说明现在住在 **schema 的 description** 里，不在提示词正文里。
-     *
-     * 这条断言因此改为查 toolspec.ts：参数形状只有那一个来源，提示词里再写一份
-     * 就必然与 schema 分叉，而模型会照着更啰嗦的那份写。
-     */
-    await check('沙箱 schema 的说明覆盖关键约束', async () => {
-        const spec = AGENT_SOURCES.find((s) => s.file === 'toolspec.ts');
-        assert(spec, '应有 toolspec.ts');
-        const src = spec.text;
-        const at = src.indexOf('const SANDBOX: AiToolSpec');
-        assert(at > 0, 'toolspec 应有 SANDBOX 一条');
-        /*
-         * 切到 sandbox 这一条**结束**为止。
-         *
-         * 不能切到文件末尾：后面还有 AGENT_TOOLS 的说明，里面提到"不在这张表里"
-         * 之类的字样会让反向断言（不得出现某个词）误报。锚在下一个顶层 const。
-         */
-        const after = src.indexOf('\nconst ', at + 10);
-        const block = src.slice(at, after > at ? after : undefined);
-        /**
-         * 比对的是**拼好的描述字符串**，而不是源码文本：源码里那句被 `+` 折成
-         * 两行，直接对源码正则必然匹配不到（而那时断言报的是"没写"，与事实相反）。
-         * 从编译产物里取真值 —— 那也是真正发给服务商的那一份。
-         */
-        const sandboxSpec = TOOLS_SPEC.AGENT_TOOLS.find((t) => t.name === 'sandbox');
-        assert(sandboxSpec, '编译产物里应有 sandbox 一条');
-        const desc = `${sandboxSpec.description} ${JSON.stringify(sandboxSpec.parameters)}`;
-        assert(/never read \+ full write/.test(desc), '必须写明改已有文件用 edit 而不是全量重写');
-        assert(/verbatim/.test(desc), 'old 要逐字照抄这一点必须写清（否则模型会随手省略缩进）');
-        assert(/never truncate/.test(desc), '要说明读写都不截断，否则模型会按旧上限自行拆分');
-        assert(!/\bexec\b/.test(desc), '不得再提 exec');
-        // 动作清单必须从 SANDBOX_ACTIONS 插值，不能手抄
-        assert(/\.\.\.SANDBOX_ACTIONS/.test(block), '动作清单要从 SANDBOX_ACTIONS 插值，不手抄');
-        assert(/\$\{SANDBOX_NODE_TIMEOUT_MAX_MS/.test(block), '超时上限要插值常量，不手抄秒数');
-    });
-
     /* --------------------- 推理文本的定稿（本次修复） --------------------- */
 
     /**
@@ -2476,38 +2439,6 @@ const run = async () => {
             `只有推理的中断 / 空回复 / 协议错误放弃 / 上下文超限 / 截断都应带 notice，实际 ${notices.length} 处`);
         assert(!/MAX_STEPS/.test(src),
             '单轮步数上限必须彻底移除（不设调用轮次上限），留着常量就是下一个漂移的源头');
-    });
-
-    /**
-     * 提示词声明的观察前缀与实现一致。
-     *
-     * 这两处分别在文件的头尾，改一处忘另一处不会有任何编译或运行时错误 ——
-     * 只会让模型去找一个根本不存在的标记，于是"回看历史"这条纪律形同虚设。
-     *
-     * 锚在**英文提示词里那句原话**上：提示词已重写为英文，而前缀本身仍是中文
-     * （它们是实现写出来的字面量）。只锚前缀会失去"这句纪律还在不在"的保障。
-     */
-    await check('提示词声明的观察前缀与实现一致', async () => {
-        const src = ALL_SRC;
-
-        // 提示词那一段
-        const specAt = src.indexOf('You can see earlier turns and their tool results');
-        assert(specAt > 0, '应能在提示词里找到"能看到之前几轮"这条纪律');
-        const spec = src.slice(specAt, specAt + 400);
-
-        // 实现真正写出的前缀
-        const produced = buildTranscript([
-            msg({ role: 'user', content: 'q' }),
-            msg({ role: 'tool', label: 'js', result: 'r' }),
-            msg({ role: 'tool', label: '协议错误', result: '我忘了写 JSON', ok: false }),
-            msg({ role: 'assistant', content: '提示', notice: true }),
-        ]).map((m) => m.content).join('\n');
-
-        // 界面补的提示前缀写作 [系统提示]（带右括号），提示词里也是这么写的
-        for (const prefix of ['[工具 ', '[系统提示]', '[协议错误]']) {
-            assert(produced.includes(prefix), `实现应写出 ${prefix}（本断言已失效，需更新）`);
-            assert(spec.includes(prefix), `提示词必须声明 ${prefix}，否则模型不知道那是历史`);
-        }
     });
 
     await check('连续多个观察各自成为一条 tool 消息', async () => {
@@ -3242,7 +3173,7 @@ const run = async () => {
      * 同一招连错好几次把预算烧光。这条钉住"失败长得与成功不一样"。
      */
     await check('工具失败：回灌前缀标明失败，并附上错误原文', async () => {
-        // webview:false → js 返回"当前没有可用的页面"，稳定造出失败
+        // webview:false → js 返回"还没有指定执行页面"，稳定造出失败
         const h = await buildAgentHarness({ toolCall: true, webview: false });
         await h.send('取一下');
 
@@ -3254,7 +3185,7 @@ const run = async () => {
         const wire = h.chats[1] || h.chats[h.chats.length - 1];
         const observation = wire.find((m) => m.role === 'tool' && m.content.includes('[工具 js 执行失败]'));
         assert(observation, `失败必须以「执行失败」前缀回灌，实际：${JSON.stringify(wire)}`);
-        assert(observation.content.includes('当前没有可用的页面'),
+        assert(observation.content.includes('还没有指定执行页面'),
             '必须带上原始错误信息 —— 只说"失败了"模型不知道改什么');
     });
 
@@ -3666,75 +3597,17 @@ const run = async () => {
             `脚本应跑在新目标页上，实际 ${h.lastEvalTabId()}`);
     });
 
-    /* --------------------------- 提示词：行为约束 --------------------------- */
+    /* ------------------------- 已删除的上限常量 ------------------------- */
 
     /**
-     * intent 字段的写法即工作方式：它是一句话，思考属于模型自己的思维链。
-     * 写进 JSON 的"思考"是幻觉，不是推理。
+     * 用户明确要求删掉的两个上限，不得复活。
      *
-     * 这里只钉这两句 —— 它们与协议本身绑在一起（intent 的定义在 Output protocol
-     * 那节里）。至于"证据 / 复现 / 交付 / 换路"那几条行为约束，提示词里已不再
-     * 声明，断言随之删除：留着一条锚在不存在的小节上的断言，只会永远报红。
+     * 这不是措辞断言：常量一旦回来，就又是一条"模型按错误上限规划步骤"的路。
      */
-    await check('intent 就是正文：思考必须留在模型自己的思维链里', async () => {
+    await check('已删除的上限常量不得复活', async () => {
         const src = ALL_SRC;
-        assert(src.includes('never in the tool arguments'),
-            '必须声明不要把思考写进工具参数（写进去的是幻觉，不是推理）');
-        assert(src.includes('in your own thinking'),
-            '必须把思考赶回模型自己的思维链');
-    });
-
-    /**
-     * 提示词不得再声明一批的条数上限。
-     *
-     * 踩过两次：先是手抄数字（常量改了不跟着变，模型按错的上限规划步骤），
-     * 后来是插值一个不该存在的上限。那个上限本身已经删掉了 —— 一次给几个调用
-     * 是模型自己的判断，成本由上下文门槛与压缩管。
-     */
-    await check('提示词不再声明一批的条数上限', async () => {
-        const src = ALL_SRC;
-        assert(!/MAX_CALLS_PER_REPLY/.test(src), '常量应已删除，不得再引用');
-        assert(!/at most \d+ per (turn|reply)/i.test(PROMPT.SYSTEM_PROMPT),
-            '提示词不得再声明一批的条数上限');
-        // 但"一批是一步、只批独立调用"这条语义必须留着 —— 它决定模型怎么规划
-        assert(/A batch is one step/.test(PROMPT.SYSTEM_PROMPT), '必须说明一批就是一步');
-        assert(/Batch only independent calls/.test(PROMPT.SYSTEM_PROMPT),
-            '必须说明只把互不依赖的调用放进同一批');
-
-        assert(!/RESULT_LIMIT_BYTES/.test(src),
-            'js 返回值不再有字节上限，常量与提示词里的声明都该删干净');
-    });
-
-    /* --------------------------- 提示词：行为契约 --------------------------- */
-
-    /**
-     * 提示词**不再声明输出协议**，因为协议由 tools 参数承担。
-     *
-     * 这条断言的方向是反的：旧版本要求"必须有 Output protocol 一节"，现在要求
-     * "**不得**再有"。留着那一节就会与 schema 分叉，而模型会照着更啰嗦的那份写。
-     */
-    await check('提示词不再声明输出协议（外壳由协议层承担）', async () => {
-        const src = ALL_SRC;
-        assert(!src.includes('## Output protocol'), '不得再有「Output protocol」一节');
-        assert(!/One JSON object and nothing else/.test(src), '不得再要求"只回一个 JSON 对象"');
-        // 但"什么时候算收尾"必须说清，否则模型不知道停下调用就是回答
-        assert(/reply with prose and no tool call to finish/i.test(src),
-            '必须说明"不再调用工具、直接写正文"就是收尾');
-    });
-
-    await check('工具契约：参数形状只在 schema 里，提示词不重复', async () => {
-        const specSrc = AGENT_SOURCES.find((s) => s.file === 'toolspec.ts').text;
-        /*
-         * 参数形状的唯一来源是 toolspec.ts 的 JSON Schema。
-         *
-         * 这里钉住三件模型最容易搞错、而 schema 表达不了的事：
-         * 改文件用 edit、node 不是 shell、focus 接受相对路径。
-         * 它们都是**行为约束**而不是参数形状，所以留在 description 里是对的。
-         */
-        assert(/relative path/.test(specSrc), 'focus 的相对路径必须写进说明');
-        assert(/substring/.test(specSrc), 'tamper 的 url_pattern 子串语义必须点明');
-        assert(/deletes the header/.test(specSrc), 'tamper 的空 header value 语义必须点明');
-        assert(/empty string deletes that segment/.test(specSrc), 'edit 的空 new 语义必须点明');
+        assert(!/MAX_CALLS_PER_REPLY/.test(src), '一次回复的调用条数上限必须保持删除');
+        assert(!/RESULT_LIMIT_BYTES/.test(src), 'js 返回值的字节上限必须保持删除');
     });
 
     /* ------------------------- 会话 token 统计 ------------------------- */

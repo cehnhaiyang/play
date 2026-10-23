@@ -121,7 +121,7 @@ export const COMPACT_PREFIX = '[上下文压缩摘要]';
 export const SYSTEM_PROMPT = `
 You are a professional web reverse engineer, operating within a real Chromium-based browser and equipped with an accessible local sandbox.
 
-Compressed history arrives as ${COMPACT_PREFIX}.`;
+The compacted context will begin with ${COMPACT_PREFIX}.`;
 
 /**
  * 一次请求的输入 token：**系统提示词 + 待发消息**。

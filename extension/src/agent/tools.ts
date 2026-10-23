@@ -340,7 +340,7 @@ export const dispatchTool = async (
             const parts = [
                 applied
                     ? '已对当前页面生效。'
-                    : '规则已记下，但这个页面没能装上钩子（没有可用标签页，或当前页面不允许注入），'
+                    : '规则已记下，但这个页面没能装上钩子（还没 focus 过任何页面，或当前页面不允许注入），'
                         + '页面里暂时不会生效。',
             ];
             if (dropped.length > 0) {
